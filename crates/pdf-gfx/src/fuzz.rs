@@ -641,11 +641,14 @@ fn check_fallback(text: &str) {
             };
             let faces = faces.unwrap_or_default();
             for line in &out.lines {
-                assert_eq!(line.cell_faces.len(), line.cells.len());
                 assert!((line.ascent >= 0.0 && line.descent <= 0.0) || !line.ascent.is_finite());
                 if !line.cells.is_empty() {
-                    // Each cell in its unit's face, the units in order.
-                    assert_eq!(&line.cell_faces[..], &faces[..line.cells.len()]);
+                    // Each cell in its unit's face and text range, the units in order.
+                    let cell_faces: Vec<usize> = line.cells.iter().map(|c| c.face).collect();
+                    assert_eq!(&cell_faces[..], &faces[..line.cells.len()]);
+                    for (cell, &(at, unit)) in line.cells.iter().zip(all.iter().flatten()) {
+                        assert_eq!(cell.text, at..at + unit.len());
+                    }
                     continue;
                 }
                 let mut end = 0;
@@ -698,7 +701,7 @@ fn check_fallback(text: &str) {
                 Err(Unreadable::new(id, Why::Damaged, "no streams"))
             });
             let codes: usize = (out.lines.iter())
-                .map(|l| l.codes.len() + l.cells.iter().map(|(_, c)| c.len()).sum::<usize>())
+                .map(|l| l.codes.len() + l.cells.iter().map(|c| c.codes.len()).sum::<usize>())
                 .sum();
             let summary = interpret(
                 streams,

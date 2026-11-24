@@ -131,6 +131,7 @@ fn public_types_are_send_and_sync() {
         check::<crate::WrapMode>();
         check::<crate::TextBoxStyle>();
         check::<crate::UnencodableChar>();
+        check::<crate::LaidOutCell>();
         check::<crate::LaidOutLine>();
         check::<crate::LaidOutText>();
         check::<crate::LaidOutRun>();
@@ -2236,7 +2237,7 @@ fn canvas_text_box_wrapping_alignment_autosize_comb_and_custom_fonts() {
         .unwrap();
     assert!(!comb_laid.overflowed);
     assert_eq!(comb_laid.lines[0].cells.len(), 2);
-    assert!(comb_laid.lines[0].cells[0].0.x > 36.0 + 80.0);
+    assert!(comb_laid.lines[0].cells[0].origin.x > 36.0 + 80.0);
 
     // 4. Unencodable character returns Err without mutating the canvas.
     let (before_bytes, _) = canvas.named(&Reserved::default());
@@ -4009,7 +4010,7 @@ fn font_heights_as_given_drops_the_floors() {
         ..style(true, VerticalAlign::Middle)
     };
     let laid = layout_text(&short, "ab", rect, &comb).unwrap();
-    assert_approx(laid.lines[0].cells[0].0.y, 23.0);
+    assert_approx(laid.lines[0].cells[0].origin.y, 23.0);
 
     // Heights that give none: the floors all the same, so no step is 0. A
     // descent above the ascent (a flipped Type 3 font), heights not finite,
@@ -4782,21 +4783,26 @@ mod fallback {
         let laid = layout_text(&set, text, BOX, &comb(4, true)).unwrap();
         let line = &laid.lines[0];
         assert!(!laid.overflowed);
-        assert_eq!(line.cell_faces, [0, 1, 0]);
-        let codes: Vec<&[u8]> = line.cells.iter().map(|(_, c)| c.as_slice()).collect();
+        let faces: Vec<usize> = line.cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [0, 1, 0]);
+        let codes: Vec<&[u8]> = line.cells.iter().map(|c| c.codes.as_slice()).collect();
         assert_eq!(codes, [&[1][..], &[101, 102], &[2]]);
+        let ranges: Vec<_> = line.cells.iter().map(|c| c.text.clone()).collect();
+        assert_eq!(ranges, [0..1, 1..4, 4..5]);
+        assert!(!format!("{laid:?}").contains("101"));
         assert!(line.runs.is_empty() && line.codes.is_empty());
         // Each cell is 50 wide: the cluster is 8 wide, 400 units twice.
-        assert_approx(line.cells[0].0.x, 22.5);
-        assert_approx(line.cells[1].0.x, 50.0 + 21.0);
-        assert_approx(line.cells[2].0.x, 100.0 + 22.5);
+        assert_approx(line.cells[0].origin.x, 22.5);
+        assert_approx(line.cells[1].origin.x, 50.0 + 21.0);
+        assert_approx(line.cells[2].origin.x, 100.0 + 22.5);
         // The second face is drawn: its heights, 10 and -4, widen the line.
         assert_approx(line.ascent, 10.0);
         assert_approx(line.descent, -4.0);
 
         // A character at a time, the mark is a cell of its own.
         let laid = layout_text(&set, text, BOX, &comb(4, false)).unwrap();
-        assert_eq!(laid.lines[0].cell_faces, [0, 0, 1, 0]);
+        let faces: Vec<usize> = laid.lines[0].cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [0, 0, 1, 0]);
         // Three clusters past two cells: two drawn, and the text overflows;
         // in three they fit.
         let laid = layout_text(&set, text, BOX, &comb(2, true)).unwrap();
@@ -4815,7 +4821,8 @@ mod fallback {
         assert_approx(laid.lines[0].descent, -2.0);
         let set = WithFallback::new(&LATIN, &LAST, named(201));
         let laid = layout_text(&set, "z", BOX, &comb(4, true)).unwrap();
-        assert_eq!(laid.lines[0].cell_faces, [1]);
+        let faces: Vec<usize> = laid.lines[0].cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [1]);
         assert_approx(laid.lines[0].ascent, 8.0);
         assert_approx(laid.lines[0].descent, -3.0);
     }
@@ -4833,7 +4840,8 @@ mod fallback {
         let text = "abcd\u{E9}";
         let laid = layout_text(&set, text, BOX, &comb).unwrap();
         assert!(laid.overflowed);
-        assert_eq!(laid.lines[0].cell_faces, [0; 4]);
+        let faces: Vec<usize> = laid.lines[0].cells.iter().map(|c| c.face).collect();
+        assert_eq!(faces, [0; 4]);
         // The `é` isn't drawn, so the line has the first face's heights alone.
         assert_approx(laid.lines[0].ascent, 8.0);
         assert_approx(laid.lines[0].descent, -2.0);

@@ -193,7 +193,7 @@ pub use state::{
 pub use text::{Glyph, Glyphs, TextShow};
 #[cfg(feature = "text-layout")]
 pub use wrap::{
-    FontEncoder, FontSet, LaidOutLine, LaidOutRun, LaidOutText, LayoutFont, TextAlign,
+    FontEncoder, FontSet, LaidOutCell, LaidOutLine, LaidOutRun, LaidOutText, LayoutFont, TextAlign,
     TextBoxError, TextBoxStyle, UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for,
     layout_text,
 };

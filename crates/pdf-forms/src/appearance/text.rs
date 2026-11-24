@@ -497,12 +497,8 @@ impl Made {
                     line.codes.get(run.codes.clone()),
                 );
             }
-            // A comb line's cells, each a cluster of the text in order.
-            let cells = line.cells.iter().zip(&line.cell_faces);
-            for ((_, unit), ((_, codes), &drawn)) in clusters(&self.shown.text).zip(cells) {
-                if drawn == face {
-                    keep(Some(unit), Some(codes));
-                }
+            for cell in line.cells.iter().filter(|cell| cell.face == face) {
+                keep(self.shown.text.get(cell.text.clone()), Some(&cell.codes));
             }
         }
         glyphs
@@ -521,7 +517,7 @@ fn resources<F: FontSet + ?Sized>(
 ) -> Result<Vec<Res>, Unmade> {
     let drawn = || {
         (laid.lines.iter()).flat_map(|line| {
-            (line.runs.iter().map(|run| run.face)).chain(line.cell_faces.iter().copied())
+            (line.runs.iter().map(|run| run.face)).chain(line.cells.iter().map(|cell| cell.face))
         })
     };
     let last = drawn().max().unwrap_or(0);
@@ -741,7 +737,7 @@ fn placeable(laid: &LaidOutText) -> bool {
             };
             within(line.origin, &line.codes, line.word_space)
                 && line.runs.iter().all(run)
-                && (line.cells.iter()).all(|(at, codes)| within(*at, codes, 0.0))
+                && (line.cells.iter()).all(|cell| within(cell.origin, &cell.codes, 0.0))
         })
 }
 
