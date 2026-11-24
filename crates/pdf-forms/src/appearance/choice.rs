@@ -55,13 +55,16 @@ impl fmt::Debug for ComboBox<'_> {
 /// What a list box shows, as plain data: its options' labels in order,
 /// which of them are selected, and the first shown at its top.
 ///
-/// It may gain fields: build it with [`new`](Self::new) and set them.
+/// The labels are a slice of any text, `S`: `&str` by default, or `String`
+/// as [`FieldChoice::labels`](super::FieldChoice::labels) has them, so
+/// neither a caller's own model nor the read layer copies them to make a
+/// list. It may gain fields: build it with [`new`](Self::new) and set them.
 /// `Debug` prints counts, never a label.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ListBox<'a> {
+pub struct ListBox<'a, S = &'a str> {
     /// The options' labels, in the order they're listed.
-    pub labels: &'a [&'a str],
+    pub labels: &'a [S],
     /// The indexes in [`labels`](Self::labels) of the selected options, in
     /// any order; an index given twice, or past the labels, adds nothing.
     pub selected: &'a [usize],
@@ -70,10 +73,10 @@ pub struct ListBox<'a> {
     pub top: usize,
 }
 
-impl<'a> ListBox<'a> {
+impl<'a, S> ListBox<'a, S> {
     /// A list box of `labels`, none selected, from the first.
     #[must_use]
-    pub const fn new(labels: &'a [&'a str]) -> ListBox<'a> {
+    pub const fn new(labels: &'a [S]) -> ListBox<'a, S> {
         ListBox {
             labels,
             selected: &[],
@@ -82,7 +85,16 @@ impl<'a> ListBox<'a> {
     }
 }
 
-impl fmt::Debug for ListBox<'_> {
+// Borrows alone, so a copy whatever the labels are.
+impl<S> Clone for ListBox<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S> Copy for ListBox<'_, S> {}
+
+impl<S> fmt::Debug for ListBox<'_, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ListBox")
             .field("labels", &self.labels.len())
@@ -346,8 +358,8 @@ fn drop_button(canvas: &mut Canvas, rect: Rect) {
 /// [`labels`](ListBox::labels), and the character and its byte offset in
 /// that label. Never [`Unmade::NotChoice`], [`Unmade::FontNotBindable`],
 /// or [`Unmade::Unreadable`], which are the read layer's.
-pub fn list_box<F: LayoutFont + ?Sized>(
-    field: &ListBox<'_>,
+pub fn list_box<S: AsRef<str>, F: LayoutFont + ?Sized>(
+    field: &ListBox<'_, S>,
     look: &WidgetLook<'_>,
     da: &DefaultAppearance,
     font_res: Res,
@@ -359,7 +371,8 @@ pub fn list_box<F: LayoutFont + ?Sized>(
         return Err(Unmade::Limit(Cap::Items));
     }
     let bytes = shown.iter().try_fold(0usize, |n, label| {
-        n.checked_add(label.len()).filter(|n| *n <= limits.text)
+        n.checked_add(label.as_ref().len())
+            .filter(|n| *n <= limits.text)
     });
     if bytes.is_none() {
         return Err(Unmade::Limit(Cap::Text));
@@ -396,15 +409,13 @@ pub fn list_box<F: LayoutFont + ?Sized>(
                 break;
             }
             let rect = Rect::new(client.x0, top - height, client.x1, top);
-            let laid =
-                line::one_line(label, rect, Some(size), TextAlign::Left, font).map_err(|err| {
-                    match err {
-                        Unmade::Unencodable(character) => Unmade::UnencodableOption {
-                            option: field.top + at,
-                            character,
-                        },
-                        other => other,
-                    }
+            let laid = line::one_line(label.as_ref(), rect, Some(size), TextAlign::Left, font)
+                .map_err(|err| match err {
+                    Unmade::Unencodable(character) => Unmade::UnencodableOption {
+                        option: field.top + at,
+                        character,
+                    },
+                    other => other,
                 })?;
             overflowed |=
                 is_bigger(client.y0, rect.y0) || laid.as_ref().is_some_and(|l| l.overflowed);

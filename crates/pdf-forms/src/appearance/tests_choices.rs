@@ -11,8 +11,8 @@ use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams, Unreadable, Why, WithStreams, dict};
 
 use super::{
-    Appearance, ComboBox, FieldFont, ListBox, Unmade, WidgetChoice, WidgetLook, choice_for_widget,
-    combo_box, list_box, widget_choice,
+    Appearance, ComboBox, FieldChoice, FieldFont, ListBox, Unmade, WidgetChoice, WidgetLook,
+    choice_for_widget, combo_box, field_choice, list_box, widget_choice,
 };
 use crate::{Cap, Fault, Form, Limits};
 
@@ -493,7 +493,7 @@ fn a_choice_widget_is_read_for_its_text_or_its_options() {
             .unwrap();
         let read = |name: &str| {
             let field = &form.fields()[form.find(name).unwrap()];
-            widget_choice(field, &field.widgets()[0], source, rules, &limits, &mut ()).unwrap()
+            field_choice(field, source, rules, &limits, &mut ()).unwrap()
         };
         for (name, shown) in [
             ("label", "Label two"),
@@ -513,8 +513,161 @@ fn a_choice_widget_is_read_for_its_text_or_its_options() {
         assert!(!multi.is_combo() && multi.combo().is_none());
         assert_eq!(multi.labels(), ["Label one", "Label two", "plain"]);
         assert_eq!((multi.selected(), multi.top()), (&[0, 2][..], 1));
-        assert_eq!(multi.font_name(), Some(&b"Helv"[..]));
+        let list = multi.list().unwrap();
+        assert_eq!(list.labels, multi.labels());
+        assert_eq!((list.selected, list.top), (&[0, 2][..], 1));
+        let field = &form.fields()[form.find("lists.multi").unwrap()];
+        let widget = &field.widgets()[0];
+        let of_widget = widget_choice(field, widget, &multi, source, rules, &limits, &mut ());
+        let of_widget = of_widget.unwrap();
+        assert!(std::ptr::eq(of_widget.choice(), &multi));
+        assert_eq!(of_widget.font_name(), Some(&b"Helv"[..]));
+        // The labels are lent to the maker as they're held.
+        let font = helvetica();
+        let res = font.res().unwrap();
+        assert_eq!(
+            of_widget.make(res.clone(), &font.layout(), &limits),
+            list_box(
+                &list,
+                &of_widget.look(),
+                of_widget.default_appearance(),
+                res,
+                &font.layout(),
+                &limits
+            )
+        );
     }
+}
+
+/// With no value nothing is selected, whatever `/I` has: a list box
+/// highlights no line and a combo box shows no text, the default value
+/// (`/DV`) aside too.
+#[test]
+fn no_value_selects_nothing_whatever_the_indices() {
+    let abc = || {
+        vec![
+            Object::text("alpha"),
+            Object::text("bravo"),
+            Object::text("charlie"),
+        ]
+    };
+    let list = |name: &str, more: Dict| {
+        let mut entries = dict! {
+            "T" => Object::text(name),
+            "DA" => Object::text("/Helv 10 Tf 0 g"),
+            "Opt" => abc(),
+            "Rect" => vec![Object::from(0), Object::from(0), Object::from(80), Object::from(40)],
+        };
+        for (key, value) in more.iter() {
+            entries.set(key.to_vec(), value.clone());
+        }
+        choice(entries)
+    };
+    let fields = vec![
+        list("one", dict! { "I" => vec![Object::from(1)] }),
+        list(
+            "two",
+            dict! { "Ff" => 1 << 21, "I" => vec![Object::from(0), Object::from(2)] },
+        ),
+        list("bare", dict! { "I" => 1 }),
+        list(
+            "name",
+            dict! { "V" => Object::name("bravo"), "I" => vec![Object::from(1)] },
+        ),
+        list(
+            "empty",
+            dict! { "V" => Vec::<Object>::new(), "I" => vec![Object::from(1)] },
+        ),
+        list(
+            "combo",
+            dict! { "Ff" => 1 << 17, "I" => vec![Object::from(1)], "DV" => Object::text("bravo") },
+        ),
+    ];
+    let (objects, catalog) = form_of(fields, Vec::new());
+    let source = reading(&objects);
+    let limits = Limits::DEFAULT;
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let form = Form::read(source, &catalog, rules, &limits)
+            .unwrap()
+            .unwrap();
+        for field in form.fields() {
+            let name = field.partial_name().unwrap();
+            assert_eq!(field.selection(source, rules, &limits), Ok(Vec::new()));
+            let read = field_choice(field, source, rules, &limits, &mut ()).unwrap();
+            assert!(read.selected().is_empty(), "{name}");
+            let widget = &field.widgets()[0];
+            let made = choice_for_widget(&form, field, widget, source, rules, &limits, &mut ());
+            let content = made.unwrap().appearance.content;
+            let content = String::from_utf8(content).unwrap();
+            assert!(
+                !content.contains("0 0.2 0.4431 rg\n"),
+                "{name}: a highlight"
+            );
+            match read.combo() {
+                Some(combo) => assert!(combo.text.is_empty() && content.contains("/Tx BMC\nEMC\n")),
+                None => assert_eq!(shown(content.as_bytes()).len(), 3, "{name}"),
+            }
+        }
+    }
+}
+
+/// A field's options are decoded once for all its widgets: what's wrong
+/// in `/Opt` and `/V` is told by `field_choice`, once, and reading each
+/// widget tells only what's the widget's.
+#[test]
+fn a_fields_options_are_read_once_for_its_widgets() {
+    let kids: Vec<Object> = (30..34).map(|n| Object::from(id(n))).collect();
+    let fields = vec![dict! {
+        "T" => Object::text("list"),
+        "FT" => Object::name("Ch"),
+        "DA" => Object::text("/Helv 10 Tf 0 g"),
+        "Opt" => vec![Object::text("alpha"), Object::from(7), Object::text("charlie")],
+        "V" => Object::name("alpha"),
+        "Kids" => kids,
+    }];
+    let widgets = (30..34)
+        .map(|n| {
+            let widget = dict! {
+                "Parent" => id(10),
+                "Subtype" => Object::name("Widget"),
+                "Rect" => vec![Object::from(0), Object::from(0), Object::from(80), Object::from(40)],
+            };
+            (n, Object::from(widget))
+        })
+        .collect();
+    let (objects, catalog) = form_of(fields, widgets);
+    let source = reading(&objects);
+    let limits = Limits::DEFAULT;
+    let form = Form::read(source, &catalog, Rules::Iso, &limits)
+        .unwrap()
+        .unwrap();
+    let field = &form.fields()[0];
+    assert_eq!(field.widgets().len(), 4);
+
+    let mut told: Vec<(Place, Fault)> = Vec::new();
+    let read = field_choice(field, source, Rules::Iso, &limits, &mut told).unwrap();
+    let of = |key| {
+        let wrong = Fault::WrongType { key };
+        told.iter().filter(|(_, fault)| *fault == wrong).count()
+    };
+    assert_eq!((of("Opt"), of("V"), told.len()), (1, 1, 2));
+    assert_eq!(read.labels(), ["alpha", "", "charlie"]);
+
+    let mut of_widgets: Vec<(Place, Fault)> = Vec::new();
+    for widget in field.widgets() {
+        let one = widget_choice(
+            field,
+            widget,
+            &read,
+            source,
+            Rules::Iso,
+            &limits,
+            &mut of_widgets,
+        )
+        .unwrap();
+        assert!(std::ptr::eq(one.choice(), &read));
+    }
+    assert!(of_widgets.is_empty(), "{of_widgets:?}");
 }
 
 /// A field of another kind is `NotChoice`; a default appearance naming no
@@ -567,9 +720,20 @@ fn a_choice_is_made_from_its_widget_in_its_font() {
     let [combo, list, unnamed, text_field, button] = form.fields() else {
         panic!("five fields")
     };
+    let of_combo = field_choice(combo, source, Rules::Iso, &limits, &mut ()).unwrap();
     for field in [text_field, button] {
         let widget = &field.widgets()[0];
-        let read = widget_choice(field, widget, source, Rules::Iso, &limits, &mut ());
+        let read = field_choice(field, source, Rules::Iso, &limits, &mut ());
+        assert_eq!(read.unwrap_err(), Unmade::NotChoice);
+        let read = widget_choice(
+            field,
+            widget,
+            &of_combo,
+            source,
+            Rules::Iso,
+            &limits,
+            &mut (),
+        );
         assert_eq!(read.unwrap_err(), Unmade::NotChoice);
         let made = choice_for_widget(&form, field, widget, source, Rules::Iso, &limits, &mut ());
         assert_eq!(made.unwrap_err(), Unmade::NotChoice);
@@ -579,7 +743,11 @@ fn a_choice_is_made_from_its_widget_in_its_font() {
         let field: &crate::Field<'_> = field;
         let widget = &field.widgets()[0];
         let mut told: Vec<(Place, Fault)> = Vec::new();
-        let read = widget_choice(field, widget, source, Rules::Iso, &limits, &mut told).unwrap();
+        let read = field_choice(field, source, Rules::Iso, &limits, &mut told).unwrap();
+        let font_name = widget_choice(field, widget, &read, source, Rules::Iso, &limits, &mut told)
+            .unwrap()
+            .font_name()
+            .map(<[u8]>::to_vec);
         let mut faults: Vec<(Place, Fault)> = Vec::new();
         let made = choice_for_widget(
             &form,
@@ -591,16 +759,18 @@ fn a_choice_is_made_from_its_widget_in_its_font() {
             &mut faults,
         )
         .unwrap();
-        (read, told, made, faults)
+        (read, font_name, told, made, faults)
     };
 
     // In the default resources' font.
-    let (read, told, made, faults) = made_of(combo);
+    let (read, _, told, made, faults) = made_of(combo);
     assert!(told.is_empty() && faults.is_empty());
     assert!(!made.font.is_fallback());
     assert_eq!(made.font_name.as_deref(), Some(&b"Helv"[..]));
     let font = form.field_font(source, b"Helv", &limits, &mut ()).unwrap();
-    let expected = read
+    let widget = &combo.widgets()[0];
+    let expected = widget_choice(combo, widget, &read, source, Rules::Iso, &limits, &mut ())
+        .unwrap()
         .make(font.res().unwrap(), &font.layout(), &limits)
         .unwrap();
     assert_eq!(made.appearance, expected);
@@ -608,7 +778,7 @@ fn a_choice_is_made_from_its_widget_in_its_font() {
 
     // A font the default resources lack: the standard 14 family its name
     // gives, told.
-    let (read, told, made, faults) = made_of(list);
+    let (read, _, told, made, faults) = made_of(list);
     assert!(told.is_empty());
     assert_eq!(faults.len(), 1);
     assert_eq!(faults[0].1, Fault::FontNotInResources);
@@ -618,12 +788,12 @@ fn a_choice_is_made_from_its_widget_in_its_font() {
     assert_eq!(shown(&made.appearance.content).len(), 3);
 
     // No font named: Helvetica, told; a value that is a name is none, told.
-    let (read, told, made, faults) = made_of(unnamed);
+    let (read, font_name, told, made, faults) = made_of(unnamed);
     let at = Place::new(unnamed.id(), None);
     assert!(told.contains(&(at, Fault::MissingDefaultAppearance)));
     assert!(told.contains(&(at, Fault::WrongType { key: "V" })));
     assert_eq!(faults, told);
-    assert!(read.selected().is_empty() && read.font_name().is_none());
+    assert!(read.selected().is_empty() && font_name.is_none());
     assert_eq!(made.font.res(), helvetica().res());
     assert_eq!(made.font_name, None);
 }
@@ -662,10 +832,20 @@ fn debug_prints_no_text_or_label() {
         .unwrap();
     for field in form.fields() {
         let widget = &field.widgets()[0];
-        let read = widget_choice(field, widget, source, Rules::Iso, &limits, &mut ()).unwrap();
+        let of_field = field_choice(field, source, Rules::Iso, &limits, &mut ()).unwrap();
+        let read = widget_choice(
+            field,
+            widget,
+            &of_field,
+            source,
+            Rules::Iso,
+            &limits,
+            &mut (),
+        )
+        .unwrap();
         let made =
             choice_for_widget(&form, field, widget, source, Rules::Iso, &limits, &mut ()).unwrap();
-        let shown = format!("{read:?} {made:?}");
+        let shown = format!("{of_field:?} {read:?} {made:?}");
         for secret in ["Zq#7", "Wq#9", "Helv"] {
             assert!(!shown.contains(secret), "{secret} in {shown}");
         }
@@ -677,5 +857,7 @@ fn choice_types_are_send_and_sync() {
     fn both<T: Send + Sync>() {}
     both::<ComboBox<'_>>();
     both::<ListBox<'_>>();
-    both::<WidgetChoice>();
+    both::<ListBox<'_, String>>();
+    both::<FieldChoice>();
+    both::<WidgetChoice<'_>>();
 }

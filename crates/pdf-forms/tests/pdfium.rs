@@ -1305,6 +1305,7 @@ fn pressed_here(name: &str) -> (Vec<String>, Vec<(String, String)>) {
         let (group, states) = groups.entry(field).or_insert_with(|| {
             let group = form.fields()[field]
                 .group(objects, Rules::Pdfium, &Limits::DEFAULT)
+                .unwrap()
                 .unwrap();
             let states = group.states().to_vec();
             (group, states)

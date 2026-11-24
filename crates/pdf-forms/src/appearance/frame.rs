@@ -172,6 +172,7 @@ pub enum Unmade {
     #[error("the push button shows an icon, which isn't drawn")]
     Icon,
     /// The field isn't a choice field: a combo box or a list box, for
+    /// [`field_choice`](super::field_choice),
     /// [`widget_choice`](super::widget_choice) and
     /// [`choice_for_widget`](super::choice_for_widget).
     #[error("the field isn't a choice field")]

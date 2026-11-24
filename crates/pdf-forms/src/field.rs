@@ -359,6 +359,10 @@ impl<'o> Field<'o> {
 /// one that reaches a damaged object or a reference loop is told by it, so
 /// `Form::read` reads such a form as it would one without the entry.
 ///
+/// `/TI`, a number, is read with the field, as `/Q` and `/MaxLen` are, so
+/// [`top_index`](Self::top_index) takes no objects, and one the reader
+/// can't read fails `Form::read` as theirs does.
+///
 /// `/Opt`, `/I`, and `/TI` are the field's own, else the nearest
 /// ancestor's, under either rules: ISO 32000-2 marks a button field's `/Opt`
 /// inheritable (Table 230) and says nothing of the kind for a choice field's
@@ -414,12 +418,42 @@ impl<'o> Field<'o> {
         read_options(&mut reader, entry)
     }
 
+    /// How many items the field's `/Opt` array has, each decoded or not;
+    /// none where there's no `/Opt`, or it's no array. Nothing is decoded,
+    /// counted against [`Limits::items`], or told: what's wrong in `/Opt` is
+    /// [`options_with`](Self::options_with)'s to tell. A check box or radio
+    /// button field with an `/Opt` array, even an empty one, names the on
+    /// states it has no name for by its widgets' indexes
+    /// ([`Group::has_opt`](crate::group::Group::has_opt)), which this tells
+    /// apart from a field with no `/Opt`, as an empty
+    /// [`options`](Self::options) doesn't.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unreadable`] on locked, I/O, or reader-cap failures.
+    pub fn option_count<R: Resolve<'o>>(
+        &self,
+        objects: R,
+        rules: Rules,
+        limits: &Limits,
+    ) -> Result<Option<usize>, Error> {
+        let mut reader = Reader {
+            objects,
+            rules,
+            limits,
+            sink: &mut (),
+        };
+        let entry = reach(&mut reader, self.options)?;
+        Ok(entry.and_then(|(object, _)| object.as_array().map(<[Object]>::len)))
+    }
+
     /// The index in [`options`](Self::options) of the first option a list
     /// box shows at its top (`/TI`); 0 where there is none, or it's less
-    /// than 0.
+    /// than 0. Unlike `/Opt` and `/I`, the entry is read with the field, as
+    /// `/Q` and `/MaxLen` are.
     #[must_use]
-    pub fn top_index(&self) -> u32 {
-        self.top_index.unwrap_or(0)
+    pub fn top_index(&self) -> usize {
+        usize::try_from(self.top_index.unwrap_or(0)).unwrap_or(usize::MAX)
     }
 
     /// The indexes in [`options`](Self::options) of the selected options as
@@ -440,7 +474,7 @@ impl<'o> Field<'o> {
         objects: R,
         rules: Rules,
         limits: &Limits,
-    ) -> Result<Vec<u32>, Error> {
+    ) -> Result<Vec<usize>, Error> {
         self.selected_with(objects, rules, limits, &mut ())
     }
 
@@ -456,7 +490,7 @@ impl<'o> Field<'o> {
         rules: Rules,
         limits: &Limits,
         sink: &mut S,
-    ) -> Result<Vec<u32>, Error> {
+    ) -> Result<Vec<usize>, Error> {
         let mut reader = Reader {
             objects,
             rules,
@@ -468,9 +502,9 @@ impl<'o> Field<'o> {
     }
 
     /// The indexes in [`options`](Self::options) of the options the field's
-    /// value selects, by [`selection`](crate::selection) over its options,
-    /// `/I`, and `/V`'s text strings (a value that is no text string, or
-    /// array of them, is none).
+    /// value selects, by [`selected_options`] over its options, `/I`, and
+    /// `/V`'s text strings (a value that is no text string, or array of
+    /// them, is none, and selects nothing).
     ///
     /// # Errors
     ///
@@ -513,15 +547,16 @@ impl<'o> Field<'o> {
             Some(FieldValue::Items(items)) => items.iter().map(String::as_str).collect(),
             _ => Vec::new(),
         };
-        Ok(selection(&options, &indices, &values))
+        Ok(selected_options(&options, &indices, &values))
     }
 
     /// The field's widgets as a check box or radio button group, for
     /// [`crate::group`]'s rules: its kind, its NoToggleToOff and
     /// RadiosInUnison flags, each widget's on state ([`Widget::states`])
     /// and export value (its entry in [`options`](Self::options)), and each
-    /// widget's state as its `/AS` has it. A field that is neither a check
-    /// box nor a radio button field is a group of no widgets.
+    /// widget's state as its `/AS` has it. None for a field that is neither
+    /// a check box nor a radio button field: a text or choice field, a push
+    /// button, or a field with no type.
     ///
     /// # Errors
     ///
@@ -531,7 +566,7 @@ impl<'o> Field<'o> {
         objects: R,
         rules: Rules,
         limits: &Limits,
-    ) -> Result<FieldGroup, Error> {
+    ) -> Result<Option<FieldGroup>, Error> {
         self.group_with(objects, rules, limits, &mut ())
     }
 
@@ -547,22 +582,24 @@ impl<'o> Field<'o> {
         rules: Rules,
         limits: &Limits,
         sink: &mut S,
-    ) -> Result<FieldGroup, Error> {
+    ) -> Result<Option<FieldGroup>, Error> {
         let kind = match self.kind {
             Some(FieldKind::CheckBox) => GroupKind::CheckBox,
             Some(FieldKind::Radio) => GroupKind::Radio,
-            _ => {
-                return Ok(FieldGroup::new(
-                    GroupKind::CheckBox,
-                    false,
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                ));
-            }
+            _ => return Ok(None),
         };
         let objects: &dyn Resolve<'o> = &objects;
-        let options = self.options_with(objects, rules, limits, &mut *sink)?;
+        let (has_opt, options) = {
+            let mut reader = Reader {
+                objects,
+                rules,
+                limits,
+                sink: &mut *sink,
+            };
+            let entry = reach(&mut reader, self.options)?;
+            let has_opt = entry.is_some_and(|(object, _)| object.as_array().is_some());
+            (has_opt, read_options(&mut reader, entry)?)
+        };
         let mut widgets = Vec::with_capacity(self.widgets.len());
         let mut shown = Vec::with_capacity(self.widgets.len());
         for (index, widget) in self.widgets.iter().enumerate() {
@@ -576,17 +613,19 @@ impl<'o> Field<'o> {
         let mut group = Group::new(kind, &widgets);
         group.no_toggle_to_off = self.flags.contains(FieldFlags::NO_TOGGLE_TO_OFF);
         group.in_unison = self.flags.contains(FieldFlags::RADIOS_IN_UNISON);
+        group.has_opt = has_opt;
         let states = (shown.iter().enumerate())
             .map(|(index, state)| state.as_deref() == group.on_state(index).as_deref())
             .collect();
         let (no_toggle_to_off, in_unison) = (group.no_toggle_to_off, group.in_unison);
-        Ok(FieldGroup::new(
+        Ok(Some(FieldGroup::new(
             kind,
             no_toggle_to_off,
             in_unison,
+            has_opt,
             widgets,
             states,
-        ))
+        )))
     }
 }
 
@@ -614,6 +653,7 @@ pub struct Widget<'o> {
     pub(crate) dict: &'o Dict,
     pub(crate) id: Option<ObjectId>,
     pub(crate) merged: bool,
+    pub(crate) index: usize,
 }
 
 impl<'o> Widget<'o> {
@@ -635,6 +675,14 @@ impl<'o> Widget<'o> {
     #[must_use]
     pub const fn is_merged(&self) -> bool {
         self.merged
+    }
+
+    /// The widget's index among its field's widgets
+    /// ([`Field::widgets`]): the one a check box's or radio button's export
+    /// value in `/Opt`, and its state in [`crate::group`]'s rules, go by.
+    #[must_use]
+    pub const fn index(&self) -> usize {
+        self.index
     }
 
     /// Reads the widget as an annotation: its rectangle, flags, border,
@@ -726,6 +774,7 @@ impl fmt::Debug for Widget<'_> {
         f.debug_struct("Widget")
             .field("id", &self.id)
             .field("merged", &self.merged)
+            .field("index", &self.index)
             .finish_non_exhaustive()
     }
 }
@@ -853,11 +902,22 @@ impl fmt::Debug for WidgetStates {
 /// option whose export value is one of `values`. They agree where there are
 /// as many of each, each index is of an option, and those options' export
 /// values are `values`, each as many times as it's given; ISO 32000-2, Table
-/// 234 has `/V` used where the two differ. With no value (`values` empty),
-/// the indices of an option are used.
+/// 234 has `/V` used where the two differ.
+///
+/// With no value (`values` empty) nothing is selected, whatever `indices`
+/// has: `/V` is the field's value, and `/I` only tells apart the options
+/// it selects (Table 234). The appearance PDFium makes for a list box with
+/// an `/I` array and no `/V` highlights no option of a text of its own
+/// either. (It reads the indexes in the value's place there, so a number
+/// written in place of the array selects the option at it, and an array's
+/// numbers, read as empty text, an option whose export value is empty:
+/// neither is followed here.)
 #[must_use]
-pub fn selection(options: &[FieldOption], indices: &[u32], values: &[&str]) -> Vec<usize> {
-    let of_options = |&index: &u32| usize::try_from(index).ok().filter(|&i| i < options.len());
+pub fn selected_options(options: &[FieldOption], indices: &[usize], values: &[&str]) -> Vec<usize> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let of_options = |&index: &usize| Some(index).filter(|&i| i < options.len());
     let agree = || {
         if indices.len() != values.len() || indices.iter().any(|i| of_options(i).is_none()) {
             return false;
@@ -870,7 +930,7 @@ pub fn selection(options: &[FieldOption], indices: &[u32], values: &[&str]) -> V
         found.sort_unstable();
         given == found
     };
-    let mut selected: Vec<usize> = if values.is_empty() || agree() {
+    let mut selected: Vec<usize> = if agree() {
         indices.iter().filter_map(of_options).collect()
     } else {
         let mut given: Vec<&str> = values.to_vec();
@@ -994,7 +1054,7 @@ fn opt_text(object: &Object, id: Option<ObjectId>) -> Result<Option<&[u8]>, Erro
 fn read_selected<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     reader: &mut Reader<'_, R, S>,
     entry: Option<EntryAt<'o>>,
-) -> Result<Vec<u32>, Error> {
+) -> Result<Vec<usize>, Error> {
     let Some((object, within)) = entry else {
         return Ok(Vec::new());
     };
@@ -1027,7 +1087,7 @@ fn read_selected<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
 
 /// An index of 0 or more that `object` gives: an integer, or under
 /// [`Rules::Pdfium`] a finite real cut to an integer, as PDFium reads one.
-fn index_of<R, S: ?Sized>(reader: &Reader<'_, R, S>, object: &Object) -> Option<u32> {
+fn index_of<R, S: ?Sized>(reader: &Reader<'_, R, S>, object: &Object) -> Option<usize> {
     let n = match object.as_integer() {
         Some(n) => n,
         None => match object.as_number() {
@@ -1035,5 +1095,5 @@ fn index_of<R, S: ?Sized>(reader: &Reader<'_, R, S>, object: &Object) -> Option<
             _ => return None,
         },
     };
-    u32::try_from(n).ok()
+    usize::try_from(n).ok()
 }

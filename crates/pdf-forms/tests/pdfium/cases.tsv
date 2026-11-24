@@ -177,6 +177,9 @@ press-opt-check-off	forms-press	press-opt-check-off.pdf,press-opt-check-off.pres
 press-opt-radio	forms-press	press-opt-radio.pdf,press-opt-radio.press
 press-opt-radio-unison	forms-press	press-opt-radio-unison.pdf,press-opt-radio-unison.press
 press-opt-own-names	forms-press	press-opt-own-names.pdf,press-opt-own-names.press
+press-opt-short	forms-press	press-opt-short.pdf,press-opt-short.press
+press-opt-short-past	forms-press	press-opt-short-past.pdf,press-opt-short-past.press
+press-opt-empty	forms-press	press-opt-empty.pdf,press-opt-empty.press
 btn-marks-check	forms-ap-all	btn-marks-check.pdf
 btn-marks-radio	forms-ap-all	btn-marks-radio.pdf
 btn-borders-check	forms-ap-all	btn-borders-check.pdf
@@ -190,6 +193,10 @@ btn-opt-own-name	forms-ap-all	btn-opt-own-name.pdf
 btn-fonts	forms-ap-all	btn-fonts.pdf
 push-sizes	forms-ap-all	push-sizes.pdf
 push-states	forms-ap-all	push-states.pdf
+push-size-negative	forms-ap-all	push-size-negative.pdf
 combo-values	forms-ap-all	combo-values.pdf
 combo-boxes	forms-ap-all	combo-boxes.pdf
 list-values	forms-ap-all	list-values.pdf
+list-no-value	forms-ap-all	list-no-value.pdf
+list-odd	forms-ap-all	list-odd.pdf
+combo-no-value	forms-ap-all	combo-no-value.pdf

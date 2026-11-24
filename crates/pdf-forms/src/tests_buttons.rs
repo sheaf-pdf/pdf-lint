@@ -9,7 +9,9 @@ use pdf_objects::pdf_tokenizer::Rules;
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Unreadable, Value, Why, dict};
 
 use crate::group::GroupKind;
-use crate::{Cap, Error, Fault, Field, FieldOption, Form, Limits, WidgetStates, fuzz, selection};
+use crate::{
+    Cap, Error, Fault, Field, FieldOption, Form, Limits, WidgetStates, fuzz, selected_options,
+};
 
 #[derive(Default)]
 struct Store {
@@ -247,6 +249,7 @@ fn opt_ti_and_i_are_inherited_for_a_button_and_a_choice() {
         assert_eq!(exports, [option("apple", None), option("pear", None)]);
         let read = check
             .group(&store.objects, rules, &Limits::DEFAULT)
+            .unwrap()
             .unwrap();
         let group = read.group();
         assert_eq!(group.export_value(1).as_deref(), Some("pear"));
@@ -381,22 +384,32 @@ fn a_selection_takes_i_only_where_it_agrees_with_v() {
         .map(FieldOption::new)
         .collect();
     // `/I` agrees: the values each option's export value, as many of each.
-    assert_eq!(selection(&options, &[3], &["bravo"]), [3]);
-    assert_eq!(selection(&options, &[2, 0], &["alpha", "charlie"]), [0, 2]);
-    assert_eq!(selection(&options, &[1, 3], &["bravo", "bravo"]), [1, 3]);
+    assert_eq!(selected_options(&options, &[3], &["bravo"]), [3]);
+    assert_eq!(
+        selected_options(&options, &[2, 0], &["alpha", "charlie"]),
+        [0, 2]
+    );
+    assert_eq!(
+        selected_options(&options, &[1, 3], &["bravo", "bravo"]),
+        [1, 3]
+    );
     // It disagrees: another option, another count, an index of none, a
     // repeat that the values don't repeat.
-    assert_eq!(selection(&options, &[0], &["charlie"]), [2]);
-    assert_eq!(selection(&options, &[0, 2], &["charlie"]), [2]);
-    assert_eq!(selection(&options, &[9], &["charlie"]), [2]);
-    assert_eq!(selection(&options, &[2, 2], &["charlie", "alpha"]), [0, 2]);
+    assert_eq!(selected_options(&options, &[0], &["charlie"]), [2]);
+    assert_eq!(selected_options(&options, &[0, 2], &["charlie"]), [2]);
+    assert_eq!(selected_options(&options, &[9], &["charlie"]), [2]);
+    assert_eq!(
+        selected_options(&options, &[2, 2], &["charlie", "alpha"]),
+        [0, 2]
+    );
     // By the values, every option of one of them: both bravos.
-    assert_eq!(selection(&options, &[], &["bravo"]), [1, 3]);
-    assert_eq!(selection(&options, &[], &["typed"]), []);
-    // With no value, the indices of an option, sorted and each once.
-    assert_eq!(selection(&options, &[2, 0, 2, 9], &[]), [0, 2]);
-    assert_eq!(selection(&[], &[0], &["alpha"]), []);
-    assert_eq!(selection(&[], &[], &[]), []);
+    assert_eq!(selected_options(&options, &[], &["bravo"]), [1, 3]);
+    assert_eq!(selected_options(&options, &[], &["typed"]), []);
+    // With no value nothing is selected, whatever the indices.
+    assert_eq!(selected_options(&options, &[2, 0, 2, 9], &[]), []);
+    assert_eq!(selected_options(&options, &[1], &[]), []);
+    assert_eq!(selected_options(&[], &[0], &["alpha"]), []);
+    assert_eq!(selected_options(&[], &[], &[]), []);
 
     // Through a field: `/V (e2) /I [0]` shows the second, `/V (e1) /I [0]`
     // the first, and a list's `/V` array with an `/I` that agrees.
@@ -431,8 +444,8 @@ fn a_selection_takes_i_only_where_it_agrees_with_v() {
     assert_eq!(selected("against"), [1]);
     assert_eq!(selected("with"), [0]);
     assert_eq!(selected("both"), [0, 1]);
-    // A value that is no text is none: `/I` is used.
-    assert_eq!(selected("name"), [1]);
+    // A value that is no text is none, and nothing is selected.
+    assert_eq!(selected("name"), []);
 }
 
 #[test]
@@ -479,10 +492,16 @@ fn options_past_the_cap_are_refused_by_options_alone() {
         many.selection(&store.objects, Rules::Pdfium, &limits),
         Err(Error::Limit(Cap::Items))
     ));
+    // A choice field has no group, and its `/Opt` isn't asked for one.
     assert!(matches!(
         many.group(&store.objects, Rules::Pdfium, &limits),
-        Ok(group) if group.group().widgets.is_empty()
+        Ok(None)
     ));
+    // The count is the array's, decoded or not, past the cap or not.
+    assert_eq!(
+        many.option_count(&store.objects, Rules::Pdfium, &limits),
+        Ok(Some(4))
+    );
     assert_eq!(
         many.options(&store.objects, Rules::Pdfium, &Limits::DEFAULT)
             .unwrap()
@@ -660,8 +679,9 @@ fn an_unreadable_opt_or_i_fails_the_call_not_the_read() {
         let selected = bad.selected_with(&objects, rules, &limits, &mut sink);
         assert_eq!(selected, Ok(vec![1]));
         assert_eq!(bad.selected(&objects, rules, &limits), selected);
+        // The field has no value, so nothing is selected.
         let selection = bad.selection_with(&objects, rules, &limits, &mut sink);
-        assert_eq!(selection, Ok(vec![1]));
+        assert_eq!(selection, Ok(vec![]));
         let faults: Vec<Fault> = sink.into_iter().map(|(_, fault)| fault).collect();
         let told = [Fault::DamagedObject(damaged), Fault::ReferenceLoop];
         assert_eq!(faults, [&told[..], &told[..]].concat());
@@ -787,6 +807,7 @@ fn a_widgets_states_are_its_on_state_as_and_off() {
     // off, since it would be made under `Yes`.
     let read = g
         .group(&store.objects, Rules::Iso, &Limits::DEFAULT)
+        .unwrap()
         .unwrap();
     let group = read.group();
     assert_eq!(group.kind, GroupKind::Radio);
@@ -852,6 +873,7 @@ fn a_groups_flags_and_states_come_from_the_field_and_its_widgets() {
 
     let read = field(&form, "g")
         .group(&store.objects, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
         .unwrap();
     let group = read.group();
     assert!(group.no_toggle_to_off && group.in_unison);
@@ -864,6 +886,7 @@ fn a_groups_flags_and_states_come_from_the_field_and_its_widgets() {
     let check = field(&form, "c");
     let read = check
         .group_with(&store.objects, Rules::Pdfium, &Limits::DEFAULT, &mut sink)
+        .unwrap()
         .unwrap();
     assert!(sink.is_empty());
     let group = read.group();
@@ -875,11 +898,12 @@ fn a_groups_flags_and_states_come_from_the_field_and_its_widgets() {
     assert_eq!(&*group.value(&after), b"2");
     assert_eq!(group.export(&after).as_deref(), Some("apple"));
 
-    // A text field is a group of none.
+    // A text field has no group, which a check box field with no widget
+    // has.
     let read = field(&form, "t")
         .group(&store.objects, Rules::Iso, &Limits::DEFAULT)
         .unwrap();
-    assert!(read.group().widgets.is_empty() && read.states().is_empty());
+    assert!(read.is_none());
 
     // Check boxes with no appearance yet: on where `/AS` names the state
     // they'd be made under, `Yes`, or with `/Opt` their indexes.
@@ -922,6 +946,7 @@ fn a_groups_flags_and_states_come_from_the_field_and_its_widgets() {
     let states = |name: &str| {
         let read = field(&form, name)
             .group(&store.objects, Rules::Iso, &Limits::DEFAULT)
+            .unwrap()
             .unwrap();
         read.states().to_vec()
     };
@@ -957,11 +982,13 @@ fn the_button_and_choice_seeds_reach_what_they_hold() {
     assert_eq!(kinds.len(), 4, "{kinds:?}");
     let unison = field(&form, "unison")
         .group(objects, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
         .unwrap();
     assert_eq!(unison.states(), [true, false, false]);
     assert!(unison.group().in_unison);
     let fruit = field(&form, "fruit")
         .group(objects, Rules::Pdfium, &Limits::DEFAULT)
+        .unwrap()
         .unwrap();
     assert_eq!(fruit.group().export_value(2).as_deref(), Some("apple"));
     assert_eq!(fruit.group().on_state(1).as_deref(), Some(&b"a"[..]));

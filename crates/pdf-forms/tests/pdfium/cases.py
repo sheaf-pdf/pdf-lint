@@ -537,6 +537,13 @@ def press_cases():
     press("press-opt-radio", radio, first_on, b"/V /0 ", opt, presses=b"1")
     press("press-opt-radio-unison", radio | unison, by_index, opt=opt, presses=b"0")
     press("press-opt-own-names", 0, [(b"Off", b"x"), (b"Off", b"y")], opt=b"/Opt [(a) (b)] ", presses=b"1")
+    # An /Opt shorter than its widgets: two check boxes of one on state, the
+    # second with no entry, which don't go together, either pressed; and an
+    # empty /Opt over two with no /AP, whose states PDFium makes by index.
+    short = [(b"Off", b"a"), (b"Off", b"a")]
+    press("press-opt-short", 0, short, opt=b"/Opt [(a)] ", presses=b"0")
+    press("press-opt-short-past", 0, short, opt=b"/Opt [(a)] ", presses=b"1")
+    press("press-opt-empty", 0, [(b"Off", None), (b"Off", None)], opt=b"/Opt [] ", presses=b"0")
 
 
 def at(i, w=12, h=12, cols=8):
@@ -692,6 +699,11 @@ def push_cases():
                             + b">> /BS << /W 1 /S /" + style + b" >>", len(widgets)))
     ap("push-states", widgets)
     as_kind("forms-ap-all")
+    # A /DA whose size is below 0, beside one of 0: PDFium sets no font and
+    # a size of 0 for it.
+    ap("push-size-negative", [push(b"/DA (/Helv " + size + b" Tf 0 g) /MK << /CA (Neg) /BC [0] >>", i)
+                              for i, size in enumerate((b"-10", b"0"))])
+    as_kind("forms-ap-all")
 
 
 def place(i, w, h, cols=4):
@@ -772,6 +784,41 @@ def choice_cases():
     ]
     ap("list-values", [widget_of(b"/FT /Ch /Ff %d " % ff + rest, place(i, 40 if i == 15 else 80, 80 if i == 15 else 40))
                        for i, (ff, rest) in enumerate(lists)])
+    as_kind("forms-ap-all")
+    # List boxes with no value, or none that is text: /I alone, one index
+    # and two; a number in /I's place; /I beside a /V that is a name, and
+    # one that is an empty array; a default value alone.
+    ten = b"/DA (/Helv 10 Tf 0 g) "
+    lists = [
+        (0, ten + abc + b" /I [1]"),
+        (multiple, ten + abc + b" /I [0 2]"),
+        (0, ten + abc + b" /I 1"),
+        (0, ten + abc + b" /V /bravo /I [1]"),
+        (multiple, ten + abc + b" /V [] /I [1]"),
+        (0, ten + abc + b" /DV (bravo)"),
+    ]
+    ap("list-no-value", [widget_of(b"/FT /Ch /Ff %d " % ff + rest, place(i, 80, 40))
+                         for i, (ff, rest) in enumerate(lists)])
+    as_kind("forms-ap-all")
+    # A top index below 0, and past the options; a /DA size below 0.
+    lists = [
+        ten + abc + b" /V (bravo) /TI -1",
+        ten + abc + b" /V (bravo) /TI 9",
+        b"/DA (/Helv -10 Tf 0 g) " + abc + b" /V (bravo)",
+    ]
+    ap("list-odd", [widget_of(b"/FT /Ch " + rest, place(i, 80, 40)) for i, rest in enumerate(lists)])
+    as_kind("forms-ap-all")
+    # Combo boxes with no value: a default value alone, which PDFium
+    # shows; /I alone, an array and a number; and one with a value whose /DA
+    # size is below 0.
+    combos = [
+        ten + pairs + b" /DV (e3)",
+        ten + pairs + b" /I [1]",
+        ten + pairs + b" /I 1",
+        b"/DA (/Helv -10 Tf 0 g) " + pairs + b" /V (e2)",
+    ]
+    ap("combo-no-value", [widget_of(b"/FT /Ch /Ff 131072 " + rest, place(i, 100, 20))
+                          for i, rest in enumerate(combos)])
     as_kind("forms-ap-all")
 
 

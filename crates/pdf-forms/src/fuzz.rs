@@ -14,11 +14,14 @@
 //! 5. Buttons and choices: for each field, `Field::options`, `selected`,
 //!    `selection`, and `top_index`, and for each widget `Widget::states`,
 //!    each alike under `&mut ()` and a `Vec` sink, within `Limits::items`
-//!    or refused for it, a selection sorted, each once, and of an option;
-//!    for each check box and radio button field, `Field::group` alike
-//!    whatever the sink, and each of its widgets pressed from the states its
-//!    `/AS` gives; and a `group::Group` cut from the input (`check_group`),
-//!    its widgets pressed in turn. Each press answers a state for each
+//!    or refused for it, a selection sorted, each once, and of an option,
+//!    `Field::option_count` the options' count, and each widget's index its
+//!    place; for each check box and radio button field, `Field::group` alike
+//!    whatever the sink (none for any other field), its `/Opt` the field's,
+//!    and each of its widgets pressed from the states its `/AS` gives; and a
+//!    `group::Group` cut from the input (`check_group`), with `/Opt` or
+//!    without, each widget's on state and export value as the rules name
+//!    them, its widgets pressed in turn. Each press answers a state for each
 //!    widget and holds the group's rules: an off widget turned on with those
 //!    of its on state and export value in unison and alone out of it, every
 //!    other off; an on one off with those in unison with it, or a radio
@@ -32,7 +35,8 @@
 //!    `check_appearance` cuts them (`check_buttons`), the push button in each
 //!    standard 14 font; and for each widget of the form's buttons,
 //!    `appearance::widget_toggle` or `widget_push`, alike under `&mut ()`
-//!    and a `Vec` sink, and `toggle_for_widget` or `push_for_widget`, which
+//!    and a `Vec` sink, a toggle's on state its group's and nothing of
+//!    `/Opt` told for it, and `toggle_for_widget` or `push_for_widget`, which
 //!    make what `make` makes in their font and tell what reading the widget
 //!    and its font tells; any other field's refused (`Unmade::NotButton`).
 //!    Each is made the same twice; a caption past `Limits::text` and no box
@@ -46,11 +50,12 @@
 //!    over the same cut (`check_choices`), the text the combo box's, its
 //!    lines the list box's labels, the flags which are selected, `/MaxLen`
 //!    its top, in a standard 14 font the input's length picks; and for each
-//!    widget of the form's choice fields, `appearance::widget_choice`,
-//!    alike under `&mut ()` and a `Vec` sink, and `choice_for_widget`,
-//!    which makes what `make` makes in its font and tells what reading the
-//!    widget and its font tells; any other field's refused
-//!    (`Unmade::NotChoice`). Each is made the same twice; a text past
+//!    of the form's choice fields, `appearance::field_choice`, and for each
+//!    of its widgets `widget_choice` over it, each alike under `&mut ()` and
+//!    a `Vec` sink, nothing selected where the field has no value, and
+//!    `choice_for_widget`, which makes what `make` makes in its font and
+//!    tells what reading the field, the widget and its font tells; any
+//!    other field's refused (`Unmade::NotChoice`). Each is made the same twice; a text past
 //!    `Limits::text`, a list's lines from its top past `Limits::items` or
 //!    their bytes past `Limits::text`, and no box are refused as they say,
 //!    a character a font lacks told at its offset in the text or in its
@@ -1178,6 +1183,12 @@ fn buttons_and_choices<'o, R: Resolve<'o> + Copy>(
         assert_eq!(quiet, told, "a sink changed a field's options");
         if let Ok(options) = &told {
             assert!(options.len() <= limits.items, "options past the cap");
+            // An array's items each keep their place; anything else is none.
+            match field.option_count(objects, rules, limits) {
+                Ok(Some(count)) => assert_eq!(count, options.len(), "/Opt's count"),
+                Ok(None) => assert!(options.is_empty(), "options of no array"),
+                Err(_) => panic!("/Opt read, and its count refused"),
+            }
             for option in options {
                 let shown = format!("{option:?} {told:?}");
                 assert!(!shows(&shown, &option.export), "an option shown");
@@ -1211,7 +1222,8 @@ fn buttons_and_choices<'o, R: Resolve<'o> + Copy>(
         }
         let _ = (field.top_index(), format!("{faults:?}"));
 
-        for widget in field.widgets() {
+        for (index, widget) in field.widgets().iter().enumerate() {
+            assert_eq!(widget.index(), index, "a widget's index is its place");
             let quiet = widget.states(objects, rules, limits);
             let mut faults: Vec<(Place, Fault)> = Vec::new();
             let told = widget.states_with(objects, rules, limits, &mut faults);
@@ -1246,14 +1258,25 @@ fn buttons_and_choices<'o, R: Resolve<'o> + Copy>(
             _ => panic!("a sink changed whether a group was read"),
         };
         assert_eq!(format!("{quiet:?}"), format!("{told:?}"));
+        let toggle = matches!(field.kind(), Some(FieldKind::CheckBox | FieldKind::Radio));
+        assert_eq!(told.is_some(), toggle, "a group of a field of no toggles");
+        let (Some(quiet), Some(told)) = (quiet, told) else {
+            continue;
+        };
         assert_eq!(quiet.states(), told.states());
         let group = told.group();
-        let toggle = matches!(field.kind(), Some(FieldKind::CheckBox | FieldKind::Radio));
-        let widgets = if toggle { field.widgets().len() } else { 0 };
+        let widgets = field.widgets().len();
         assert_eq!(
             group.widgets.len(),
             widgets,
             "a group of the field's widgets"
+        );
+        assert_eq!(
+            Ok(group.has_opt),
+            field
+                .option_count(objects, rules, limits)
+                .map(|n| n.is_some()),
+            "a group's /Opt is its field's"
         );
         assert_eq!(told.states().len(), widgets, "a state for each widget");
         for index in 0..=widgets {
@@ -1307,7 +1330,7 @@ const GROUP_EXPORTS: [Option<&str>; 8] = [
 /// each byte missing `0`:
 ///
 /// - byte 0: bit 0, radio buttons (else check boxes); bit 1, NoToggleToOff;
-///   bit 2, RadiosInUnison.
+///   bit 2, RadiosInUnison; bit 3, a field with `/Opt`.
 /// - byte 1: the widgets, modulo 9; byte 2, their states before, a bit
 ///   each; byte 3: how many of those states are given, modulo 10, so fewer
 ///   or more than the widgets.
@@ -1338,6 +1361,23 @@ pub fn check_group(data: &[u8]) {
     let mut group = Group::new(kind, &widgets);
     group.no_toggle_to_off = flags & 2 != 0;
     group.in_unison = flags & 4 != 0;
+    group.has_opt = flags & 8 != 0;
+    for index in 0..count {
+        // What `/Opt` gives a widget of no entry, or an empty one.
+        let under_opt = group.has_opt || widgets[index].export.is_some();
+        let export = group.export_value(index).expect("a widget's export value");
+        match widgets[index].export.as_deref() {
+            Some(own) if !own.is_empty() => assert_eq!(export, own),
+            _ if under_opt => assert_eq!(export, "Yes"),
+            _ => assert_eq!(
+                export.as_bytes(),
+                &*group.on_state(index).expect("a widget's on state")
+            ),
+        }
+        let own = GROUP_NAMES[usize::from(byte(4 + index) & 7)].filter(|name| *name != b"Off");
+        let expected = crate::group::on_state_name(own, under_opt, index);
+        assert_eq!(group.on_state(index), Some(expected), "a widget's on state");
+    }
     let given = usize::from(byte(3) % 10);
     let mut states: Vec<bool> = (0..given).map(|i| byte(2) >> (i % 8) & 1 != 0).collect();
     let presses = data.get(4 + count..).unwrap_or_default();
@@ -1714,6 +1754,20 @@ fn widget_buttons<'o, R: Resolve<'o> + Streams + Copy>(
                 assert!(matches!(read, Err(Unmade::NotButton)));
             }
             if let Ok(read) = &read {
+                // What's wrong in `/Opt` is the field's to tell, once.
+                assert!(
+                    !told
+                        .iter()
+                        .any(|(_, fault)| matches!(fault, Fault::WrongType { key: "Opt" })),
+                    "a toggle told of /Opt"
+                );
+                if let Ok(Some(group)) = field.group(objects, rules, limits) {
+                    assert_eq!(
+                        group.group().on_state(widget.index()).as_deref(),
+                        Some(read.on_state()),
+                        "a toggle's on state is its group's"
+                    );
+                }
                 let caption = read.button().caption.unwrap_or_default();
                 assert!(!shows(&format!("{read:?}"), caption), "a caption shown");
                 let mut faults = Vec::new();
@@ -1945,36 +1999,70 @@ fn widget_choices<'o, R: Resolve<'o> + Streams + Copy>(
     use pdf_fonts::Std14;
 
     use crate::FieldKind;
-    use crate::appearance::{FieldFont, Unmade, choice_for_widget, widget_choice};
+    use crate::appearance::{FieldFont, Unmade, choice_for_widget, field_choice, widget_choice};
 
     for field in form.fields() {
         let choice = matches!(field.kind(), Some(FieldKind::Combo | FieldKind::List));
+        let quiet = field_choice(field, objects, rules, limits, &mut ());
+        let mut of_field: Vec<(Place, Fault)> = Vec::new();
+        let shows_what = field_choice(field, objects, rules, limits, &mut of_field);
+        assert_eq!(
+            format!("{quiet:?}"),
+            format!("{shows_what:?}"),
+            "a sink changed what a choice field shows"
+        );
+        if !choice {
+            assert!(matches!(shows_what, Err(Unmade::NotChoice)));
+        }
+        let Ok(shows_what) = &shows_what else {
+            continue;
+        };
+        assert_eq!(
+            shows_what.is_combo(),
+            field.kind() == Some(FieldKind::Combo)
+        );
+        assert_eq!(shows_what.is_combo(), shows_what.combo().is_some());
+        assert_eq!(shows_what.is_combo(), shows_what.list().is_none());
+        if let Some(list) = shows_what.list() {
+            assert!(
+                list.labels == shows_what.labels()
+                    && list.selected == shows_what.selected()
+                    && list.top == shows_what.top()
+            );
+            if field.value().is_none() {
+                assert!(list.selected.is_empty(), "no value, and an option selected");
+            }
+        }
+        let debug = format!("{shows_what:?}");
+        if let Some(combo) = shows_what.combo() {
+            assert!(!shows(&debug, combo.text), "a text shown");
+        }
+        for label in shows_what.labels() {
+            assert!(!shows(&debug, label), "a label shown");
+        }
+        assert!(
+            shows_what.selected().windows(2).all(|w| w[0] < w[1])
+                && (shows_what.selected().iter()).all(|&i| i < shows_what.labels().len()),
+            "a selection sorted, each once, of an option"
+        );
         for widget in field.widgets() {
-            let quiet = widget_choice(field, widget, objects, rules, limits, &mut ());
-            let mut told: Vec<(Place, Fault)> = Vec::new();
-            let read = widget_choice(field, widget, objects, rules, limits, &mut told);
+            let quiet = widget_choice(field, widget, shows_what, objects, rules, limits, &mut ());
+            let mut told: Vec<(Place, Fault)> = of_field.clone();
+            let read = widget_choice(field, widget, shows_what, objects, rules, limits, &mut told);
             assert_eq!(
                 format!("{quiet:?}"),
                 format!("{read:?}"),
                 "a sink changed a choice"
             );
-            if !choice {
-                assert!(matches!(read, Err(Unmade::NotChoice)));
-            }
             let Ok(read) = &read else { continue };
-            assert_eq!(read.is_combo(), field.kind() == Some(FieldKind::Combo));
+            assert!(std::ptr::eq(read.choice(), shows_what));
             let debug = format!("{read:?}");
-            if let Some(combo) = read.combo() {
+            if let Some(combo) = shows_what.combo() {
                 assert!(!shows(&debug, combo.text), "a text shown");
             }
-            for label in read.labels() {
+            for label in shows_what.labels() {
                 assert!(!shows(&debug, label), "a label shown");
             }
-            assert!(
-                read.selected().windows(2).all(|w| w[0] < w[1])
-                    && read.selected().iter().all(|&i| i < read.labels().len()),
-                "a selection sorted, each once, of an option"
-            );
             let mut faults = Vec::new();
             let made = choice_for_widget(form, field, widget, objects, rules, limits, &mut faults);
             assert_eq!(

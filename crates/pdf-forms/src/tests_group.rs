@@ -168,6 +168,51 @@ fn with_opt_widgets_of_one_export_value_are_told_apart_by_index() {
     assert_eq!(group.press(&[false; 3], 0), [true, false, false]);
 }
 
+/// A widget past the end of a short `/Opt`, or of an empty one, is still a
+/// widget of a field with `/Opt`: named by its index where it has no name
+/// of its own, and exporting `Yes`, so it doesn't go with a widget of its
+/// on state that has an entry.
+#[test]
+fn a_widget_past_a_short_opt_is_named_by_index_and_exports_yes() {
+    // `/Opt [(a)]` over two check boxes whose on state is `a`.
+    let mut widgets = group_of(&[Some(b"a"), Some(b"a")]);
+    widgets[0].export = Some(Cow::Borrowed("a"));
+    let mut group = Group::new(GroupKind::CheckBox, &widgets);
+    group.has_opt = true;
+    assert_eq!(group.export_value(0).as_deref(), Some("a"));
+    assert_eq!(group.export_value(1).as_deref(), Some("Yes"));
+    assert_eq!(group.press(&[false; 2], 0), [true, false]);
+    assert_eq!(group.press(&[false; 2], 1), [false, true]);
+    assert_eq!(group.states_for_export("a"), Some(vec![true, false]));
+    assert_eq!(group.states_for_export("Yes"), Some(vec![false, true]));
+    // With no `/Opt` they're one on state and one export value, together.
+    let plain = group_of(&[Some(b"a"), Some(b"a")]);
+    let together = Group::new(GroupKind::CheckBox, &plain);
+    assert_eq!(together.press(&[false; 2], 0), [true, true]);
+
+    // `/Opt []` over two check boxes with no appearance: their indexes.
+    let none = group_of(&[None, None]);
+    let mut group = Group::new(GroupKind::CheckBox, &none);
+    group.has_opt = true;
+    let named: Vec<_> = (0..2).map(|i| group.on_state(i).unwrap()).collect();
+    assert_eq!(named, [&b"0"[..], b"1"]);
+    let states = group.press(&[false; 2], 0);
+    assert_eq!(states, [true, false]);
+    assert_eq!(&*group.value(&states), b"0");
+    assert_eq!(group.export(&states).as_deref(), Some("Yes"));
+    // Both export `Yes`; the first is the one a value given by it turns on.
+    assert_eq!(group.states_for_export("Yes"), Some(vec![true, false]));
+
+    // An entry that is empty exports `Yes` too, and a widget with an entry
+    // is read as under `/Opt` whatever the flag says.
+    let empty = exporting(&[Some(b"a"), Some(b"a"), None], &["", "Yes", "b"]);
+    let group = Group::new(GroupKind::CheckBox, &empty);
+    assert_eq!(group.export_value(0).as_deref(), Some("Yes"));
+    assert_eq!(group.press(&[false; 3], 0), [true, true, false]);
+    assert_eq!(&*group.on_state(2).unwrap(), b"2");
+    assert!(format!("{group:?}").contains("has_opt: false"));
+}
+
 #[test]
 fn export_values_are_names_read_as_text_without_opt() {
     let widgets = group_of(&[Some(b"Yes"), Some(b"caf\xc3\xa9"), Some(b"\xff"), None]);
@@ -268,7 +313,7 @@ fn debug_prints_no_name_or_export_value() {
                 export: w.export.as_deref().map(|e| Cow::Owned(e.to_owned())),
             })
             .collect();
-        let field = FieldGroup::new(GroupKind::Radio, true, false, owned, vec![true]);
+        let field = FieldGroup::new(GroupKind::Radio, true, false, true, owned, vec![true]);
         format!("{group:?} {widgets:?} {field:?}")
     };
     let one = shown(&[Some(b"spouse"), None], &["apple", "pear"]);

@@ -26,9 +26,10 @@
 //!   from plain data: a [`ComboBox`] (the text it shows, and whether its
 //!   drop button is drawn) or a [`ListBox`] (its options' labels, those
 //!   selected, and the one at its top), a [`WidgetLook`], the parsed default
-//!   appearance, and a font; [`widget_choice`] reads a widget of a
-//!   [`Form`](crate::Form)'s choice fields into that data, and
-//!   [`choice_for_widget`] makes one widget's.
+//!   appearance, and a font; [`field_choice`] reads what a
+//!   [`Form`](crate::Form)'s choice field shows into that data, once for
+//!   all its widgets ([`FieldChoice`]), [`widget_choice`] reads a widget's
+//!   box beside it, and [`choice_for_widget`] makes one widget's.
 //! - [`FieldFont`] is the font a field's text is drawn in: the default
 //!   resources' font (`/DR /Font`) its default appearance string names, read
 //!   with `pdf-fonts`, or a standard 14 font chosen by that name where the
@@ -134,8 +135,8 @@ pub use choice::{ComboBox, ListBox, combo_box, list_box};
 pub use font::{FieldFont, FieldLayoutFont};
 pub use frame::{Appearance, Unmade, WidgetLook};
 pub use read::{
-    MadePush, MadeToggle, WidgetChoice, WidgetPush, WidgetToggle, choice_for_widget,
-    push_for_widget, toggle_for_widget, widget_choice, widget_push, widget_toggle,
+    FieldChoice, MadePush, MadeToggle, WidgetChoice, WidgetPush, WidgetToggle, choice_for_widget,
+    field_choice, push_for_widget, toggle_for_widget, widget_choice, widget_push, widget_toggle,
 };
 #[cfg(any(test, fuzzing))]
 pub(crate) use text::REACH;

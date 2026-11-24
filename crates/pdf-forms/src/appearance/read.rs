@@ -197,9 +197,9 @@ impl WidgetToggle {
     /// The name the on state's appearances go under in the widget's state
     /// dictionaries, and that its `/AS` takes when it's on:
     /// [`group::on_state_name`](crate::group::on_state_name) of the name its
-    /// normal appearance has for on, whether the field's `/Opt` has an entry
-    /// for the widget, and the widget's index among the field's, as the
-    /// field's group ([`Field::group`](crate::Field::group)) names it.
+    /// normal appearance has for on, whether the field has an `/Opt` array,
+    /// and the widget's index among the field's, as the field's group
+    /// ([`Field::group`](crate::Field::group)) names it.
     #[must_use]
     pub fn on_state(&self) -> &[u8] {
         &self.on_state
@@ -252,17 +252,23 @@ impl fmt::Debug for WidgetToggle {
 ///   dictionary has, read with the annotation (of its names, the first that
 ///   isn't `Off`, or under `Rules::Pdfium` the least, as
 ///   [`Widget::states`](crate::Widget::states) reads it); else, where the
-///   field's `/Opt` has an entry for the widget, its index among the
-///   field's widgets; else `Yes` ([`group::on_state_name`]). `/Opt` is
-///   read as [`Field::options_with`](crate::Field::options_with) reads it,
-///   its departures told.
+///   field has an `/Opt` array, the widget's index among the field's
+///   widgets ([`Widget::index`](crate::Widget::index)); else `Yes`
+///   ([`group::on_state_name`]). Of `/Opt` only whether it's an array is
+///   asked ([`Field::option_count`](crate::Field::option_count)): no export
+///   value is decoded, so a field's widgets are each read in the time one
+///   takes, however many it has, and what's wrong in `/Opt` is told once, by
+///   [`Field::options_with`](crate::Field::options_with) or
+///   [`Field::group_with`](crate::Field::group_with), not here for each
+///   widget.
+///
+/// `widget` is one of `field`'s own ([`Field::widgets`](crate::Field::widgets)).
 ///
 /// # Errors
 ///
 /// [`Unmade::NotButton`] for a field that isn't a check box or radio button
-/// field; [`Unmade::Limit`] for a cap of [`Limits::annots`] passed, or
-/// `/Opt` past [`Limits::items`]; [`Unmade::Unreadable`] on locked, I/O, or
-/// reader-cap failures.
+/// field; [`Unmade::Limit`] for a cap of [`Limits::annots`] passed;
+/// [`Unmade::Unreadable`] on locked, I/O, or reader-cap failures.
 pub fn widget_toggle<'o, R, S>(
     field: &Field<'o>,
     widget: &Widget<'o>,
@@ -283,11 +289,8 @@ where
     let (annot, look, _) = read_look(field, widget, objects, rules, limits, sink)?;
     let caption = mk_of(&annot).and_then(|mk| mk.normal_caption.clone());
     let states = WidgetStates::of(annot.appearances().cloned(), rules);
-    let options = field.options_with(objects, rules, limits, &mut *sink)?;
-    let index = (field.widgets().iter())
-        .position(|w| std::ptr::eq(w.dict(), widget.dict()))
-        .unwrap_or(usize::MAX);
-    let on_state = group::on_state_name(states.on_state.as_deref(), index < options.len(), index);
+    let has_opt = field.option_count(objects, rules, limits)?.is_some();
+    let on_state = group::on_state_name(states.on_state.as_deref(), has_opt, widget.index());
     Ok(WidgetToggle {
         radio,
         caption,
@@ -662,7 +665,7 @@ where
     })
 }
 
-/// What a choice widget shows: a combo box's text, or a list box's labels,
+/// What a choice field shows: a combo box's text, or a list box's labels,
 /// selection, and top.
 #[derive(Clone)]
 enum Choice {
@@ -674,23 +677,20 @@ enum Choice {
     },
 }
 
-/// One widget of a combo box or list box field, read for its appearance:
-/// for a combo box the text it shows, for a list box its options' labels,
-/// the options selected and the one at its top, and the widget's box,
-/// border, and `/MK`, and its default appearance string parsed. No font is
-/// read: [`font_name`](Self::font_name) names the one to draw in, and
-/// [`make`](Self::make) draws in a font the caller keeps.
+/// What a combo box or list box field shows, read once for all its
+/// widgets ([`field_choice`]): for a combo box the text in its box, for a
+/// list box its options' labels, the options selected, and the one at its
+/// top. Every widget of the field shows the same, each in its own box
+/// ([`widget_choice`]).
 ///
-/// `Debug` prints lengths and numbers, never the text, a label, or the
-/// font's name.
+/// `Debug` prints lengths and numbers, never the text or a label.
 #[derive(Clone)]
-pub struct WidgetChoice {
+pub struct FieldChoice {
     choice: Choice,
-    look: Look,
 }
 
-impl WidgetChoice {
-    /// Whether the widget is a combo box's; else a list box's.
+impl FieldChoice {
+    /// Whether the field is a combo box; else a list box.
     #[must_use]
     pub const fn is_combo(&self) -> bool {
         matches!(self.choice, Choice::Combo(_))
@@ -706,9 +706,26 @@ impl WidgetChoice {
         }
     }
 
-    /// A list box's options' labels, in order, as
-    /// [`ListBox::labels`](super::ListBox::labels) takes them; none for a
-    /// combo box.
+    /// The list box as [`list_box`](super::list_box) takes it, its labels
+    /// lent as they're held; none for a combo box.
+    #[must_use]
+    pub fn list(&self) -> Option<ListBox<'_, String>> {
+        match &self.choice {
+            Choice::List {
+                labels,
+                selected,
+                top,
+            } => {
+                let mut list = ListBox::new(labels);
+                list.selected = selected;
+                list.top = *top;
+                Some(list)
+            }
+            Choice::Combo(_) => None,
+        }
+    }
+
+    /// A list box's options' labels, in order; none for a combo box.
     #[must_use]
     pub fn labels(&self) -> &[String] {
         match &self.choice {
@@ -735,6 +752,124 @@ impl WidgetChoice {
             Choice::List { top, .. } => *top,
             Choice::Combo(_) => 0,
         }
+    }
+}
+
+impl fmt::Debug for FieldChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("FieldChoice");
+        match &self.choice {
+            Choice::Combo(text) => debug.field("text_len", &text.len()),
+            Choice::List {
+                labels,
+                selected,
+                top,
+            } => debug
+                .field("labels", &labels.len())
+                .field("selected", &selected.len())
+                .field("top", top),
+        };
+        debug.finish()
+    }
+}
+
+/// Reads what `field`, a combo box or list box field, shows, under
+/// `rules`, departures told to `sink`: once for the field, whose widgets
+/// each take it ([`widget_choice`]), so its options are decoded once
+/// however many widgets it has.
+///
+/// - **The options** are [`Field::options_with`](crate::Field::options_with)'s
+///   labels, and the selection [`selected_options`](crate::selected_options)
+///   over them, [`Field::selected_with`](crate::Field::selected_with)'s
+///   `/I`, and the value's text strings, as
+///   [`Field::selection`](crate::Field::selection) finds it, each decoded
+///   once, its departures told. A value that is no text string or array of
+///   them is none, told as [`Fault::WrongType`] for `V`.
+/// - **A combo box's text** is the label of the option the value's text
+///   (an array's first) selects, `/I`'s first index where it agrees, else
+///   the first option of that export value; else that text as it is, as an
+///   editable combo box's value outside its options is; as PDFium as of
+///   chromium/8152 shows it. With no value, none: the default value
+///   (`/DV`) is a reset's (ISO 32000-2, Table 226), where PDFium shows it.
+/// - **A list box's** labels are every option's, its selection that (none
+///   with no value, whatever `/I` has), and its top
+///   [`Field::top_index`](crate::Field::top_index).
+///
+/// # Errors
+///
+/// [`Unmade::NotChoice`] for a field that isn't a combo box or list box
+/// field; [`Unmade::Limit`] for `/Opt` or `/I` past [`Limits::items`];
+/// [`Unmade::Unreadable`] on locked, I/O, or reader-cap failures.
+pub fn field_choice<'o, R, S>(
+    field: &Field<'o>,
+    objects: R,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut S,
+) -> Result<FieldChoice, Unmade>
+where
+    R: Resolve<'o> + Copy,
+    S: Sink<Fault> + ?Sized,
+{
+    let combo = match field.kind() {
+        Some(FieldKind::Combo) => true,
+        Some(FieldKind::List) => false,
+        _ => return Err(Unmade::NotChoice),
+    };
+    let options = field.options_with(objects, rules, limits, &mut *sink)?;
+    let indices = field.selected_with(objects, rules, limits, &mut *sink)?;
+    let values: Vec<&str> = match field.value() {
+        None => Vec::new(),
+        Some(FieldValue::Text(text)) => vec![text.as_str()],
+        Some(FieldValue::Items(items)) => items.iter().map(String::as_str).collect(),
+        Some(_) => {
+            if sink.wants() {
+                sink.fault(Place::new(field.id(), None), Fault::WrongType { key: "V" });
+            }
+            Vec::new()
+        }
+    };
+    let choice = match combo {
+        true => Choice::Combo(match values.first() {
+            Some(value) => match shown_option(&options, &indices, value) {
+                Some(index) => options[index].label().to_owned(),
+                None => (*value).to_owned(),
+            },
+            None => String::new(),
+        }),
+        false => {
+            let selected = crate::selected_options(&options, &indices, &values);
+            Choice::List {
+                labels: (options.into_iter())
+                    .map(|option| option.label.unwrap_or(option.export))
+                    .collect(),
+                selected,
+                top: field.top_index(),
+            }
+        }
+    };
+    Ok(FieldChoice { choice })
+}
+
+/// One widget of a combo box or list box field, read for its appearance:
+/// what its field shows ([`FieldChoice`], lent), and the widget's box,
+/// border, and `/MK`, and its default appearance string parsed. No font is
+/// read: [`font_name`](Self::font_name) names the one to draw in, and
+/// [`make`](Self::make) draws in a font the caller keeps.
+///
+/// `Debug` prints lengths and numbers, never the text, a label, or the
+/// font's name.
+#[derive(Clone)]
+pub struct WidgetChoice<'c> {
+    choice: &'c FieldChoice,
+    look: Look,
+}
+
+impl<'c> WidgetChoice<'c> {
+    /// What the widget's field shows, as it was given to [`widget_choice`].
+    #[must_use]
+    pub const fn choice(&self) -> &'c FieldChoice {
+        self.choice
     }
 
     /// The widget's box, colors, rotation, and border.
@@ -772,126 +907,72 @@ impl WidgetChoice {
         limits: &Limits,
     ) -> Result<Appearance, Unmade> {
         let look = self.look();
-        match &self.choice {
-            Choice::Combo(text) => combo_box(
-                &ComboBox::new(text),
-                &look,
-                &self.look.da,
-                font_res,
-                font,
-                limits,
-            ),
+        let da = &self.look.da;
+        match &self.choice.choice {
+            Choice::Combo(text) => {
+                combo_box(&ComboBox::new(text), &look, da, font_res, font, limits)
+            }
             Choice::List {
                 labels,
                 selected,
                 top,
             } => {
-                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-                let mut list = ListBox::new(&labels);
+                let mut list = ListBox::new(labels);
                 list.selected = selected;
                 list.top = *top;
-                list_box(&list, &look, &self.look.da, font_res, font, limits)
+                list_box(&list, &look, da, font_res, font, limits)
             }
         }
     }
 }
 
-impl fmt::Debug for WidgetChoice {
+impl fmt::Debug for WidgetChoice<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug = f.debug_struct("WidgetChoice");
-        match &self.choice {
-            Choice::Combo(text) => debug.field("text_len", &text.len()),
-            Choice::List {
-                labels,
-                selected,
-                top,
-            } => debug
-                .field("labels", &labels.len())
-                .field("selected", &selected.len())
-                .field("top", top),
-        };
-        debug.field("look", &self.look).finish()
+        f.debug_struct("WidgetChoice")
+            .field("choice", &self.choice)
+            .field("look", &self.look)
+            .finish()
     }
 }
 
 /// Reads `widget` of `field`, a combo box or list box field, for its
-/// appearance, under `rules`, departures told to `sink`.
+/// appearance, under `rules`, departures told to `sink`; `choice` is what
+/// the field shows, read once for all its widgets by [`field_choice`].
 ///
-/// - **The widget** and **the default appearance string** are read as
-///   [`widget_text`](super::widget_text) reads a text widget's: the
-///   rectangle, the border, `/MK`'s colors and rotation, and the widget's
-///   own `/DA`, else the field's effective one. Where there is none, or it
-///   names no font, the text is drawn in Helvetica, and
-///   [`Fault::MissingDefaultAppearance`] is told.
-/// - **The options** are [`Field::options_with`](crate::Field::options_with)'s
-///   labels, and the selection [`selection`](crate::selection) over them,
-///   [`Field::selected_with`](crate::Field::selected_with)'s `/I`, and the
-///   value's text strings, as [`Field::selection`](crate::Field::selection)
-///   finds it, each decoded once, its departures told. A value that is no
-///   text string or array of them is none, told as [`Fault::WrongType`] for
-///   `V`.
-/// - **A combo box's text** is the label of the option the value's text
-///   (an array's first) selects, `/I`'s first index where it agrees, else
-///   the first option of that export value; else that text as it is, as an
-///   editable combo box's value outside its options is; as PDFium as of
-///   chromium/8152 shows it. With no value, none.
-/// - **A list box's** labels are every option's, its selection that, and
-///   its top [`Field::top_index`](crate::Field::top_index).
+/// **The widget** and **the default appearance string** are read as
+/// [`widget_text`](super::widget_text) reads a text widget's: the
+/// rectangle, the border, `/MK`'s colors and rotation, and the widget's
+/// own `/DA`, else the field's effective one. Where there is none, or it
+/// names no font, the text is drawn in Helvetica, and
+/// [`Fault::MissingDefaultAppearance`] is told. Nothing of the field's
+/// options is read here, so a field's widgets are each read in the time
+/// one takes.
 ///
 /// # Errors
 ///
 /// [`Unmade::NotChoice`] for a field that isn't a combo box or list box
-/// field; [`Unmade::Limit`] for a cap of [`Limits::annots`] passed, or
-/// `/Opt` or `/I` past [`Limits::items`]; [`Unmade::Unreadable`] on locked,
-/// I/O, or reader-cap failures.
-pub fn widget_choice<'o, R, S>(
+/// field; [`Unmade::Limit`] for a cap of [`Limits::annots`] passed;
+/// [`Unmade::Unreadable`] on locked, I/O, or reader-cap failures.
+pub fn widget_choice<'o, 'c, R, S>(
     field: &Field<'o>,
     widget: &Widget<'o>,
+    choice: &'c FieldChoice,
     objects: R,
     rules: Rules,
     limits: &Limits,
     sink: &mut S,
-) -> Result<WidgetChoice, Unmade>
+) -> Result<WidgetChoice<'c>, Unmade>
 where
     R: Resolve<'o> + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    let combo = match field.kind() {
-        Some(FieldKind::Combo) => true,
-        Some(FieldKind::List) => false,
-        _ => return Err(Unmade::NotChoice),
-    };
+    if !matches!(field.kind(), Some(FieldKind::Combo | FieldKind::List)) {
+        return Err(Unmade::NotChoice);
+    }
     let (_, look, at) = read_look(field, widget, objects, rules, limits, sink)?;
     if look.da.font_name.is_none() && sink.wants() {
         sink.fault(Place::new(at, None), Fault::MissingDefaultAppearance);
     }
-    let options = field.options_with(objects, rules, limits, &mut *sink)?;
-    let indices = field.selected_with(objects, rules, limits, &mut *sink)?;
-    let values: Vec<&str> = match field.value() {
-        None => Vec::new(),
-        Some(FieldValue::Text(text)) => vec![text.as_str()],
-        Some(FieldValue::Items(items)) => items.iter().map(String::as_str).collect(),
-        Some(_) => {
-            if sink.wants() {
-                sink.fault(Place::new(field.id(), None), Fault::WrongType { key: "V" });
-            }
-            Vec::new()
-        }
-    };
-    let choice = match combo {
-        true => Choice::Combo(match values.first() {
-            Some(value) => match shown_option(&options, &indices, value) {
-                Some(index) => options[index].label().to_owned(),
-                None => (*value).to_owned(),
-            },
-            None => String::new(),
-        }),
-        false => Choice::List {
-            labels: options.iter().map(|o| o.label().to_owned()).collect(),
-            selected: crate::selection(&options, &indices, &values),
-            top: usize::try_from(field.top_index()).unwrap_or(usize::MAX),
-        },
-    };
     Ok(WidgetChoice { choice, look })
 }
 
@@ -899,29 +980,32 @@ where
 /// PDFium as of chromium/8152 finds it (`CPDF_FormField::GetSelectedIndex`):
 /// `/I`'s first index where its option's export value is `value`, else the
 /// first option whose export value is; none where no option's is.
-fn shown_option(options: &[FieldOption], indices: &[u32], value: &str) -> Option<usize> {
+fn shown_option(options: &[FieldOption], indices: &[usize], value: &str) -> Option<usize> {
     let by_index = indices
         .first()
-        .and_then(|&index| usize::try_from(index).ok())
+        .copied()
         .filter(|&index| options.get(index).is_some_and(|o| o.export == value));
     by_index.or_else(|| options.iter().position(|o| o.export == value))
 }
 
 /// Makes the appearance of `widget` of `field`, a combo box or list box
-/// field of `form`: [`widget_choice`], then the font its default appearance
-/// names from the form's default resources ([`Form::field_font`], or
-/// Helvetica where it names none), then [`WidgetChoice::make`] in it.
-/// Departures are told to `sink`.
+/// field of `form`: [`field_choice`] and [`widget_choice`], then the font
+/// its default appearance names from the form's default resources
+/// ([`Form::field_font`], or Helvetica where it names none), then
+/// [`WidgetChoice::make`] in it. Departures are told to `sink`.
 ///
-/// It reads the font for each widget: a caller making many widgets calls
-/// [`widget_choice`] for each and keeps a [`FieldFont`] for each font name.
+/// It reads the field's options and the font for each widget: a caller
+/// making many widgets calls [`field_choice`] once for a field and
+/// [`widget_choice`] for each of its widgets, and keeps a [`FieldFont`] for
+/// each font name.
 /// What's made is a text field's ([`MadeText`]): the appearance, its font,
 /// and the name `/DA` gives it, under which a fallback is added to the
 /// default resources.
 ///
 /// # Errors
 ///
-/// As [`widget_choice`], [`Form::field_font`], and [`WidgetChoice::make`];
+/// As [`field_choice`], [`widget_choice`], [`Form::field_font`], and
+/// [`WidgetChoice::make`];
 /// [`Unmade::FontNotBindable`] for a font the appearance's resources can't
 /// name ([`FieldFont::res`]).
 pub fn choice_for_widget<'o, R, S>(
@@ -937,7 +1021,8 @@ where
     R: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    let read = widget_choice(field, widget, objects, rules, limits, sink)?;
+    let choice = field_choice(field, objects, rules, limits, sink)?;
+    let read = widget_choice(field, widget, &choice, objects, rules, limits, sink)?;
     let font = match read.font_name() {
         Some(name) => form.field_font(objects, name, limits, sink)?,
         None => FieldFont::standard(Std14::Helvetica),

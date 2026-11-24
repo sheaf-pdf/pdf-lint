@@ -484,6 +484,8 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
             dict,
             id,
             merged: false,
+            // Its place among its field's widgets, known where it's kept.
+            index: 0,
         }));
     }
     if depth >= reader.limits.depth {
@@ -577,7 +579,10 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                     depth + 1,
                 )? {
                     Node::Field(kid) => walk.fields[index].kids.push(kid),
-                    Node::Widget(widget) => walk.fields[index].widgets.push(widget),
+                    Node::Widget(mut widget) => {
+                        widget.index = walk.fields[index].widgets.len();
+                        walk.fields[index].widgets.push(widget);
+                    }
                     Node::Skipped => {}
                 }
             }
@@ -594,6 +599,7 @@ fn node<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
                     dict,
                     id,
                     merged: true,
+                    index: 0,
                 });
             }
         }

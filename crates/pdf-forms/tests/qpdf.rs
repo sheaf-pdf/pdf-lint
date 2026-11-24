@@ -20,8 +20,8 @@ use std::path::Path;
 
 use pdf_fixtures::qpdf::Qpdf;
 use pdf_forms::appearance::{
-    Appearance, choice_for_widget, push_for_widget, text_for_widget, toggle_for_widget,
-    widget_choice, widget_text,
+    Appearance, choice_for_widget, field_choice, push_for_widget, text_for_widget,
+    toggle_for_widget, widget_choice, widget_text,
 };
 use pdf_forms::pdf_annots::{
     AnnotColor, AnnotMut, AppearanceChars, AppearanceEntry, AppearanceMode, Appearances,
@@ -543,6 +543,7 @@ fn button_document() -> (Vec<u8>, Vec<Bound>) {
             .unwrap()
             .unwrap();
         for field in form.fields() {
+            // None for the push button field.
             let group = field.group(&doc, Rules::Iso, &limits).unwrap();
             for (index, widget) in field.widgets().iter().enumerate() {
                 let id = widget.id().unwrap();
@@ -573,6 +574,8 @@ fn button_document() -> (Vec<u8>, Vec<Bound>) {
                         )
                         .unwrap();
                         assert!(!made.font.is_fallback());
+                        let group = group.as_ref().expect("a toggle field's group");
+                        assert_eq!(widget.index(), index);
                         let on = group.states()[index];
                         let state = group.group().state_name(index, on).into_owned();
                         assert_eq!(
@@ -869,9 +872,11 @@ fn choice_document() -> (Vec<u8>, Vec<Placed>) {
             .unwrap()
             .unwrap();
         for field in form.fields() {
+            let read = field_choice(field, &doc, Rules::Iso, &limits, &mut ()).unwrap();
             for widget in field.widgets() {
-                let read =
-                    widget_choice(field, widget, &doc, Rules::Iso, &limits, &mut ()).unwrap();
+                let of_widget =
+                    widget_choice(field, widget, &read, &doc, Rules::Iso, &limits, &mut ())
+                        .unwrap();
                 let shown = match read.combo() {
                     Some(combo) => combo.text.to_string(),
                     None => read.labels()[read.top()..read.top() + 4].join(" "),
@@ -886,7 +891,7 @@ fn choice_document() -> (Vec<u8>, Vec<Placed>) {
                     id: widget.id().unwrap(),
                     rect,
                     shown,
-                    rotation: read.look().rotation,
+                    rotation: of_widget.look().rotation,
                 };
                 made.push((choice.appearance, place));
             }

@@ -14,12 +14,16 @@
 //! that makes a button's appearance names its on state by [`on_state_name`].
 //!
 //! - **A widget's on state** is the name its normal appearance (`/AP /N`) has
-//!   for on, where it has one; else, in a field with `/Opt`, its index among
-//!   the field's widgets as a decimal (ISO 32000-2, Table 230), and else
-//!   `Yes`, the names PDFium as of chromium/8152 gives a state it makes.
-//! - **A widget's export value** is its `/Opt` entry, else its on state's
-//!   name read as text (UTF-8, as ISO 32000-2, §7.3.5 has a name's bytes
-//!   read).
+//!   for on, where it has one; else, in a field with `/Opt`
+//!   ([`Group::has_opt`]), its index among the field's widgets as a decimal
+//!   (ISO 32000-2, Table 230), and else `Yes`, the names PDFium as of
+//!   chromium/8152 gives a state it makes.
+//! - **A widget's export value** is its `/Opt` entry. In a field with
+//!   `/Opt`, a widget whose entry is empty, or that `/Opt` ends before, has
+//!   `Yes`, as PDFium as of chromium/8152 has it, so a widget past a short
+//!   `/Opt` doesn't go with one of its on state that has an entry. In a
+//!   field with no `/Opt` it's the on state's name read as text (UTF-8, as
+//!   ISO 32000-2, §7.3.5 has a name's bytes read).
 //! - **In unison,** pressing an off widget turns on every widget whose on
 //!   state and export value are both its own, and turns every other off; out
 //!   of unison it alone turns on. A check box field's widgets are always in
@@ -92,8 +96,11 @@ pub struct GroupWidget<'a> {
     pub on_state: Option<Cow<'a, [u8]>>,
     /// The widget's export value: its entry in the field's `/Opt`, by the
     /// widget's index. None where the field has no `/Opt`, or no entry for
-    /// the widget; then its export value is its on state's name read as
-    /// text.
+    /// the widget: its export value is then its on state's name read as
+    /// text in a field with no `/Opt`, and `Yes` in one with
+    /// ([`Group::has_opt`]), as it is for an entry that is empty. A widget
+    /// that has an entry is read as one of a field with `/Opt`, whatever
+    /// `has_opt` says.
     pub export: Option<Cow<'a, str>>,
 }
 
@@ -136,6 +143,11 @@ pub struct Group<'a> {
     /// buttons of one on state and export value turn on and off together. A
     /// check box field's widgets always do, whatever this says.
     pub in_unison: bool,
+    /// Whether the field has an `/Opt` array, of any length, an empty one
+    /// among them ([`Field::option_count`](crate::Field::option_count)): its
+    /// widgets with no on state of their own are then named by their
+    /// indexes, and those with no entry export `Yes`.
+    pub has_opt: bool,
     /// The field's widgets, in its order ([`Field::widgets`](crate::Field::widgets)'s):
     /// a widget's index here is the one its states, presses, and `/Opt`
     /// entry are by.
@@ -143,13 +155,15 @@ pub struct Group<'a> {
 }
 
 impl<'a> Group<'a> {
-    /// A group of `kind` of `widgets`, with neither flag.
+    /// A group of `kind` of `widgets`, with neither flag, of a field with no
+    /// `/Opt`.
     #[must_use]
     pub const fn new(kind: GroupKind, widgets: &'a [GroupWidget<'a>]) -> Self {
         Self {
             kind,
             no_toggle_to_off: false,
             in_unison: false,
+            has_opt: false,
             widgets,
         }
     }
@@ -168,15 +182,16 @@ impl<'a> Group<'a> {
         Some(self.name(index)?.into_cow())
     }
 
-    /// Widget `index`'s export value: its `/Opt` entry, else its on state's
-    /// name read as text (as UTF-8, a byte that isn't replaced by U+FFFD).
-    /// None past the widgets.
+    /// Widget `index`'s export value: its `/Opt` entry; in a field with
+    /// `/Opt`, `Yes` where the entry is empty or there is none; in a field
+    /// with no `/Opt`, its on state's name read as text (as UTF-8, a byte
+    /// that isn't replaced by U+FFFD). None past the widgets.
     #[must_use]
     pub fn export_value(&self, index: usize) -> Option<Cow<'a, str>> {
-        let widgets: &'a [GroupWidget<'a>] = self.widgets;
-        Some(match widgets.get(index)?.export.as_deref() {
+        let name = self.name(index)?;
+        Some(match self.opt_export(index) {
             Some(export) => Cow::Borrowed(export),
-            None => match self.name(index)?.into_cow() {
+            None => match name.into_cow() {
                 Cow::Borrowed(name) => String::from_utf8_lossy(name),
                 Cow::Owned(name) => Cow::Owned(String::from_utf8_lossy(&name).into_owned()),
             },
@@ -291,9 +306,23 @@ impl<'a> Group<'a> {
         let own = (widget.on_state.as_deref()).filter(|name| is_on_name(name));
         Some(match own {
             Some(name) => Name::Own(name),
-            None if widget.export.is_some() => Name::Index(index),
+            None if self.has_opt || widget.export.is_some() => Name::Index(index),
             None => Name::Yes,
         })
+    }
+
+    /// Widget `index`'s export value as `/Opt` gives it: its entry, and
+    /// `Yes` for an empty one, or for none in a field with `/Opt`. None in
+    /// a field with no `/Opt`, where it's the on state's name, and past the
+    /// widgets.
+    fn opt_export(&self, index: usize) -> Option<&'a str> {
+        let widgets: &'a [GroupWidget<'a>] = self.widgets;
+        match widgets.get(index)?.export.as_deref() {
+            Some(export) if !export.is_empty() => Some(export),
+            Some(_) => Some("Yes"),
+            None if self.has_opt => Some("Yes"),
+            None => None,
+        }
     }
 
     /// Whether widgets `a` and `b` go together in unison: the same on state
@@ -306,7 +335,7 @@ impl<'a> Group<'a> {
         if name_a.bytes(&mut buf_a) != name_b.bytes(&mut buf_b) {
             return false;
         }
-        match self.widgets[b].export.as_deref() {
+        match self.opt_export(b) {
             Some(export) => self.exports_as(a, export),
             None => {
                 let mut buf = [0; NAME_BUF];
@@ -317,18 +346,13 @@ impl<'a> Group<'a> {
 
     /// Whether widget `index`'s export value is `export`.
     fn exports_as(&self, index: usize, export: &str) -> bool {
-        match (self.widgets.get(index), self.name(index)) {
-            (
-                Some(GroupWidget {
-                    export: Some(own), ..
-                }),
-                _,
-            ) => own.as_ref() == export,
-            (Some(_), Some(name)) => {
+        match (self.opt_export(index), self.name(index)) {
+            (Some(own), _) => own == export,
+            (None, Some(name)) => {
                 let mut buf = [0; NAME_BUF];
                 String::from_utf8_lossy(name.bytes(&mut buf)) == export
             }
-            _ => false,
+            (None, None) => false,
         }
     }
 }
@@ -339,6 +363,7 @@ impl fmt::Debug for Group<'_> {
             .field("kind", &self.kind)
             .field("no_toggle_to_off", &self.no_toggle_to_off)
             .field("in_unison", &self.in_unison)
+            .field("has_opt", &self.has_opt)
             .field("widgets", &self.widgets.len())
             .finish()
     }
@@ -347,11 +372,14 @@ impl fmt::Debug for Group<'_> {
 /// The name a check box's or radio button's on state is written under in
 /// its widget's appearance dictionary (`/AP`): `existing`, the name its
 /// normal appearance already has for on, where it has one; else, in a field
-/// with `/Opt` (`has_opt`), `index`, the widget's among the field's, as a
-/// decimal (ISO 32000-2, Table 230), which tells widgets of one export value
-/// apart; else `Yes`. These are the names PDFium as of chromium/8152 gives a
-/// state it makes, but that PDFium puts the index before a name the widget
-/// has: here a name the widget has is kept, so its stream is found by it.
+/// that has an `/Opt` array (`has_opt`: one of any length, whether or not
+/// it has an entry for the widget, as [`Group::has_opt`] is), `index`, the
+/// widget's among the field's, as a decimal (ISO 32000-2, Table 230), which
+/// tells widgets of one export value apart; else `Yes`. These are the names
+/// PDFium as of chromium/8152 gives a state it makes, but that PDFium puts
+/// the index before a name the widget has: here a name the widget has is
+/// kept, so its stream is found by it. [`Group::on_state`] gives the same
+/// name for a widget of its group.
 ///
 /// An `existing` name that is empty, or `Off`, is none.
 #[must_use]
@@ -426,6 +454,7 @@ pub struct FieldGroup {
     kind: GroupKind,
     no_toggle_to_off: bool,
     in_unison: bool,
+    has_opt: bool,
     widgets: Vec<GroupWidget<'static>>,
     states: Vec<bool>,
 }
@@ -435,6 +464,7 @@ impl FieldGroup {
         kind: GroupKind,
         no_toggle_to_off: bool,
         in_unison: bool,
+        has_opt: bool,
         widgets: Vec<GroupWidget<'static>>,
         states: Vec<bool>,
     ) -> Self {
@@ -442,6 +472,7 @@ impl FieldGroup {
             kind,
             no_toggle_to_off,
             in_unison,
+            has_opt,
             widgets,
             states,
         }
@@ -454,6 +485,7 @@ impl FieldGroup {
             kind: self.kind,
             no_toggle_to_off: self.no_toggle_to_off,
             in_unison: self.in_unison,
+            has_opt: self.has_opt,
             widgets: &self.widgets,
         }
     }
@@ -474,6 +506,7 @@ impl fmt::Debug for FieldGroup {
             .field("kind", &self.kind)
             .field("no_toggle_to_off", &self.no_toggle_to_off)
             .field("in_unison", &self.in_unison)
+            .field("has_opt", &self.has_opt)
             .field("widgets", &self.widgets.len())
             .field("on", &self.states.iter().filter(|&&on| on).count())
             .finish()

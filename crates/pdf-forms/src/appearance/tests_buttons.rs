@@ -548,9 +548,80 @@ fn form_stream() -> Object {
     ))
 }
 
+/// Reading a toggle asks of `/Opt` only whether it's an array: nothing of
+/// it is decoded or told for a widget, so a field's widgets are each read
+/// alike however many it has, and what's wrong in `/Opt` is told once, by
+/// the field's group. An empty `/Opt` is one too: its widgets go by their
+/// indexes.
+#[test]
+fn a_toggle_reads_nothing_of_opt_but_whether_it_is_there() {
+    let kid = |parent: u32| widget(dict! { "Parent" => id(parent) });
+    let kids =
+        |from: u32| -> Vec<Object> { (from..from + 3).map(|n| Object::from(id(n))).collect() };
+    let fields = vec![
+        dict! {
+            "T" => Object::text("wrong"),
+            "FT" => Object::name("Btn"),
+            "Ff" => 1 << 15,
+            "Opt" => vec![Object::text("a"), Object::from(7), Object::text("c")],
+            "Kids" => kids(40),
+        },
+        dict! {
+            "T" => Object::text("empty"),
+            "FT" => Object::name("Btn"),
+            "Opt" => Vec::<Object>::new(),
+            "Kids" => kids(43),
+        },
+        dict! {
+            "T" => Object::text("name"),
+            "FT" => Object::name("Btn"),
+            "Opt" => Object::name("a"),
+            "Kids" => kids(46),
+        },
+    ];
+    let more = (40..49)
+        .map(|n| (n, Object::from(kid(10 + (n - 40) / 3))))
+        .collect();
+    let (objects, catalog) = form_of(fields, more);
+    let source = reading(&objects);
+    let limits = Limits::DEFAULT;
+    let form = Form::read(source, &catalog, Rules::Iso, &limits)
+        .unwrap()
+        .unwrap();
+    let wrong_opt = |told: &[(Place, Fault)]| {
+        let wrong = Fault::WrongType { key: "Opt" };
+        told.iter().filter(|(_, fault)| *fault == wrong).count()
+    };
+    for (field, count, names, faults) in [
+        (&form.fields()[0], Some(3), ["0", "1", "2"], 1),
+        (&form.fields()[1], Some(0), ["0", "1", "2"], 0),
+        // An `/Opt` that is no array is none, told by the group.
+        (&form.fields()[2], None, ["Yes", "Yes", "Yes"], 1),
+    ] {
+        assert_eq!(field.option_count(source, Rules::Iso, &limits), Ok(count));
+        let mut told: Vec<(Place, Fault)> = Vec::new();
+        for (index, widget) in field.widgets().iter().enumerate() {
+            assert_eq!(widget.index(), index);
+            let read = widget_toggle(field, widget, source, Rules::Iso, &limits, &mut told);
+            assert_eq!(read.unwrap().on_state(), names[index].as_bytes());
+            // A copy of the widget is read as the field's own is.
+            let copy = *widget;
+            let read = widget_toggle(field, &copy, source, Rules::Iso, &limits, &mut ());
+            assert_eq!(read.unwrap().on_state(), names[index].as_bytes());
+        }
+        assert_eq!(wrong_opt(&told), 0, "{told:?}");
+        let mut told: Vec<(Place, Fault)> = Vec::new();
+        let group = field.group_with(source, Rules::Iso, &limits, &mut told);
+        let group = group.unwrap().unwrap();
+        assert_eq!(wrong_opt(&told), faults, "{told:?}");
+        assert_eq!(group.group().has_opt, count.is_some());
+    }
+}
+
 /// The on state a toggle's appearances go under is the name its widget's
-/// normal appearance has, else its index where the field's `/Opt` has an
-/// entry for it, else `Yes`, as the field's group names it.
+/// normal appearance has, else its index where the field has an `/Opt`
+/// array, whether or not it has an entry for the widget, else `Yes`, as
+/// the field's group names it.
 #[test]
 fn on_states_are_the_widgets_own_else_its_index_else_yes() {
     let names = ["1", "Yes", "On", "spouse", "Choice1"];
@@ -566,7 +637,8 @@ fn on_states_are_the_widgets_own_else_its_index_else_yes() {
         }));
     }
     // A check box field of three kids and an `/Opt` of two: the third has
-    // no entry, so it's `Yes`, as its group names it.
+    // no entry, and is named by its index as the others are, as its group
+    // names it and as PDFium names every widget of a field with `/Opt`.
     let kid = || widget(dict! { "Parent" => id(15), "MK" => dict! { "CA" => Object::text("4") } });
     fields.push(dict! {
         "T" => Object::text("opt"),
@@ -592,7 +664,7 @@ fn on_states_are_the_widgets_own_else_its_index_else_yes() {
             .unwrap();
         let mut seen = Vec::new();
         for field in form.fields() {
-            let group = field.group(source, rules, &limits).unwrap();
+            let group = field.group(source, rules, &limits).unwrap().unwrap();
             for (index, widget) in field.widgets().iter().enumerate() {
                 let read = widget_toggle(field, widget, source, rules, &limits, &mut ()).unwrap();
                 let made = toggle_for_widget(&form, field, widget, source, rules, &limits, &mut ())
@@ -607,9 +679,7 @@ fn on_states_are_the_widgets_own_else_its_index_else_yes() {
         }
         assert_eq!(
             seen,
-            [
-                "1", "Yes", "On", "spouse", "Choice1", "0", "1", "Yes", "Yes"
-            ]
+            ["1", "Yes", "On", "spouse", "Choice1", "0", "1", "2", "Yes"]
         );
     }
 }
