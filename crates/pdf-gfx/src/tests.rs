@@ -707,6 +707,72 @@ fn a_name_shown_by_tj_and_the_quotes_is_its_bytes() {
     assert_approx(shown[4].1 - shown[3].1, g_width + 2.0);
 }
 
+/// `Tj`, `'`, `"`, `Tf`, `Do`, and marked-content tags read `true` and `false`
+/// as their written bytes, as PDFium's `GetString` takes them (`pdf-fonts`'s
+/// `shown` agrees); a `TJ` array's boolean is no string, and moves nothing.
+#[test]
+fn booleans_are_strings_where_pdfiums_get_string_reads_them() {
+    let mut store = Store::default();
+    let form_id = store.put_stream(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(100)],
+        },
+        b"BT (ok) Tj ET".to_vec(),
+    );
+    let resources = Object::from(dict! {
+        "Font" => dict! {
+            "true" => Std14::Helvetica.dict(),
+        },
+        "XObject" => dict! {
+            "false" => form_id,
+        },
+    });
+    let fonts = Fonts::default();
+    let content = Concat::new(&[
+        br#"true BMC BT true 10 Tf 14 TL 10 100 Td true Tj false ' 1 2 true " [(A) true (B) false] TJ ET false Do EMC"#,
+    ]);
+    let mut shown: Vec<Vec<u8>> = Vec::new();
+    let mut tags: Vec<Vec<u8>> = Vec::new();
+    interpret(
+        store.as_streams(),
+        &content,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        Opts::default(),
+        |ev| {
+            match ev.kind {
+                Kind::Text(show) => shown.push(show.string.to_vec()),
+                Kind::MarkedBegin(mark) => tags.push(mark.tag.to_vec()),
+                _ => {}
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    let strings: Vec<&[u8]> = shown.iter().map(Vec::as_slice).collect();
+    assert_eq!(
+        strings,
+        [&b"true"[..], b"false", b"true", b"A", b"B", b"ok"],
+        "{shown:?}"
+    );
+    assert_eq!(tags, [b"true".to_vec()]);
+
+    let mut budget = 1 << 20;
+    let fonts_shown = pdf_fonts::shown(
+        store.as_streams(),
+        &fonts,
+        Some(&resources),
+        &content,
+        &pdf_content_streams::ResCx::none(),
+        &pdf_fonts::Limits::DEFAULT,
+        &mut budget,
+    );
+    assert_eq!(fonts_shown.text(), "truefalsetrueABok");
+}
+
 #[cfg(feature = "programs")]
 #[test]
 fn embedded_truetype_outline_expands_glyph_quad() {
