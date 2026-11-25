@@ -2,6 +2,10 @@
 
 ## 0.1.0-alpha.2 (unreleased)
 
+- **§7.10 functions (`Function`, `FunctionKind`).** Public bounded reader and evaluator for `Type 0` sampled (`1/2/4/8/12/16/24/32` bps multilinear interpolation), `Type 2` exponential, `Type 3` stitching, and `Type 4` PostScript calculator (Table 42 stack machine) functions under `Rules::Iso` and `Rules::Pdfium`, capped by `Limits::{stream_bytes, sample_values, postscript_ops, postscript_stack}`.
+- **Color evaluation (`PreparedSpace`, `EvalOptions`, `Paint`).** Evaluates device, CIE (`CalGray`, `CalRGB`, `Lab`), `Indexed`, `Separation` (including `/All` and `/None`), and `DeviceN` spaces to sRGB (`[f32; 3]` / `[u8; 3]`), supporting `/DefaultGray`, `/DefaultRGB`, and `/DefaultCMYK` resource overrides under `Rules::Iso` and PDFium (`chromium/8152`) compatibility under `Rules::Pdfium`.
+- **Optional `icc` feature (`moxcms`).** Opt-in `icc` Cargo feature converts `ICCBased` streams and `/OutputIntents` destination profiles via pure-Rust `moxcms` (`unsafe_code = "forbid"`), falling back to `/Alternate` or the `/N` device space and reporting `Fault::IccProfile` when a profile is malformed.
+- **Image `/Decode` and palette helpers.** Added `Space::default_decode`, `Cie::lab_range`, `Icc::range`, `Indexed::lookup_bytes`, and `Lookup::bytes`.
 - **pdf-objects 0.1.0-alpha.3.** Updated to `pdf-objects` `=0.1.0-alpha.3`, re-exported as `pdf_color::pdf_objects`.
 - **Rust 1.92.** Raised MSRV from Rust 1.89 to 1.92 to match the workspace.
 

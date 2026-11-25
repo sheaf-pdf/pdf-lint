@@ -77,6 +77,7 @@ clippy:
     cargo clippy --locked --workspace --lib --bins -- -D warnings
     cargo clippy --locked -p pdf-filters --all-targets -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-color --features icc --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --features simd,image-ends,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
@@ -141,6 +142,8 @@ test:
     cargo test --locked -p pdf-filters --doc
     cargo nextest run --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs --doc
+    cargo nextest run --locked -p pdf-color --features icc
+    cargo test --locked -p pdf-color --features icc --doc
     cargo nextest run --locked -p pdf-content-streams
     cargo test --locked -p pdf-content-streams --doc
     cargo nextest run --locked -p pdf-content-streams --features simd,image-ends,tracing
@@ -704,10 +707,13 @@ semantics-msrv:
     cargo +{{ semantics_msrv }} nextest run --locked -p pdf-semantics --features tracing
     cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --features tracing --doc
 
-# Test pdf-color on its oldest supported Rust, which must be installed.
+# Test pdf-color on its oldest supported Rust, which must be installed, without
+# `icc` and with it.
 color-msrv:
     cargo +{{ color_msrv }} nextest run --locked -p pdf-color
     cargo +{{ color_msrv }} test --locked -p pdf-color --doc
+    cargo +{{ color_msrv }} nextest run --locked -p pdf-color --features icc
+    cargo +{{ color_msrv }} test --locked -p pdf-color --features icc --doc
 
 # Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it,
 # with no feature, with its spans, and with what embeds a font, subsetter among

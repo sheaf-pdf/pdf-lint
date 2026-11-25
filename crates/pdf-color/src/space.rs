@@ -10,10 +10,11 @@
 //! a reference to a reference is a fault, a tint transform that doesn't load, and a
 //! white point that PDFium's 32-bit reading makes 0.
 
+use std::borrow::Cow;
 use std::iter::FusedIterator;
 
 use pdf_objects::fault::Sink;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Stream, Unreadable};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Str, Stream, Streams, Unreadable, Why};
 
 use crate::fault::Fault;
 use crate::limits::Limits;
@@ -544,6 +545,248 @@ impl<'o> Space<'o> {
             names: names.iter(),
         }
     }
+
+    /// Default `/Decode` intervals `(min, max)` for a sampled image with `bits_per_component`
+    /// (`1..=32`) in this color space (ISO 32000-2, §8.9.5.2, Table 90).
+    ///
+    /// Returns `Ok(None)` when `bits_per_component` is outside `1..=32`, when `self` is a
+    /// `Pattern` space (which cannot be an image's `/ColorSpace`), or when component count is
+    /// unknown due to a malformed space.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Unreadable`] (other than [`Why::Damaged`]) when resolving indirect `/Range`
+    /// arrays on `Lab` or `ICCBased` spaces.
+    pub fn default_decode<R: Resolve<'o>>(
+        &self,
+        objects: R,
+        bits_per_component: u8,
+        limits: &Limits,
+    ) -> Result<Option<Vec<(f64, f64)>>, Unreadable> {
+        if !(1..=32).contains(&bits_per_component) {
+            return Ok(None);
+        }
+        Ok(match self {
+            Space::DeviceGray | Space::CalGray(_) | Space::Separation(_) => Some(vec![(0.0, 1.0)]),
+            Space::DeviceRGB | Space::CalRGB(_) => Some(vec![(0.0, 1.0); 3]),
+            Space::DeviceCMYK => Some(vec![(0.0, 1.0); 4]),
+            Space::Lab(cie) => {
+                let [amin, amax, bmin, bmax] = cie.lab_range(objects, limits)?;
+                Some(vec![(0.0, 100.0), (amin, amax), (bmin, bmax)])
+            }
+            Space::ICCBased(icc) => {
+                let Some(n) = icc.n else {
+                    return Ok(None);
+                };
+                match icc.range(objects, limits)? {
+                    Some(pairs) => Some(pairs),
+                    None => Some(vec![(0.0, 1.0); n as usize]),
+                }
+            }
+            Space::Indexed(_) => {
+                let hi = ((1_u64 << bits_per_component) - 1) as f64;
+                Some(vec![(0.0, hi)])
+            }
+            Space::DeviceN(dn) => dn.components.map(|n| vec![(0.0, 1.0); n as usize]),
+            Space::Pattern(_) => None,
+        })
+    }
+}
+
+impl<'o> Cie<'o> {
+    /// Reads `[amin, amax, bmin, bmax]` from a `Lab` dictionary's `/Range`, falling back to
+    /// `[-100.0, 100.0, -100.0, 100.0]` when absent or invalid (ISO 32000-2, Table 64).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Unreadable`] (other than [`Why::Damaged`]) when resolving indirect references.
+    pub fn lab_range<R: Resolve<'o>>(
+        &self,
+        objects: R,
+        limits: &Limits,
+    ) -> Result<[f64; 4], Unreadable> {
+        const DEFAULT: [f64; 4] = [-100.0, 100.0, -100.0, 100.0];
+        let Some(dict) = self.dict else {
+            return Ok(DEFAULT);
+        };
+        let Some(entry) = dict.get(b"Range").filter(|v| !v.is_null()) else {
+            return Ok(DEFAULT);
+        };
+        let Some(nums) = read_number_vec(&objects, entry, 4, limits)? else {
+            return Ok(DEFAULT);
+        };
+        let [a0, a1, b0, b1] = [nums[0], nums[1], nums[2], nums[3]];
+        if a0 <= a1 && b0 <= b1 {
+            Ok([a0, a1, b0, b1])
+        } else {
+            Ok(DEFAULT)
+        }
+    }
+}
+
+impl<'o> Icc<'o> {
+    /// Reads the `n` `(min, max)` pairs of an `ICCBased` stream's `/Range` entry when valid
+    /// (`min <= max`), or `Ok(None)` when absent or malformed (ISO 32000-2, Table 65).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Unreadable`] (other than [`Why::Damaged`]) when resolving indirect references.
+    pub fn range<R: Resolve<'o>>(
+        &self,
+        objects: R,
+        limits: &Limits,
+    ) -> Result<Option<Vec<(f64, f64)>>, Unreadable> {
+        let (Some(stream), Some(n)) = (self.stream, self.n) else {
+            return Ok(None);
+        };
+        let Some(entry) = stream.dict.get(b"Range").filter(|v| !v.is_null()) else {
+            return Ok(None);
+        };
+        let count = (n as usize) * 2;
+        let Some(nums) = read_number_vec(&objects, entry, count, limits)? else {
+            return Ok(None);
+        };
+        let mut pairs = Vec::with_capacity(n as usize);
+        for &[lo, hi] in nums.as_chunks::<2>().0 {
+            if lo > hi {
+                return Ok(None);
+            }
+            pairs.push((lo, hi));
+        }
+        Ok(Some(pairs))
+    }
+}
+
+impl<'o> Indexed<'o> {
+    /// Extracts the raw palette bytes of this `Indexed` space's lookup table up to `limit` bytes,
+    /// whether stored as a string or an indirect/inline stream (§8.6.6.3).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unreadable`] when the string is still encrypted ([`Why::Locked`]), when the table
+    /// exceeds `limit` ([`Why::Limit`]), or when stream decoding fails for a reason other than
+    /// [`Why::Damaged`].
+    pub fn lookup_bytes<'a, S: Streams + ?Sized>(
+        &'a self,
+        streams: &'a S,
+        limit: usize,
+    ) -> Result<Option<Cow<'a, [u8]>>, Unreadable>
+    where
+        'o: 'a,
+    {
+        match &self.lookup {
+            Some(lookup) => lookup.bytes(streams, limit),
+            None => Ok(None),
+        }
+    }
+}
+
+impl<'o> Lookup<'o> {
+    /// Extracts the decoded bytes of this lookup table up to `limit` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unreadable`] with [`Why::Locked`] for an un-decrypted string, [`Why::Limit`] if
+    /// the byte length exceeds `limit`, or any non-[`Why::Damaged`] error from `streams.decoded`.
+    pub fn bytes<'a, S: Streams + ?Sized>(
+        &'a self,
+        streams: &'a S,
+        limit: usize,
+    ) -> Result<Option<Cow<'a, [u8]>>, Unreadable>
+    where
+        'o: 'a,
+    {
+        let zero = ObjectId::new(0, 0);
+        match self {
+            Lookup::String(Str::Bytes(bytes)) => {
+                if bytes.len() > limit {
+                    return Err(Unreadable::new(
+                        zero,
+                        Why::Limit,
+                        "Indexed lookup string exceeds byte limit",
+                    ));
+                }
+                Ok(Some(Cow::Borrowed(bytes)))
+            }
+            Lookup::String(Str::Encrypted(_)) => Err(Unreadable::new(
+                zero,
+                Why::Locked,
+                "Indexed lookup string is encrypted",
+            )),
+            Lookup::Stream { id: Some(id), .. } => match streams.decoded(*id, limit) {
+                Ok(data) => Ok(Some(data)),
+                Err(e) if e.why == Why::Damaged => Ok(None),
+                Err(e) => Err(e),
+            },
+            Lookup::Stream { stream, id: None } => {
+                if stream.dict.has(b"Filter") {
+                    return Ok(None);
+                }
+                let Some(bytes) = stream.data.bytes() else {
+                    return Ok(None);
+                };
+                if bytes.len() > limit {
+                    return Err(Unreadable::new(
+                        zero,
+                        Why::Limit,
+                        "inline Indexed lookup stream exceeds byte limit",
+                    ));
+                }
+                Ok(Some(Cow::Borrowed(bytes)))
+            }
+        }
+    }
+}
+
+pub(crate) fn resolve_bounded<'o, R: Resolve<'o>>(
+    objects: &R,
+    mut obj: &'o Object,
+    visits: &mut usize,
+    limits: &Limits,
+) -> Result<Option<(&'o Object, Option<ObjectId>)>, Unreadable> {
+    let mut path = Vec::new();
+    while let Some(id) = obj.as_reference() {
+        if path.contains(&id) || path.len() > limits.space_depth || *visits >= limits.space_visits {
+            return Ok(None);
+        }
+        *visits += 1;
+        match objects.try_resolve(id) {
+            Ok(Some(next)) => {
+                path.push(id);
+                obj = next;
+            }
+            Ok(None) => return Ok(None),
+            Err(e) if e.why == Why::Damaged => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(Some((obj, path.last().copied())))
+}
+
+pub(crate) fn read_number_vec<'o, R: Resolve<'o>>(
+    objects: &R,
+    written: &'o Object,
+    expected_len: usize,
+    limits: &Limits,
+) -> Result<Option<Vec<f64>>, Unreadable> {
+    let mut visits = 0;
+    let Some((arr_obj, _)) = resolve_bounded(objects, written, &mut visits, limits)? else {
+        return Ok(None);
+    };
+    let Some(items) = arr_obj.as_array().filter(|a| a.len() == expected_len) else {
+        return Ok(None);
+    };
+    let mut out = Vec::with_capacity(expected_len);
+    for item in items {
+        let Some((num_obj, _)) = resolve_bounded(objects, item, &mut visits, limits)? else {
+            return Ok(None);
+        };
+        let Some(n) = num_obj.as_number().filter(|v| v.is_finite()) else {
+            return Ok(None);
+        };
+        out.push(n);
+    }
+    Ok(Some(out))
 }
 
 impl<'o> Attributes<'o> {
