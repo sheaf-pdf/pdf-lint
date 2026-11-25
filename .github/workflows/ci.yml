@@ -150,6 +150,8 @@ jobs:
         run: just semantics-msrv
       - name: pdf-color
         run: just color-msrv
+      - name: pdf-images
+        run: just images-msrv
       - name: pdf-fonts
         run: just fonts-msrv fonts-cmaps-msrv
       - name: pdf-gfx
@@ -190,6 +192,8 @@ jobs:
         run: just crypt-package
       - name: pdf-color
         run: just color-package
+      - name: pdf-images
+        run: just images-package
       - name: pdf-structure
         run: just structure-package
       - name: pdf-content-streams

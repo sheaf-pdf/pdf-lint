@@ -230,6 +230,7 @@ pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # fonts for text, which reads no program whatever the features. The feature
 # of that name below turns it on.
 pdf-fonts = { path = "../crates/pdf-fonts", features = ["embed"] }
+pdf-images = { path = "../crates/pdf-images", features = ["icc"] }
 pdf-gfx = { path = "../crates/pdf-gfx" }
 pdf-annots = { path = "../crates/pdf-annots" }
 # With `embed`, so `forms` draws a value in its field's font and a fallback
@@ -254,8 +255,8 @@ pdf-structure = { path = "../crates/pdf-structure", features = ["insecure-test-w
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [features]
-# pdf-content-streams' dependencies on the CPU's SIMD, found as they run.
-simd = ["pdf-content-streams/simd"]
+# pdf-content-streams' and pdf-images' dependencies on the CPU's SIMD, found as they run.
+simd = ["pdf-content-streams/simd", "pdf-images/simd"]
 # Adobe's predefined CMaps, from pdf-fonts' bundle, so a name that's one
 # reaches it.
 predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps", "pdf-annots/predefined-cmaps", "pdf-forms/predefined-cmaps"]
@@ -319,6 +320,13 @@ bench = false
 [[bin]]
 name = "color"
 path = "fuzz_targets/color.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "images"
+path = "fuzz_targets/images.rs"
 test = false
 doc = false
 bench = false

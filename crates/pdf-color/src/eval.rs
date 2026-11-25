@@ -7,11 +7,10 @@ use std::fmt;
 use std::sync::Arc;
 
 #[cfg(feature = "icc")]
+use pdf_objects::Stream;
 use pdf_objects::fault::Place;
 use pdf_objects::fault::Sink;
-use pdf_objects::{Dict, Object, Resolve, Rules, Streams, Unreadable};
-#[cfg(feature = "icc")]
-use pdf_objects::{ObjectId, Span, Stream, Why};
+use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Span, Streams, Unreadable, Why};
 
 use crate::cmyk_lut::pdfium_cmyk_to_srgb;
 use crate::fault::Fault;
@@ -297,6 +296,27 @@ impl PreparedSpace {
     /// Evaluates `components` (`len >= self.components()`) to [`Paint`].
     #[must_use]
     pub fn eval(&self, components: &[f32], limits: &Limits) -> Option<Paint> {
+        self.eval_inner(components, None, limits)
+    }
+
+    /// Evaluates `components` (`len >= self.components()`) to [`Paint`], overriding the active
+    /// [`Rules`] (`Rules::Iso` vs `Rules::Pdfium`) on device, CIE, and base/alternate spaces.
+    #[must_use]
+    pub fn eval_with_rules(
+        &self,
+        components: &[f32],
+        rules: Rules,
+        limits: &Limits,
+    ) -> Option<Paint> {
+        self.eval_inner(components, Some(rules), limits)
+    }
+
+    fn eval_inner(
+        &self,
+        components: &[f32],
+        rules_override: Option<Rules>,
+        limits: &Limits,
+    ) -> Option<Paint> {
         let need = self.components as usize;
         if components.len() < need {
             return None;
@@ -311,8 +331,9 @@ impl PreparedSpace {
                 Some(Paint::Srgb([clamp01(c[0]), clamp01(c[1]), clamp01(c[2])]))
             }
             PreparedKind::DeviceCMYK { rules } => {
+                let active = rules_override.unwrap_or(*rules);
                 let (cy, mg, yl, bk) = (clamp01(c[0]), clamp01(c[1]), clamp01(c[2]), clamp01(c[3]));
-                let rgb = match rules {
+                let rgb = match active {
                     Rules::Iso => [
                         1.0 - (cy + bk).min(1.0),
                         1.0 - (mg + bk).min(1.0),
@@ -322,14 +343,15 @@ impl PreparedSpace {
                 };
                 Some(Paint::Srgb(rgb))
             }
-            PreparedKind::Defaulted { target } => target.eval(c, limits),
+            PreparedKind::Defaulted { target } => target.eval_inner(c, rules_override, limits),
             PreparedKind::CalGray {
                 rules,
                 white,
                 gamma,
             } => {
+                let active = rules_override.unwrap_or(*rules);
                 let a = clamp01(c[0]);
-                let rgb = match rules {
+                let rgb = match active {
                     Rules::Iso => {
                         let ag = a.powf(*gamma);
                         let xyz = [white[0] * ag, white[1] * ag, white[2] * ag];
@@ -361,6 +383,7 @@ impl PreparedSpace {
                 white,
                 range,
             } => {
+                let active = rules_override.unwrap_or(*rules);
                 let l_star = clamp_pair(c[0], 0.0, 100.0);
                 let a_star = clamp_pair(c[1], range[0], range[1]);
                 let b_star = clamp_pair(c[2], range[2], range[3]);
@@ -375,7 +398,7 @@ impl PreparedSpace {
                         (108.0 / 841.0) * (t - 4.0 / 29.0)
                     }
                 };
-                let d65 = match rules {
+                let d65 = match active {
                     Rules::Iso => {
                         let xyz = [
                             white[0] * inv_f(l),
@@ -433,10 +456,12 @@ impl PreparedSpace {
                         clamp01(dst[2]),
                     ]))
                 } else {
-                    fallback.eval(c, limits)
+                    fallback.eval_inner(c, rules_override, limits)
                 }
             }
-            PreparedKind::IccFallback { fallback } => fallback.eval(c, limits),
+            PreparedKind::IccFallback { fallback } => {
+                fallback.eval_inner(c, rules_override, limits)
+            }
             PreparedKind::Indexed {
                 hival,
                 base_ranges,
@@ -461,7 +486,7 @@ impl PreparedSpace {
                     let (lo, hi) = base_ranges.get(j).copied().unwrap_or((0.0, 1.0));
                     *slot = lo + t * (hi - lo);
                 }
-                base.eval(dst, limits)
+                base.eval_inner(dst, rules_override, limits)
             }
             PreparedKind::SeparationNone => Some(Paint::None),
             PreparedKind::SeparationAllIso => {
@@ -473,7 +498,7 @@ impl PreparedSpace {
                 tint,
                 alternate,
             } => {
-                if *all_none {
+                if *all_none && rules_override.unwrap_or(Rules::Iso) == Rules::Iso {
                     return Some(Paint::None);
                 }
                 let out_n = alternate.components() as usize;
@@ -488,7 +513,7 @@ impl PreparedSpace {
                 if !tint.eval(c, alt_in, limits) {
                     return None;
                 }
-                alternate.eval(alt_in, limits)
+                alternate.eval_inner(alt_in, rules_override, limits)
             }
         }
     }
@@ -549,7 +574,6 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    #[cfg(feature = "icc")]
     fn say(&mut self, id: Option<ObjectId>, at: Option<Span>, fault: Fault) {
         if self.sink.wants() {
             self.sink.fault(Place::new(id, at), fault);
@@ -795,8 +819,18 @@ where
         let Some(base) = self.build(base_space, depth + 1, true)? else {
             return Ok(None);
         };
-        let Some(bytes) = idx.lookup_bytes(&self.objects, self.limits.stream_bytes)? else {
-            return Ok(None);
+        let bytes = match idx.lookup_bytes(&self.objects, self.limits.stream_bytes) {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(None),
+            Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => {
+                let lookup_id = match &idx.lookup {
+                    Some(crate::space::Lookup::Stream { id, .. }) => *id,
+                    _ => None,
+                };
+                self.say(lookup_id, None, Fault::LookupLength);
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
         };
         let base_ranges = base
             .decode_ranges

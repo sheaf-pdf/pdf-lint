@@ -25,6 +25,7 @@ members = [
     "crates/pdf-content-streams",
     "crates/pdf-semantics",
     "crates/pdf-color",
+    "crates/pdf-images",
     "crates/pdf-fonts",
     "crates/pdf-gfx",
     "crates/pdf-annots",
@@ -64,6 +65,7 @@ pdf-filters = { path = "crates/pdf-filters", version = "=0.1.0-alpha.3", default
 pdf-crypt = { path = "crates/pdf-crypt", version = "=0.1.0-alpha.3" }
 pdf-structure = { path = "crates/pdf-structure", version = "=0.1.0-alpha.1" }
 pdf-color = { path = "crates/pdf-color", version = "=0.1.0-alpha.2" }
+pdf-images = { path = "crates/pdf-images", version = "=0.1.0-alpha.1", default-features = false }
 pdf-content-streams = { path = "crates/pdf-content-streams", version = "=0.1.0-alpha.1" }
 pdf-semantics = { path = "crates/pdf-semantics", version = "=0.1.0-alpha.1", default-features = false }
 pdf-fonts = { path = "crates/pdf-fonts", version = "=0.1.0-alpha.1", default-features = false }

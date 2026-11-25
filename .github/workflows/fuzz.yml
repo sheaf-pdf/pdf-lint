@@ -56,13 +56,13 @@ jobs:
             t5: forms
             runs: structure write semantics linearize forms
           - group: fonts
-            label: content, color, fonts, embed
+            label: content, color, images, fonts, embed
             t1: content
             t2: color
-            t3: fonts
-            t4: embed
-            t5: ""
-            runs: content color fonts embed
+            t3: images
+            t4: fonts
+            t5: embed
+            runs: content color images fonts embed
           - group: upper
             label: gfx, annots, pdfs, arlington, check
             t1: gfx
@@ -74,11 +74,11 @@ jobs:
           - group: features
             label: simd and predefined-cmaps
             t1: content
-            t2: fonts
-            t3: gfx
-            t4: annots
-            t5: ""
-            runs: content:simd fonts:predefined-cmaps gfx:predefined-cmaps annots:predefined-cmaps
+            t2: images
+            t3: fonts
+            t4: gfx
+            t5: annots
+            runs: content:simd images:simd fonts:predefined-cmaps gfx:predefined-cmaps annots:predefined-cmaps
     steps:
       - uses: actions/checkout@v7
         with:
@@ -154,13 +154,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, forms, linearize, pdfs, arlington, check]
+        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, images, fonts, embed, gfx, annots, forms, linearize, pdfs, arlington, check]
         # The features fuzz/ is built with: none, for each target. A run
         # given features of its own is a combination of its own, as it sets
         # this key, so it doesn't change the target's run without them.
         features: [""]
         include:
           - target: content
+            features: simd
+          - target: images
             features: simd
           - target: fonts
             features: predefined-cmaps

@@ -50,12 +50,12 @@ This document gives developers and coding agents a fast mental model of the work
                                └─────────────┘
 ```
 
-*(Internal workspace-only crates: `crates/pdf-fixtures` provides test PDF and TrueType program builders and `qpdf` oracle helpers; `crates/pdf-linearize-lopdf` tests `pdf-linearize`'s model-agnostic engine against `lopdf`.)*
+*(Internal workspace-only crates: `crates/pdf-fixtures` provides test PDF and TrueType program builders and `qpdf` oracle helpers; `crates/pdf-pdfium` provides runtime-loaded `libpdfium` rendering and the `0–100` visual/ISO conformance rubric; `crates/pdf-linearize-lopdf` tests `pdf-linearize`'s model-agnostic engine against `lopdf`.)*
 
 ## 2. Core Cross-Crate Concepts
 
 ### Zero-I/O Domain Crates (`Resolve` and `Streams`)
-Only `pdf-structure` (and `pdfs` on top of it) reads or writes files. Domain crates—`pdf-color`, `pdf-semantics`, `pdf-content-streams`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, `pdf-forms`, and `pdf-arlington`—operate over two traits defined in [`pdf-objects`](crates/pdf-objects):
+Only `pdf-structure` (and `pdfs` on top of it) reads or writes files. Domain crates—`pdf-color`, `pdf-semantics`, `pdf-content-streams`, `pdf-images`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, `pdf-forms`, and `pdf-arlington`—operate over two traits defined in [`pdf-objects`](crates/pdf-objects):
 - **`Resolve`**: Resolves an indirect `ObjectId` to `Option<&Object>` (or `try_resolve` -> `Result<Option<&Object>, Unreadable>` to distinguish missing objects from locked, capped, damaged, or I/O-failed reads). Implemented for `&pdf_structure::Reading`, `&pdf_structure::Document`, `&pdf_structure::WithReading`, and any `Fn(ObjectId) -> Option<&Object>` closure.
 - **`Streams`**: Extends `Resolve` with `decoded(id, limit)` to return decrypted, filter-decoded stream bytes up to `limit`. Use `pdf_objects::WithStreams` to pair a closure resolver with a stream-decoding function in tests or custom callers.
 

@@ -16,6 +16,7 @@ structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cu
 content_msrv := `grep -m1 '^rust-version' crates/pdf-content-streams/Cargo.toml | cut -d'"' -f2`
 semantics_msrv := `grep -m1 '^rust-version' crates/pdf-semantics/Cargo.toml | cut -d'"' -f2`
 color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' -f2`
+images_msrv := `grep -m1 '^rust-version' crates/pdf-images/Cargo.toml | cut -d'"' -f2`
 fonts_msrv := `grep -m1 '^rust-version' crates/pdf-fonts/Cargo.toml | cut -d'"' -f2`
 gfx_msrv := `grep -m1 '^rust-version' crates/pdf-gfx/Cargo.toml | cut -d'"' -f2`
 annots_msrv := `grep -m1 '^rust-version' crates/pdf-annots/Cargo.toml | cut -d'"' -f2`
@@ -78,6 +79,8 @@ clippy:
     cargo clippy --locked -p pdf-filters --all-targets -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
     cargo clippy --locked -p pdf-color --features icc --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-images --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-images --features icc,simd,zlib-rs,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --features simd,image-ends,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
@@ -144,6 +147,10 @@ test:
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs --doc
     cargo nextest run --locked -p pdf-color --features icc
     cargo test --locked -p pdf-color --features icc --doc
+    cargo nextest run --locked -p pdf-images
+    cargo test --locked -p pdf-images --doc
+    cargo nextest run --locked -p pdf-images --features icc,simd,zlib-rs,tracing
+    cargo test --locked -p pdf-images --features icc,simd,zlib-rs,tracing --doc
     cargo nextest run --locked -p pdf-content-streams
     cargo test --locked -p pdf-content-streams --doc
     cargo nextest run --locked -p pdf-content-streams --features simd,image-ends,tracing
@@ -338,6 +345,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-content-streams --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-images --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
@@ -535,6 +543,11 @@ crypt-package: (_package "pdf-crypt")
 # version it names isn't published; `_package` says what's checked.
 color-package: (_package "pdf-color" "pdf-objects")
 
+# Package pdf-images as a publish would, pdf-objects, pdf-color,
+# pdf-content-streams and pdf-filters beside it while the versions it and they
+# name aren't published; `_package` says what's checked.
+images-package: (_package "pdf-images" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-filters")
+
 # Package pdf-structure as a publish would, pdf-objects, pdf-crypt and
 # pdf-filters beside it while the versions it names aren't published;
 # `_package` says what's checked.
@@ -600,7 +613,7 @@ arlington-package: (_package "pdf-arlington" "pdf-objects" "pdf-color")
 lint-package: (_package "pdf-lint" "pdf-objects" "pdf-filters" "pdf-crypt" "pdf-color" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize" "pdf-arlington")
 
 # Package every published crate as a publish would; `_package` says what's checked.
-package: tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package forms-package linearize-package pdfs-package arlington-package lint-package
+package: tokenizer-package objects-package filters-package crypt-package color-package images-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package forms-package linearize-package pdfs-package arlington-package lint-package
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
@@ -714,6 +727,14 @@ color-msrv:
     cargo +{{ color_msrv }} test --locked -p pdf-color --doc
     cargo +{{ color_msrv }} nextest run --locked -p pdf-color --features icc
     cargo +{{ color_msrv }} test --locked -p pdf-color --features icc --doc
+
+# Test pdf-images on its oldest supported Rust, which must be installed, with
+# no feature and with every optional feature.
+images-msrv:
+    cargo +{{ images_msrv }} nextest run --locked -p pdf-images
+    cargo +{{ images_msrv }} test --locked -p pdf-images --doc
+    cargo +{{ images_msrv }} nextest run --locked -p pdf-images --features icc,simd,zlib-rs,tracing
+    cargo +{{ images_msrv }} test --locked -p pdf-images --features icc,simd,zlib-rs,tracing --doc
 
 # Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it,
 # with no feature, with its spans, and with what embeds a font, subsetter among
@@ -831,7 +852,7 @@ lint-msrv:
     cargo +{{ lint_msrv }} test --locked -p pdf-lint --no-default-features --doc
 
 # Test every crate on its oldest supported Rust.
-msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv forms-msrv forms-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
+msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv images-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv forms-msrv forms-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
@@ -924,6 +945,11 @@ fuzz target="tokenize" seconds="60" features="":
         PDF_COLOR_FUZZ_SEEDS="$PWD/fuzz/seeds/color" cargo test --locked -q -p pdf-color --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/color
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" color fuzz/corpus/color fuzz/seeds/color -- -dict=fuzz/color.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
+    images)
+        PDF_IMAGES_FUZZ_SEEDS="$PWD/fuzz/seeds/images" cargo test --locked -q -p pdf-images --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/images
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" images fuzz/corpus/images fuzz/seeds/images -- -dict=fuzz/images.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     fonts)
         PDF_FONTS_FUZZ_SEEDS="$PWD/fuzz/seeds/fonts" cargo test --locked -q -p pdf-fonts --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
