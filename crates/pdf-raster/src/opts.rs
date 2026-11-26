@@ -359,9 +359,16 @@ impl RenderOpts {
 
 /// Aggregate work and approximation metrics returned alongside a rendered
 /// [`crate::Pixmap`].
+///
+/// Check [`RenderSummary::reported`] before interpreting zero counts: external
+/// engines such as `PdfiumBackend` return [`RenderSummary::unreported`]
+/// (`reported == false`) rather than per-operator counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct RenderSummary {
+    /// `true` when the rendering backend populated this summary; `false` when
+    /// the backend does not report internal counters (e.g. `PdfiumBackend`).
+    pub reported: bool,
     /// Underlying `pdf-gfx` content-stream interpretation summary.
     pub gfx: pdf_gfx::Summary,
     /// Image XObjects and inline images decoded and painted.
@@ -380,4 +387,16 @@ pub struct RenderSummary {
     /// `true` if any font metric/program was approximated or substituted, or if
     /// a damaged image/pattern/soft-mask was skipped.
     pub approximated: bool,
+}
+
+impl RenderSummary {
+    /// Returns an empty summary marked `reported = false` for backends that do
+    /// not expose internal draw counters.
+    #[must_use]
+    pub fn unreported() -> Self {
+        Self {
+            reported: false,
+            ..Self::default()
+        }
+    }
 }

@@ -9,13 +9,9 @@
 
 use std::sync::Arc;
 
-use crate::backend::{BackendError, RenderBackend};
-use crate::opts::RenderOpts;
-use crate::pixmap::Pixmap;
+use pdf_raster::{BackendError, Pixmap, RenderBackend, RenderOpts};
 
-#[forbid(unsafe_code)]
 mod image;
-#[forbid(unsafe_code)]
 mod score;
 
 pub use image::{MAX_PIXELS, RgbaImage};

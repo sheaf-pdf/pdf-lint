@@ -591,13 +591,15 @@ where
 }
 
 /// Decodes an indirect Image XObject `image_id` in the context of `page`'s
-/// `/Resources` into straight `sRGB` `RGBA8` ([`pdf_images::RgbaImage`]),
-/// without collecting non-fatal faults.
+/// `/Resources` into straight `sRGB` `RGBA8` ([`pdf_images::RgbaImage`],
+/// `images` feature), without collecting non-fatal faults.
 ///
 /// # Errors
 ///
+/// [`Error::Unreadable`] if `page`'s `/Resources` cannot be read, or
 /// [`Error::Images`] if `image_id` is missing, malformed, exceeds
 /// `limits.images`, or fails to decode.
+#[cfg(feature = "images")]
 pub fn decode_image<'o, O>(
     objects: O,
     page: &pages::Page<'o>,
@@ -612,11 +614,12 @@ where
 }
 
 /// [`decode_image`](fn@decode_image), reporting recoverable ISO 32000-2
-/// departures to `sink` ([`pdf_images::Fault`]).
+/// departures to `sink` ([`pdf_images::Fault`], `images` feature).
 ///
 /// # Errors
 ///
 /// As [`decode_image`](fn@decode_image) fails.
+#[cfg(feature = "images")]
 pub fn decode_image_with<'o, O, K>(
     objects: O,
     page: &pages::Page<'o>,
@@ -643,13 +646,15 @@ where
     )?)
 }
 
-/// Rasterizes `page` into a [`pdf_raster::Pixmap`] under `opts`, `rules`, and
-/// `limits` without collecting non-fatal faults.
+/// Rasterizes `page` into a [`pdf_raster::Pixmap`] (`raster` feature) under
+/// `opts`, `rules` (overriding `opts.rules`), and the element-wise narrower of
+/// `opts.limits` and `limits.raster` without collecting non-fatal faults.
 ///
 /// # Errors
 ///
 /// [`Error::Raster`] on invalid viewports, exceeded resource caps, or
 /// unreadable objects/streams.
+#[cfg(feature = "raster")]
 #[allow(clippy::too_many_arguments)]
 pub fn render<'o, O>(
     objects: O,
@@ -678,11 +683,12 @@ where
 }
 
 /// [`render`](fn@render), reporting recoverable ISO 32000-2 departures to
-/// `sink` ([`pdf_raster::Fault`]).
+/// `sink` ([`pdf_raster::Fault`], `raster` feature).
 ///
 /// # Errors
 ///
 /// As [`render`](fn@render) fails.
+#[cfg(feature = "raster")]
 #[allow(clippy::too_many_arguments)]
 pub fn render_with<'o, O, K>(
     objects: O,
@@ -702,7 +708,7 @@ where
     phase!(DEBUG, "render");
     let mut effective = opts.clone();
     effective.rules = rules;
-    effective.limits = limits.reading_raster();
+    effective.limits = limits.narrower_raster(&opts.limits);
     Ok(pdf_raster::render_page_with(
         objects, catalog, page, cache, fallback, &effective, sink,
     )?)

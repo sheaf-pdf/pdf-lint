@@ -2162,6 +2162,36 @@ def pin_named(folder):
     return ["%s: %s, where its answers are chromium/%s's" % (crate, w, build) for w in wrong]
 
 
+def extra_crate_pins(crates_dir, checked_crates, build):
+    """Hold every other workspace crate's `as of chromium/N` mentions in
+    README.md, src/, and tests/ (including pdf-raster-oracle) to `build`."""
+    wrong = []
+    if not os.path.isdir(crates_dir):
+        return wrong
+    for entry in sorted(os.listdir(crates_dir)):
+        crate = os.path.join(crates_dir, entry)
+        if not os.path.isdir(crate) or os.path.abspath(crate) in checked_crates:
+            continue
+        paths = []
+        readme = os.path.join(crate, "README.md")
+        if os.path.isfile(readme):
+            paths.append(readme)
+        for sub in ("src", "tests"):
+            sub_dir = os.path.join(crate, sub)
+            if os.path.isdir(sub_dir):
+                for root, _, files in os.walk(sub_dir):
+                    paths += [os.path.join(root, f) for f in sorted(files) if f.endswith(".rs")]
+        for path in paths:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            words = re.sub(r"\s*\n\s*(//[/!]?)?\s*", " ", text)
+            for n in re.findall(r"\bas of chromium/(\d+)", words):
+                if n != build:
+                    wrong.append("%s: %s names chromium/%s, where the pin is chromium/%s"
+                                 % (crate, os.path.relpath(path, crate), n, build))
+    return wrong
+
+
 def read_answers(path):
     out = {}
     if not os.path.exists(path):
@@ -2233,6 +2263,13 @@ def main(argv):
             else:
                 print("%s: %d cases, as cases.py writes them" % (folder, len(read_cases(folder))))
             failed += wrong
+        if rest:
+            crates_dir = os.path.dirname(os.path.dirname(os.path.abspath(rest[0])))
+            checked = {os.path.dirname(os.path.dirname(os.path.abspath(f))) for f in rest}
+            build_pin = os.path.basename(recorded_file(rest[0]))[len("chromium-"):-len(".txt")]
+            for line in extra_crate_pins(crates_dir, checked, build_pin):
+                print(line)
+                failed += 1
         sys.exit(1 if failed else 0)
 
     if command not in ("run", "check", "record") or not rest:

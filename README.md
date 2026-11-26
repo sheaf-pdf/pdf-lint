@@ -5,7 +5,7 @@ A workspace of Rust crates for reading, writing, and validating PDF files from r
 Two main entry points sit at the top of the workspace:
 
 - **[`pdf-lint`](crates/pdf-lint)** — A CLI and library that validates PDFs against the [Arlington PDF Model](https://github.com/pdf-association/arlington-pdf-model) (the PDF Association's machine-readable grammar of ISO 32000-2) plus ISO 32000-2 rules for content streams, page trees, name/number trees, XMP metadata, color spaces, fonts, and linearization. Every finding points to the exact bytes responsible.
-- **[`pdfs`](crates/pdfs)** — A single, battery-included library dependency for reading, inspecting, extracting text from, creating, editing, encrypting, and linearizing PDFs, while re-exporting all underlying crates at matching versions.
+- **[`pdfs`](crates/pdfs)** — A single, battery-included library dependency for reading, inspecting, extracting text and images from, rasterizing, creating, editing, encrypting, and linearizing PDFs, while re-exporting all underlying crates at matching versions.
 
 ## Quickstart
 
@@ -51,7 +51,7 @@ See [crates/pdfs/README.md](crates/pdfs/README.md) for encryption, linearization
 
 | Crate | Role |
 |---|---|
-| **[pdfs](crates/pdfs)** | High-level facade for opening, reading text/fonts/metadata, creating (with Standard 14 or embedded TrueType fonts), editing, encrypting, and linearizing PDFs; re-exports the library family below. |
+| **[pdfs](crates/pdfs)** | High-level facade for opening, reading text/fonts/metadata, decoding images, rasterizing pages/tiles, creating (with Standard 14 or embedded TrueType fonts), editing, encrypting, and linearizing PDFs; re-exports the library family below. |
 | **[pdf-lint](crates/pdf-lint)** | PDF validator CLI and library built on the Arlington PDF Model and ISO 32000-2 checks, with byte-accurate spans and baseline/incremental filtering. |
 | **[pdf-arlington](crates/pdf-arlington)** | Embedded Arlington PDF Model TSV grammar and predicate evaluator over `pdf-objects`. |
 | **[pdf-tokenizer](crates/pdf-tokenizer)** | Lossless, zero-copy, `no_std` / zero-alloc PDF lexer supporting both ISO 32000-2 and PDFium lexical rules. |
@@ -61,13 +61,16 @@ See [crates/pdfs/README.md](crates/pdfs/README.md) for encryption, linearization
 | **[pdf-structure](crates/pdf-structure)** | PDF file structure reader and writer: cross-reference tables/streams, object streams, lazy positional reads, damaged-file recovery, full saves, and incremental updates. |
 | **[pdf-content-streams](crates/pdf-content-streams)** | Content stream reader, typed Annex A operator model, `q`/`Q` and marked-content analysis, safe byte-range splicing, and deterministic `ContentWriter`. |
 | **[pdf-semantics](crates/pdf-semantics)** | High-level PDF data structures: dates, name/number trees, page trees (read via ISO or PDFium rules, written balanced), destinations, actions, outlines, page labels, embedded/associated files, optional content groups, viewer preferences, `/Info` dictionaries, and XMP metadata/conformance packets. |
-| **[pdf-color](crates/pdf-color)** | PDF color space parser, component counting (ISO 32000-2 and PDFium rules), colorant classification, and `/ColorSpace` resource lookup. |
+| **[pdf-color](crates/pdf-color)** | PDF color space parser, component counting, §7.10 function evaluation (`FunctionType` 0, 2, 3, 4), CIE/ICC (`moxcms`) & PDFium color evaluation, and `/ColorSpace` resource lookup. |
+| **[pdf-images](crates/pdf-images)** | Zero-I/O PDF Image XObject and inline image decoding (`DCTDecode`, `CCITTFaxDecode`, `JBIG2Decode`, `JPXDecode`), mask compositing, native-space pixel scrubbing, and Flate/JPEG re-encoding. |
 | **[pdf-fonts](crates/pdf-fonts)** | PDF font reader (character codes, CIDs, widths, encodings, CMaps, `/ToUnicode`, embedded font programs via `skrifa`), Standard 14 font metrics/encoding, page text extraction, and (with `embed`) TrueType font subsetting and embedding via `subsetter`. |
 | **[pdf-gfx](crates/pdf-gfx)** | PDF 2D geometry (`PageGeom`, `Matrix::onto`), bounded content-stream and Form XObject interpreter, position-independent text re-encoder (`encode`), spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`). |
 | **[pdf-annots](crates/pdf-annots)** | PDF annotations (`Annot`, `TypedAnnot`), ISO 32000-2 §12.5.5 `/AP` placement and Form XObject synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`plan_flatten`). |
 | **[pdf-forms](crates/pdf-forms)** | PDF interactive forms: the `/AcroForm` field tree (`Form`, `Field`) with inherited types, flags, values, and default appearances, and each field's widgets, under ISO 32000-2 or PDFium rules; a check box or radio button field's rules for what a press or a value turns on (`group`); and the appearance a text field's, a button's, or a choice field's widget without one shows, made as PDFium makes it (`appearance`). |
+| **[pdf-raster](crates/pdf-raster)** | Zero-I/O pure-Rust 2D PDF page, tile, Form XObject, annotation, and interactive form rasterizer, plus `RenderBackend` traits and optional dynamic `PdfiumBackend` (`pdfium` feature). |
 | **[pdf-linearize](crates/pdf-linearize)** | Model-agnostic engine and `pdf-structure` adapter for writing and validating linearized ("Fast Web View", Annex F) PDFs and hint tables. |
 | **[pdf-fixtures](crates/pdf-fixtures)** | *Internal (unpublished).* Test PDF and TrueType program builders and `qpdf` oracle runner shared across workspace test suites. |
+| **[pdf-raster-oracle](crates/pdf-raster-oracle)** | *Internal (unpublished).* `0–100` visual/ISO conformance rubric, TSV drift baselines, and live PDFium (`chromium/8152`) test discovery and differential suites. |
 | **[pdf-linearize-lopdf](crates/pdf-linearize-lopdf)** | *Internal (unpublished).* Reference adapter demonstrating `pdf-linearize` on `lopdf` documents. |
 
 For an architectural map of how these crates connect and conventions for contributors/agents, see [AGENTS.md](AGENTS.md).
@@ -87,14 +90,15 @@ just ci           # run the full local CI suite (all checks except cargo-semver-
 
 ### Oracle & Cross-Target Checks
 
-- **PDFium oracle (`just test-pdfium`):** Requires Python 3. Downloads a pinned PDFium build (`chromium/8152` on Linux x86_64, or uses `PDF_LINT_PDFIUM`) and verifies recorded test expectations across crates that emulate PDFium behavior. See [oracle/README.md](oracle/README.md).
+- **PDFium oracle (`just test-pdfium`):** Requires Python 3. Downloads a pinned PDFium build (`chromium/8152` on Linux x86_64, or uses `PDF_LINT_PDFIUM`; `PdfiumBackend` reads `PDF_RASTER_PDFIUM` or `PDFIUM_LIB_DIR`), verifies recorded test expectations and the unprofiled CMYK LUT, and runs `pdf-raster-oracle`'s live color, codec, and page-rendering suites. See [oracle/README.md](oracle/README.md).
 - **qpdf oracle (`just test-qpdf`):** Downloads a pinned `qpdf` binary on Linux x86_64 (or uses `PDF_LINT_QPDF`) to cross-check file reading, writing, encryption, and linearization.
 - **Full `just ci` prerequisites:** Requires `cargo-nextest`, Rust **1.92** (workspace MSRV), `nightly` with `rust-src` (for `pdf-tokenizer`'s `core`-only build), and targets `thumbv6m-none-eabi`, `x86_64-pc-windows-gnu`, and `wasm32-unknown-unknown`. Note that `*-package` recipes run `cargo publish --dry-run` and require network access.
 - **Semver checks (`just <crate>-semver`):** Uses [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) to check published crates against crates.io.
-- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `fonts`, `embed`, `gfx`, `annots`, `forms`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
+- **Fuzzing (`just fuzz <target> [seconds] [features]`):** Runs [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) on nightly (`tokenize`, `filters`, `crypt`, `objects`, `structure`, `write`, `content`, `semantics`, `color`, `images`, `fonts`, `embed`, `gfx`, `annots`, `forms`, `raster`, `linearize`, `pdfs`, `arlington`, `check`), e.g. `just fuzz content 300 simd`.
 
 ## License
 
-- `pdf-tokenizer`, `pdf-filters`, `pdf-crypt`, `pdf-objects`, `pdf-structure`, `pdf-content-streams`, `pdf-semantics`, `pdf-color`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, `pdf-forms`, `pdf-linearize`, `pdfs`, `pdf-fixtures`, and `pdf-linearize-lopdf` are dual-licensed under **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)) or **MIT** ([LICENSE-MIT](LICENSE-MIT)), at your option.
+- `pdf-tokenizer`, `pdf-filters`, `pdf-crypt`, `pdf-objects`, `pdf-structure`, `pdf-content-streams`, `pdf-semantics`, `pdf-color`, `pdf-images`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, `pdf-forms`, `pdf-raster`, `pdf-linearize`, `pdfs`, `pdf-fixtures`, `pdf-raster-oracle`, and `pdf-linearize-lopdf` are dual-licensed under **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)) or **MIT** ([LICENSE-MIT](LICENSE-MIT)), at your option.
 - `pdf-fonts` bundles Adobe Core 14 metrics, glyph lists, and code adapted from FreeType under their respective licenses, including [`FTL.TXT`](crates/pdf-fonts/FTL.TXT); see [crates/pdf-fonts/README.md](crates/pdf-fonts/README.md#license) for attribution requirements.
+- `pdf-color` includes PDFium's BSD-3-Clause unprofiled `DeviceCMYK` lookup table (`crates/pdf-color/src/cmyk_lut.rs`), and `pdf-images` depends on `jpeg-encoder` (`MIT OR Apache-2.0`, with the Independent JPEG Group binary-documentation attribution notice; see [crates/pdf-images/README.md](crates/pdf-images/README.md#license)).
 - `pdf-lint` and `pdf-arlington` (along with the embedded Arlington PDF Model) are licensed under **Apache-2.0** ([LICENSE-APACHE](LICENSE-APACHE)).

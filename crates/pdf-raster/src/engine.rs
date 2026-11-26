@@ -275,7 +275,10 @@ struct RenderState {
 impl RenderState {
     fn new(opts: &RenderOpts) -> Self {
         Self {
-            summary: RenderSummary::default(),
+            summary: RenderSummary {
+                reported: true,
+                ..RenderSummary::default()
+            },
             ops_left: opts.limits.gfx.operators,
             glyphs_left: opts.limits.gfx.glyphs,
             interpreted_left: opts.limits.gfx.interpreted,

@@ -30,7 +30,8 @@
 //! - **Redaction pixel scrubbing & clean re-encoding ([`RawImage::fill_rect_raw`], [`encode_raw_flate`], [`encode_rgba_flate`], [`encode_jpeg`]):**
 //!   Scrubs rectangular regions directly in native sample space and re-encodes
 //!   cleanly via `FlateDecode` + PNG `Sub` prediction or pure-Rust baseline
-//!   `DCTDecode` with zero EXIF, XMP, `APPn`, or JBIG2 dictionary leakage.
+//!   `DCTDecode` (`jpeg-encoder`) with no EXIF, XMP, IPTC, comment, or JBIG2
+//!   dictionary leakage.
 //!
 //! # Example
 //!

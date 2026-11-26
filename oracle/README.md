@@ -7,17 +7,19 @@ Several crates emulate PDFium's forgiving behavior when reading real-world PDFsâ
 - `pdf-structure` (`Recovery::Pdfium`)
 - `pdf-content-streams` (content stream lexing, inline images, `/Contents` joining)
 - `pdf-semantics` (`pages::pages`, `dest::DestTable`, `action`, `outlines`, `labels`, `files`, and `viewer` under `Rules::Pdfium`)
-- `pdf-color` (`components`)
+- `pdf-color` (`components`, Â§7.10 `Function` & `PreparedSpace` evaluation, and the unprofiled CMYK LUT checked by `oracle/cmyk_lut.py`)
+- `pdf-images` (`decode_xobject`, `decode_inline`, codecs, and masks under `Rules::Pdfium`, verified live in `crates/pdf-raster-oracle`)
 - `pdf-fonts` (`Font`, `shown`)
 - `pdf-gfx` (`PageGeom`, `interpret`, `encode`, `TextPage`)
 - `pdf-annots` (`page_annots`, `TypedAnnot`, `plan_flatten`)
 - `pdf-forms` (`Form::read`: field types, flags, names, and values; the appearances PDFium makes for a text, button, or choice field that has none, recorded for the appearance makers; the text PDFium's text page reads back of appearances made in a fallback font, `fonts`; and a button group's states and value after a press, for `group`'s rules)
+- `pdf-raster` (`render_page`, `render_content`, and `PdfiumBackend`, verified live against `chromium/8152` in `crates/pdf-raster-oracle`)
 - `pdf-linearize` (checked against PDFium's `FPDFAvail_*` incremental-loading API)
 
 To keep behavior reproducible without linking PDFium into any crate, each crate stores small synthetic test cases alongside recorded answers from a pinned PDFium build in `crates/<crate>/tests/pdfium/`.
 
 - **`cargo test`** checks each Rust crate against the committed answers offline (no PDFium binary needed).
-- **`just test-pdfium`** regenerates cases in memory, checks doc build pins, and runs every case against the actual PDFium shared library via `ctypes`.
+- **`just test-pdfium`** regenerates cases in memory, checks doc build pins across every crate, verifies `pdf-color`'s CMYK grid via `oracle/cmyk_lut.py`, runs every recorded case against `libpdfium` via `ctypes`, and runs `pdf-raster-oracle`'s live comparison suites.
 
 ## Pinned Build
 
@@ -25,7 +27,7 @@ To keep behavior reproducible without linking PDFium into any crate, each crate 
 - **Archive (Linux x86_64):** `pdfium-linux-x64.tgz`
 - **SHA-256:** `384ab5c51882408a143a21f9c14dcd2caf1f75280ae41c554d0489b46c3dba9f`
 
-`just _pdfium` downloads this archive into `target/pdfium-8152/`, verifies its SHA-256 checksum (and GitHub build provenance attestation when `gh` is authenticated), and unpacks `libpdfium.so`. On other platforms, set `PDF_LINT_PDFIUM=/path/to/libpdfium` instead.
+`just _pdfium` downloads this archive into `target/pdfium-8152/`, verifies its SHA-256 checksum (and GitHub build provenance attestation when `gh` is authenticated), and unpacks `libpdfium.so`. On other platforms, set `PDF_LINT_PDFIUM=/path/to/libpdfium` instead (the runtime `PdfiumBackend` adapter in `pdf-raster` reads `PDF_RASTER_PDFIUM` or `PDFIUM_LIB_DIR`).
 
 Note: `pdfium-binaries` builds with PDFium's default `pdf_enable_rust_jpeg = false` (using `libjpeg-turbo`), which reports exact end-of-image offsets for inline DCT images.
 

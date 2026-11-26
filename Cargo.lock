@@ -759,6 +759,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jpeg-encoder"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0370574b86f7eca156b9f298392b5e69a23f8c86f3f865add60bbc2e79467a6"
+
+[[package]]
 name = "js-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -959,7 +965,6 @@ dependencies = [
  "moxcms",
  "pdf-fixtures",
  "pdf-objects",
- "pdf-raster",
  "pdf-structure",
  "thiserror",
 ]
@@ -1083,12 +1088,12 @@ dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
+ "jpeg-encoder",
  "pdf-color",
  "pdf-content-streams",
  "pdf-filters",
  "pdf-fixtures",
  "pdf-objects",
- "pdf-raster",
  "pdf-structure",
  "thiserror",
  "tracing",
@@ -1173,6 +1178,26 @@ dependencies = [
  "thiserror",
  "tracing",
  "vello_cpu",
+]
+
+[[package]]
+name = "pdf-raster-oracle"
+version = "0.0.0"
+dependencies = [
+ "moxcms",
+ "pdf-annots",
+ "pdf-color",
+ "pdf-content-streams",
+ "pdf-fixtures",
+ "pdf-fonts",
+ "pdf-gfx",
+ "pdf-images",
+ "pdf-objects",
+ "pdf-raster",
+ "pdf-semantics",
+ "pdf-structure",
+ "pdfs",
+ "thiserror",
 ]
 
 [[package]]

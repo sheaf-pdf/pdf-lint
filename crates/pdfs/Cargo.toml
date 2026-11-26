@@ -26,8 +26,8 @@ pdf-crypt.workspace = true
 pdf-structure = { workspace = true, features = ["zlib-rs"] }
 pdf-color.workspace = true
 # PDF Image XObject and inline image decoding, mask compositing, scrubbing, and
-# clean Flate/JPEG re-encoding.
-pdf-images = { workspace = true, features = ["zlib-rs"] }
+# clean Flate/JPEG re-encoding (`images` feature, on by default).
+pdf-images = { workspace = true, features = ["zlib-rs"], optional = true }
 pdf-content-streams.workspace = true
 # Without its clock unless `clock` (below) turns it on.
 pdf-semantics.workspace = true
@@ -42,8 +42,9 @@ pdf-annots.workspace = true
 # groups' rules, and the appearances text, button, and choice fields' widgets
 # without one show.
 pdf-forms.workspace = true
-# Pure-Rust 2D page, Form XObject, annotation, and interactive form rasterizer.
-pdf-raster = { workspace = true, features = ["zlib-rs"] }
+# Pure-Rust 2D page, Form XObject, annotation, and interactive form rasterizer
+# (`raster` feature, on by default).
+pdf-raster = { workspace = true, features = ["zlib-rs"], optional = true }
 # A pdf-structure document linearized and a file's linearization checked
 # (`family`), and pdf-filters' zlib-rs through it.
 pdf-linearize = { workspace = true, features = ["family", "zlib-rs"] }
@@ -53,7 +54,12 @@ thiserror = "2"
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
 
 [features]
-default = ["programs", "text-layout", "clock", "embed", "icc"]
+default = ["programs", "text-layout", "clock", "embed", "icc", "images", "raster"]
+# Image XObject and inline image decoding (`pdfs::images`, `Page::decode_image`).
+images = ["dep:pdf-images"]
+# 2D page, tile, annotation, and form rasterization (`pdfs::raster`, `Page::render`,
+# `RenderedDoc` on `Pdf`, `RustBackend`).
+raster = ["images", "dep:pdf-raster"]
 # pdf-fonts' `programs`: a font's program read, for its glyphs' boxes and
 # its heights, and the text of what its encoding leaves to it.
 programs = [
@@ -61,7 +67,7 @@ programs = [
     "pdf-gfx/programs",
     "pdf-annots/programs",
     "pdf-forms/programs",
-    "pdf-raster/programs",
+    "pdf-raster?/programs",
 ]
 # pdf-gfx's `text-layout`: `Page::text_page` / `Page::search` spatial reading
 # order, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas`
@@ -70,12 +76,12 @@ text-layout = [
     "pdf-gfx/text-layout",
     "pdf-annots/text-layout",
     "pdf-forms/text-layout",
-    "pdf-raster/text-layout",
+    "pdf-raster?/text-layout",
 ]
 # pdf-semantics' `clock`: `Date::now` and `Date::from_unix`.
 clock = ["pdf-semantics/clock"]
 # Pure-Rust `ICCBased` and `/OutputIntents` profile evaluation (`moxcms`).
-icc = ["pdf-color/icc", "pdf-images/icc", "pdf-raster/icc"]
+icc = ["pdf-color/icc", "pdf-images?/icc", "pdf-raster?/icc"]
 # pdf-fonts' `embed`: a TrueType program embedded in a document, cut to the
 # glyphs its pages draw, so that they draw Unicode text in it
 # (`Document::embed_font`); pdf-gfx's, whose `ProgramFont` lays text out in it
@@ -94,27 +100,27 @@ predefined-cmaps = [
     "pdf-gfx/predefined-cmaps",
     "pdf-annots/predefined-cmaps",
     "pdf-forms/predefined-cmaps",
-    "pdf-raster/predefined-cmaps",
+    "pdf-raster?/predefined-cmaps",
 ]
 # Runtime CPU SIMD dispatch in `pdf-content-streams`, `pdf-images`, and
 # `pdf-raster`.
-simd = ["pdf-content-streams/simd", "pdf-images/simd", "pdf-raster/simd"]
-# Optional thin `RenderBackend` adapter (`pdfs::PdfiumBackend`) over
-# `pdfium-render` (`0.9.6`, `thread_safe`).
-pdfium = ["pdf-raster/pdfium"]
+simd = ["pdf-content-streams/simd", "pdf-images?/simd", "pdf-raster?/simd"]
+# Optional thin dynamic-library `RenderBackend` adapter (`pdfs::PdfiumBackend`)
+# over `pdfium-render` (`0.9.6`, `thread_safe`).
+pdfium = ["raster", "pdf-raster/pdfium"]
 # The spans of every crate of the family that has them, through `tracing`.
 # Off by default; without it, none is compiled.
 tracing = [
     "dep:tracing",
     "pdf-structure/tracing",
-    "pdf-images/tracing",
+    "pdf-images?/tracing",
     "pdf-content-streams/tracing",
     "pdf-semantics/tracing",
     "pdf-fonts/tracing",
     "pdf-gfx/tracing",
     "pdf-annots/tracing",
     "pdf-forms/tracing",
-    "pdf-raster/tracing",
+    "pdf-raster?/tracing",
     "pdf-linearize/tracing",
 ]
 # pdf-structure's and pdf-linearize's test writer: a new file's encryption

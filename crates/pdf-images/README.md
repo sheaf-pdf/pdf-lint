@@ -15,8 +15,8 @@ Zero-I/O PDF Image XObject and inline image (`BI..ID..EI`) decoder, mask composi
   - `CCITTFaxDecode` (`hayro-ccitt`): Group 4 MMR (`K < 0`), Group 3 1D (`K == 0`), Group 3 2D (`K > 0`), `/BlackIs1`, `/EncodedByteAlign`, and truncated-stream partial-row recovery.
   - `JBIG2Decode` (`hayro-jbig2`): Embedded and sequential/random-access segments with indirect `/JBIG2Globals` resolution via `Streams::decoded`.
   - `JPXDecode` (`hayro-jpeg2000`): Codestream and JP2 container decoding preserving native bit depth (`1..=16` bpc), embedded JP2 color specifications (including `colr` ICC profiles with `icc`), and `/SMaskInData` (`0, 1, 2`).
-- **Redaction pixel scrubbing & metadata-free re-encoding (`RawImage::fill_rect_raw`, `encode_raw_flate`, `encode_rgba_flate`, `encode_jpeg`):**
-  - Burn rectangular redaction regions directly in an image's native sample space and bit depth (`RawImage::fill_rect_raw`) without touching surrounding pixels, then re-encode cleanly via lossless `FlateDecode` + PNG `Sub` prediction or pure-Rust baseline `DCTDecode`—stripping EXIF, XMP, `APPn` metadata, and JBIG2 symbol dictionaries.
+- **Redaction pixel scrubbing & clean re-encoding (`RawImage::fill_rect_raw`, `encode_raw_flate`, `encode_rgba_flate`, `encode_jpeg`):**
+  - Burn rectangular redaction regions directly in an image's native sample space and bit depth (`RawImage::fill_rect_raw`) without touching surrounding pixels, then re-encode cleanly via lossless `FlateDecode` + PNG `Sub` prediction or pure-Rust baseline `DCTDecode` ([jpeg-encoder](https://crates.io/crates/jpeg-encoder))—stripping EXIF, XMP, IPTC, comment metadata, and JBIG2 symbol dictionaries (writing only a minimal JFIF or Adobe `APP14` header on JPEG output).
 - **Bounded resources & fault sinks (`Limits`, `Fault`):**
   - Dimensions, pixel counts, and byte budgets are checked before allocating buffers, and recoverable departures (`Fault`) are reported to any `pdf-objects` `fault::Sink<Fault>` at zero cost when `()` is passed.
 
@@ -82,3 +82,5 @@ assert!(rgba.pixel(3, 3).unwrap()[0] > 200);
 ## License
 
 Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-APACHE)) or MIT license ([LICENSE-MIT](https://github.com/sheaf-pdf/pdf-lint/blob/main/LICENSE-MIT)) at your option.
+
+Baseline JPEG re-encoding (`encode_jpeg`, `encode_jpeg_bytes`) uses [jpeg-encoder](https://crates.io/crates/jpeg-encoder), licensed under `(MIT OR Apache-2.0) AND IJG`. Under the Independent JPEG Group license terms, distributions of executable code must state in accompanying documentation that *"this software is based in part on the work of the Independent JPEG Group."*

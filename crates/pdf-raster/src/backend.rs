@@ -1,6 +1,6 @@
-//! Layer 2 document-level rendering traits ([`RenderBackend`], [`RenderedDoc`])
-//! for swappable multi-engine execution (`pdfs::RustBackend`,
-//! `pdf_raster::PdfiumBackend`, and viewer/CLI engine pools).
+//! Document-level rendering traits ([`RenderBackend`], [`RenderedDoc`]) for
+//! swappable multi-engine execution (`pdfs::Pdf`, `pdfs::RustBackend`, and
+//! `pdf_raster::PdfiumBackend`).
 
 use std::sync::Arc;
 
@@ -29,9 +29,13 @@ pub enum BackendError {
         /// Total number of pages in the document.
         page_count: usize,
     },
+    /// Requested option combination cannot be honored by this backend (for
+    /// example, `Viewport::Custom` with `draw.forms == true` on PDFium).
+    #[error("unsupported render option for backend: {0}")]
+    Unsupported(&'static str),
     /// Backend-specific document open, I/O, or external engine error.
-    #[error("{0}")]
-    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl BackendError {
@@ -48,8 +52,12 @@ pub trait RenderedDoc: Send + Sync {
     /// Number of pages in the document.
     fn page_count(&self) -> usize;
 
-    /// Returns the 2D geometry (`MediaBox`, `CropBox`, `Rotation`, `UserUnit`)
-    /// of zero-based `page_index`.
+    /// Returns the 2D geometry (`MediaBox`, `CropBox`, `Rotation`, and where
+    /// available `UserUnit` and auxiliary boxes) of zero-based `page_index`.
+    ///
+    /// Note that external engines such as `PdfiumBackend` populate `media_box`,
+    /// `crop_box`, `rotation`, and `user_unit`, leaving `bleed_box`, `trim_box`,
+    /// and `art_box` as `None`.
     ///
     /// # Errors
     ///
@@ -59,10 +67,26 @@ pub trait RenderedDoc: Send + Sync {
 
     /// Rasterizes zero-based `page_index` under `opts`.
     ///
+    /// # Per-Engine Option Support
+    ///
+    /// - **Pure-Rust (`pdfs::Pdf` / `pdfs::RustBackend`):** Honors every field
+    ///   of [`RenderOpts`] (`viewport`, `medium`, `background`, `format`, `draw`,
+    ///   `appearances`, `anti_alias`, `hint_fonts`), using the opened `Pdf`'s
+    ///   `rules` and narrower `limits`, and returns a populated
+    ///   [`RenderSummary`] with `reported == true`.
+    /// - **`PdfiumBackend` (`pdfium` feature):** Honors `viewport`, `medium`
+    ///   (`FPDF_PRINTING`), `background`, `format`, `draw`, `anti_alias`, and
+    ///   the pixmap dimensions/byte caps in `limits`; ignores `appearances`,
+    ///   `hint_fonts`, `rules`, and interpreter/codec sub-limits; returns
+    ///   [`BackendError::Unsupported`] for `Viewport::Custom` when
+    ///   `draw.forms == true` (PDFium's matrix path cannot render form-fill
+    ///   widgets), and returns [`RenderSummary::unreported`] (`reported == false`).
+    ///
     /// # Errors
     ///
-    /// Returns [`BackendError`] on invalid viewports, out-of-bounds `page_index`,
-    /// exceeded [`crate::Limits`], or unreadable content.
+    /// Returns [`BackendError`] on invalid viewports, unsupported backend
+    /// options, out-of-bounds `page_index`, exceeded [`crate::Limits`], or
+    /// unreadable content.
     fn render_page(
         &self,
         page_index: usize,

@@ -143,7 +143,6 @@ mod paint;
 pub mod pdfium;
 mod phases;
 mod pixmap;
-pub mod rubric;
 
 pub use backend::{BackendError, RenderBackend, RenderedDoc};
 pub use engine::{render_content, render_content_with, render_page, render_page_with};
@@ -185,16 +184,10 @@ mod doc_tests {
         check::<BackendError>();
         check::<Box<dyn RenderedDoc>>();
         check::<Box<dyn RenderBackend>>();
-        check::<rubric::RgbaImage>();
-        check::<rubric::VisualScore>();
-        check::<rubric::RubricConfig>();
         #[cfg(feature = "pdfium")]
         {
             check::<PdfiumBackend>();
-            check::<pdfium::Pdfium>();
             check::<pdfium::Error>();
-            check::<pdfium::RenderFlags>();
-            check::<pdfium::RenderOptions>();
         }
     }
 

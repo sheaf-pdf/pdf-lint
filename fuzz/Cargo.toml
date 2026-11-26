@@ -2,8 +2,9 @@
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-# `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz embed`, `just fuzz gfx`, `just fuzz linearize`,
+# `just fuzz semantics`, `just fuzz color`, `just fuzz images`,
+# `just fuzz fonts`, `just fuzz embed`, `just fuzz gfx`, `just fuzz annots`,
+# `just fuzz forms`, `just fuzz raster`, `just fuzz linearize`,
 # `just fuzz pdfs`, `just fuzz arlington` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict

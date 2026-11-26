@@ -1,24 +1,20 @@
-//! Pure-Rust [`RenderBackend`] implementation over [`Pdf`].
+//! Pure-Rust [`RenderBackend`] implementation over [`crate::Pdf`].
 
 use std::fmt;
 use std::sync::Arc;
 
 use pdf_crypt::Password;
-use pdf_gfx::PageGeom;
-use pdf_raster::{
-    BackendError, FontFallback, Pixmap, RenderBackend, RenderOpts, RenderSummary, RenderedDoc,
-};
+use pdf_raster::{BackendError, FontFallback, RenderBackend, RenderedDoc};
 use pdf_structure::Encryption;
 
 use crate::open::Options;
-use crate::pdf::Pdf;
 
 /// Pure-Rust [`RenderBackend`] powered by `pdfs` and `pdf-raster`.
 ///
-/// Opens documents lazily over `Arc<[u8]>`, unlocks password-protected files
-/// via `pdf-crypt`, caches parsed fonts and fallback faces across pages on
-/// [`Pdf::render_cache`], and rasterizes pages or tiles concurrently across
-/// threads (`Send + Sync`, `#![forbid(unsafe_code)]`).
+/// Opens a [`Pdf<Arc<[u8]>>`](crate::Pdf) (which directly implements
+/// [`RenderedDoc`]), unlocks password-protected files via `pdf-crypt`, caches
+/// the walked page table and parsed fonts across pages, and rasterizes pages or
+/// tiles concurrently across threads (`Send + Sync`, `#![forbid(unsafe_code)]`).
 #[derive(Clone)]
 pub struct RustBackend {
     options: Options<'static>,
@@ -66,59 +62,6 @@ impl RustBackend {
     }
 }
 
-struct RustRenderedDoc {
-    pdf: Pdf<Arc<[u8]>>,
-    page_count: usize,
-    fallback: Option<Arc<dyn FontFallback>>,
-}
-
-impl RenderedDoc for RustRenderedDoc {
-    fn page_count(&self) -> usize {
-        self.page_count
-    }
-
-    fn page_geom(&self, page_index: usize) -> Result<PageGeom, BackendError> {
-        let pages = self.pdf.pages().map_err(BackendError::custom)?;
-        let Some(page) = pages.get(page_index) else {
-            return Err(BackendError::PageOutOfBounds {
-                page_index,
-                page_count: pages.len(),
-            });
-        };
-        Ok(page.geom())
-    }
-
-    fn render_page(
-        &self,
-        page_index: usize,
-        opts: &RenderOpts,
-    ) -> Result<(Pixmap, RenderSummary), BackendError> {
-        let pages = self.pdf.pages().map_err(BackendError::custom)?;
-        let Some(page) = pages.get(page_index) else {
-            return Err(BackendError::PageOutOfBounds {
-                page_index,
-                page_count: pages.len(),
-            });
-        };
-        let mut effective = opts.clone();
-        // Enforce the narrower of the backend's reader caps and `opts.limits`
-        // unless the caller explicitly customized `opts.limits` tighter.
-        if opts.limits == pdf_raster::Limits::DEFAULT {
-            effective.limits = self.pdf.limits().reading_raster();
-        }
-        let catalog = self.pdf.catalog().ok();
-        pdf_raster::render_page(
-            self.pdf.reading(),
-            catalog,
-            page.attributes(),
-            self.pdf.render_cache(),
-            self.fallback.as_deref(),
-            &effective,
-        )
-        .map_err(BackendError::Raster)
-    }
-}
-
 impl RenderBackend for RustBackend {
     fn name(&self) -> &'static str {
         "pdf-raster"
@@ -134,15 +77,14 @@ impl RenderBackend for RustBackend {
         if let Some(ref arr) = pws {
             opts.passwords = arr;
         }
+        if let Some(ref fb) = self.fallback {
+            opts.font_fallback = Some(fb);
+        }
         let pdf = opts.from_bytes(bytes).map_err(BackendError::custom)?;
         if *pdf.encryption() == Encryption::Locked {
             return Err(BackendError::Locked);
         }
-        let page_count = pdf.pages().map_err(BackendError::custom)?.len();
-        Ok(Box::new(RustRenderedDoc {
-            pdf,
-            page_count,
-            fallback: self.fallback.clone(),
-        }))
+        pdf.prime_pages().map_err(BackendError::custom)?;
+        Ok(Box::new(pdf))
     }
 }

@@ -165,14 +165,14 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **[pdf-crypt](https://crates.io/crates/pdf-crypt)** — `pdfs::crypt`. Standard security handler (RC4, AES-128, AES-256), password preparation, and permission flags.
 - **[pdf-structure](https://crates.io/crates/pdf-structure)** — `pdfs::structure`. Cross-reference tables/streams, object streams, lazy `Reading`, in-memory `Document`, and full/incremental writers (`Pdf::reading`, `Document::structure`).
 - **[pdf-color](https://crates.io/crates/pdf-color)** — `pdfs::color`. Color space parsing, §7.10 functions, and CIE/ICC evaluation.
-- **[pdf-images](https://crates.io/crates/pdf-images)** — `pdfs::images`. Image XObject and inline image decoding (`Page::decode_image`), mask compositing, pixel scrubbing, and clean Flate/JPEG re-encoding.
+- **[pdf-images](https://crates.io/crates/pdf-images)** — `pdfs::images` (`images` feature, default). Image XObject and inline image decoding (`Page::decode_image`), mask compositing, pixel scrubbing, and clean Flate/JPEG re-encoding.
 - **[pdf-content-streams](https://crates.io/crates/pdf-content-streams)** — `pdfs::content_streams`. Content stream lexing, typed operators, graphics-state balance, splicing, and `ContentWriter`.
 - **[pdf-semantics](https://crates.io/crates/pdf-semantics)** — `pdfs::semantics`. Dates, name/number trees, page trees, destinations, actions, outlines, page labels, embedded/associated files, optional content groups, viewer preferences, `/Info` dictionaries, and XMP metadata/conformance packets.
 - **[pdf-fonts](https://crates.io/crates/pdf-fonts)** — `pdfs::fonts`. Font dictionaries, encodings, CMaps, `/ToUnicode`, embedded font programs, Standard 14 metrics, text extraction, and TrueType font subsetting and embedding.
 - **[pdf-gfx](https://crates.io/crates/pdf-gfx)** — `pdfs::gfx`. 2D PDF geometry (`PageGeom`), bounded graphics and text state interpreter, position-independent content re-encoder, spatial `TextPage` / search, and vector/text `Canvas` (with multiline `text_box`).
 - **[pdf-annots](https://crates.io/crates/pdf-annots)** — `pdfs::annots`. Page annotations (`Page::annots`), typed subtype inspection, `/AP` placement and synthesis, `BuiltAnnot` / `AnnotMut` builders, reply threads, and zero-I/O page flattening (`Document::flatten_page`).
 - **[pdf-forms](https://crates.io/crates/pdf-forms)** — `pdfs::forms`. Interactive forms: the `/AcroForm` field tree with inherited types, flags, values, and default appearances, each field's widgets, a check box or radio button field's rules for what a press or a value turns on (`group`), and the appearance a text field's, a button's, or a choice field's widget without one shows (`appearance`).
-- **[pdf-raster](https://crates.io/crates/pdf-raster)** — `pdfs::raster`. Pure-Rust 2D PDF page, tile, Form XObject, annotation, and interactive form rasterizer (`Page::render`, `RustBackend`).
+- **[pdf-raster](https://crates.io/crates/pdf-raster)** — `pdfs::raster` (`raster` feature, default). Pure-Rust 2D PDF page, tile, Form XObject, annotation, and interactive form rasterizer (`Page::render`, `RenderedDoc` on `Pdf`, `RustBackend`).
 - **[pdf-linearize](https://crates.io/crates/pdf-linearize)** — `pdfs::linearize`. Linearized PDF layout engine, hint tables, and validator.
 
 ## Key Guarantees
@@ -185,6 +185,8 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 
 ## Cargo Features
 
+- **`images`** *(default)* — Enable `pdfs::images` (`pdf-images`) and `Page::decode_image`.
+- **`raster`** *(default; implies `images`)* — Enable `pdfs::raster` (`pdf-raster`), `Page::render`, `RenderedDoc` on `Pdf`, and `RustBackend`.
 - **`programs`** *(default)* — Parse embedded font programs via `skrifa` for glyph bounding boxes, heights, and fallback character mappings.
 - **`text-layout`** *(default)* — Enable `Page::text_page`, `Page::search`, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas::text_box` layout via `pdf-gfx/text-layout`.
 - **`clock`** *(default)* — Enable `Date::now` and `Date::from_unix` in `pdf-semantics`.
@@ -193,7 +195,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **`image-ends`** — Find inline DCT (JPEG) and CCITTFax image boundaries by decoding image data, matching PDFium.
 - **`predefined-cmaps`** — Bundle Adobe predefined CJK CMaps (via `hayro-cmap`) for CJK fonts without `/ToUnicode`.
 - **`simd`** — Enable runtime SIMD dispatch in `pdf-content-streams`, `pdf-images`, and `pdf-raster`.
-- **`pdfium`** — Enable `PdfiumBackend` (`pdfs::raster::pdfium`), a thin `RenderBackend` adapter over `pdfium-render` (`0.9.6`, `thread_safe`) for runtime renderer switching and differential testing alongside `RustBackend`.
+- **`pdfium`** *(implies `raster`)* — Enable `pdfs::PdfiumBackend` (`pdfs::raster::pdfium`), a thin dynamic-library `RenderBackend` adapter over `pdfium-render` (`0.9.6`, `thread_safe`; semver-tied to `pdfium-render` `0.9`, loading `libpdfium` from an explicit path, `$PDF_RASTER_PDFIUM`, `$PDFIUM_LIB_DIR`, or the system dynamic loader) for runtime renderer switching alongside `Pdf` / `RustBackend`.
 - **`tracing`** — Emit `debug`-level `tracing` spans (numeric metadata only) around major read/write operations.
 - **`insecure-test-writer`** — Deterministic seeded encryption keys/IVs for reproducible tests and fuzzing only (**never** enable in production builds).
 

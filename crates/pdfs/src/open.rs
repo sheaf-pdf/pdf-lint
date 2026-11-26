@@ -84,6 +84,11 @@ pub struct Options<'a> {
     /// own are [`Pdf::faults`]. Each crate's faults are told to the sink a
     /// call's `_with` form is given, whatever this says.
     pub faults: Faults,
+    /// Optional shared [`FontFallback`](pdf_raster::FontFallback) provider
+    /// (`raster` feature) used by `Page::render` and `RenderedDoc` on the
+    /// opened [`Pdf`].
+    #[cfg(feature = "raster")]
+    pub font_fallback: Option<&'a std::sync::Arc<dyn pdf_raster::FontFallback>>,
 }
 
 impl Options<'static> {
@@ -97,6 +102,8 @@ impl Options<'static> {
         recovery: Recovery::Pdfium,
         flate: Backend::ZlibRs,
         faults: Faults::Off,
+        #[cfg(feature = "raster")]
+        font_fallback: None,
     };
 }
 
@@ -108,14 +115,16 @@ impl Default for Options<'_> {
 
 impl fmt::Debug for Options<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Options")
-            .field("passwords", &self.passwords.len())
+        let mut s = f.debug_struct("Options");
+        s.field("passwords", &self.passwords.len())
             .field("limits", &self.limits)
             .field("rules", &self.rules)
             .field("recovery", &self.recovery)
             .field("flate", &self.flate)
-            .field("faults", &self.faults)
-            .finish()
+            .field("faults", &self.faults);
+        #[cfg(feature = "raster")]
+        s.field("has_font_fallback", &self.font_fallback.is_some());
+        s.finish()
     }
 }
 

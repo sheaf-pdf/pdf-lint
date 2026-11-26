@@ -1,0 +1,30 @@
+[package]
+name = "pdf-raster-oracle"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Internal workspace PDFium (chromium/8152) oracle helpers and 0-100 visual/ISO conformance rubric"
+
+[dependencies]
+pdf-gfx = { workspace = true, features = ["programs", "text-layout"] }
+pdf-raster = { workspace = true, features = ["programs", "text-layout", "icc", "pdfium", "zlib-rs"] }
+thiserror = "2"
+
+[dev-dependencies]
+moxcms = { version = "0.9", default-features = false, features = ["any_to_any", "options"] }
+pdf-annots = { workspace = true, features = ["programs", "text-layout"] }
+pdf-color = { workspace = true, features = ["icc"] }
+pdf-content-streams.workspace = true
+pdf-fixtures = { path = "../pdf-fixtures" }
+pdf-fonts = { workspace = true, features = ["programs"] }
+pdf-images = { workspace = true, features = ["icc", "zlib-rs"] }
+pdf-objects.workspace = true
+pdf-semantics.workspace = true
+pdf-structure = { workspace = true, features = ["zlib-rs", "insecure-test-writer"] }
+pdfs = { path = "../pdfs", features = ["pdfium"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

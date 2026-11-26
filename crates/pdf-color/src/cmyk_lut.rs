@@ -1,7 +1,39 @@
-//! Unprofiled `DeviceCMYK` -> sRGB lookup table recorded from PDFium as of chromium/8152.
+//! PDFium's `kAdobeCMYK_to_sRGB1` 9×9×9×9 lookup table (`core/fxcodec/fx_codec.cpp`,
+//! as of chromium/8152) for unprofiled `DeviceCMYK` -> sRGB conversion under
+//! `Rules::Pdfium`.
 //!
-//! A 9x9x9x9 uniform dyadic grid (`0/8..=8/8` per channel, 6,561 `[R, G, B]` entries = 19,683
-//! bytes) evaluated by quadrilinear interpolation for `Rules::Pdfium`.
+//! Each axis samples `0/8..=8/8` (`6,561` `[R, G, B]` entries = `19,683` bytes);
+//! regenerate or verify at a PDFium pin bump with `oracle/cmyk_lut.py`.
+//!
+//! ```text
+//! Copyright 2014 The PDFium Authors
+//!
+//! Redistribution and use in source and binary forms, with or without
+//! modification, are permitted provided that the following conditions are
+//! met:
+//!
+//!    * Redistributions of source code must retain the above copyright
+//! notice, this list of conditions and the following disclaimer.
+//!    * Redistributions in binary form must reproduce the above
+//! copyright notice, this list of conditions and the following disclaimer
+//! in the documentation and/or other materials provided with the
+//! distribution.
+//!    * Neither the name of Google Inc. nor the names of its
+//! contributors may be used to endorse or promote products derived from
+//! this software without specific prior written permission.
+//!
+//! THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+//! "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+//! LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+//! A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+//! OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+//! SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+//! LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+//! DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+//! THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+//! (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+//! OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//! ```
 
 pub(crate) const GRID: usize = 9;
 
@@ -868,4 +900,112 @@ pub(crate) fn pdfium_cmyk_to_srgb(c: f32, m: f32, y: f32, k: f32) -> [f32; 3] {
         }
     }
     [acc[0] / 255.0, acc[1] / 255.0, acc[2] / 255.0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference implementation of PDFium's `AdobeCMYK_to_sRGB1` nearest-node
+    /// axis-additive lookup (`core/fxcodec/fx_codec.cpp`) to measure the exact
+    /// worst-case off-grid difference against our smooth quadrilinear
+    /// `pdfium_cmyk_to_srgb` interpolator (`13` u8 levels across `16^4` points;
+    /// `<= 5` u8 levels against live PDFium `chromium/8152` on `8^4` swatches).
+    fn pdfium_nearest_axis_u8(c: u8, m: u8, y: u8, k: u8) -> [u8; 3] {
+        let ic = (usize::from(c) * 8 + 128) / 255;
+        let im = (usize::from(m) * 8 + 128) / 255;
+        let iy = (usize::from(y) * 8 + 128) / 255;
+        let ik = (usize::from(k) * 8 + 128) / 255;
+        let dc = i32::from(c) * 8 - (ic as i32) * 255;
+        let dm = i32::from(m) * 8 - (im as i32) * 255;
+        let dy = i32::from(y) * 8 - (iy as i32) * 255;
+        let dk = i32::from(k) * 8 - (ik as i32) * 255;
+        let base_idx = ((ic * GRID + im) * GRID + iy) * GRID + ik;
+        let base = ADOBE_CMYK_SRGB[base_idx];
+        let step = |stride: usize, d: i32, ch: usize, b0: i32| -> i32 {
+            if d > 0 {
+                (i32::from(ADOBE_CMYK_SRGB[base_idx + stride][ch]) - b0) * d
+            } else if d < 0 {
+                (b0 - i32::from(ADOBE_CMYK_SRGB[base_idx - stride][ch])) * d
+            } else {
+                0
+            }
+        };
+        let mut out = [0_u8; 3];
+        for (ch, slot) in out.iter_mut().enumerate() {
+            let b0 = i32::from(base[ch]);
+            let acc = step(729, dc, ch, b0)
+                + step(81, dm, ch, b0)
+                + step(9, dy, ch, b0)
+                + step(1, dk, ch, b0);
+            let v = f64::from(b0) + f64::from(acc) / 255.0;
+            *slot = v.round().clamp(0.0, 255.0) as u8;
+        }
+        out
+    }
+
+    #[test]
+    fn exact_equality_at_all_6561_grid_points_and_bounded_off_grid_delta() {
+        for ic in 0..GRID {
+            for im in 0..GRID {
+                for iy in 0..GRID {
+                    for ik in 0..GRID {
+                        let idx = ((ic * GRID + im) * GRID + iy) * GRID + ik;
+                        let expected = ADOBE_CMYK_SRGB[idx];
+                        let rgb = pdfium_cmyk_to_srgb(
+                            (ic as f32) / 8.0,
+                            (im as f32) / 8.0,
+                            (iy as f32) / 8.0,
+                            (ik as f32) / 8.0,
+                        );
+                        let got = [
+                            (rgb[0] * 255.0 + 0.5) as u8,
+                            (rgb[1] * 255.0 + 0.5) as u8,
+                            (rgb[2] * 255.0 + 0.5) as u8,
+                        ];
+                        assert_eq!(got, expected, "grid mismatch at ({ic},{im},{iy},{ik})");
+                    }
+                }
+            }
+        }
+
+        // Sweep 16^4 = 65,536 off-grid points (`0/15..=15/15`) and measure max
+        // channel difference between smooth quadrilinear interpolation and
+        // PDFium's axis-additive integer lookup.
+        let mut max_delta = 0_u8;
+        for c in 0..16_u8 {
+            let cf = f32::from(c) / 15.0;
+            let cu = (cf * 255.0 + 0.5) as u8;
+            for m in 0..16_u8 {
+                let mf = f32::from(m) / 15.0;
+                let mu = (mf * 255.0 + 0.5) as u8;
+                for y in 0..16_u8 {
+                    let yf = f32::from(y) / 15.0;
+                    let yu = (yf * 255.0 + 0.5) as u8;
+                    for k in 0..16_u8 {
+                        let kf = f32::from(k) / 15.0;
+                        let ku = (kf * 255.0 + 0.5) as u8;
+                        let quad = pdfium_cmyk_to_srgb(cf, mf, yf, kf);
+                        let q8 = [
+                            (quad[0] * 255.0 + 0.5) as u8,
+                            (quad[1] * 255.0 + 0.5) as u8,
+                            (quad[2] * 255.0 + 0.5) as u8,
+                        ];
+                        let p8 = pdfium_nearest_axis_u8(cu, mu, yu, ku);
+                        for ch in 0..3 {
+                            max_delta = max_delta.max(q8[ch].abs_diff(p8[ch]));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            max_delta, 13,
+            "unexpected off-grid CMYK interpolation delta: max_delta={max_delta}"
+        );
+
+        // Non-finite and out-of-range inputs clamp cleanly without panicking.
+        let nan_rgb = pdfium_cmyk_to_srgb(f32::NAN, -2.0, 5.0, f32::INFINITY);
+        assert!(nan_rgb.into_iter().all(|v| (0.0..=1.0).contains(&v)));
+    }
 }
