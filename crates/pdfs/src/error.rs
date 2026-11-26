@@ -58,6 +58,13 @@ pub enum Error {
     /// (`pdf-annots`'s / `pdf-semantics`'s).
     #[error("{0}")]
     Annots(pdf_annots::Error),
+    /// Decoding or re-encoding a PDF Image XObject or inline image failed
+    /// (`pdf-images`'s).
+    #[error("{0}")]
+    Images(pdf_images::Error),
+    /// Rasterizing a PDF page, tile, or content stream failed (`pdf-raster`'s).
+    #[error("{0}")]
+    Raster(pdf_raster::Error),
     /// Reading the document outline (`/Outlines`) failed (`pdf-semantics`'s).
     #[error("{0}")]
     Outlines(outlines::Error),
@@ -173,6 +180,18 @@ impl From<pdf_gfx::Error> for Error {
 impl From<pdf_annots::Error> for Error {
     fn from(error: pdf_annots::Error) -> Error {
         Error::Annots(error)
+    }
+}
+
+impl From<pdf_images::Error> for Error {
+    fn from(error: pdf_images::Error) -> Error {
+        Error::Images(error)
+    }
+}
+
+impl From<pdf_raster::Error> for Error {
+    fn from(error: pdf_raster::Error) -> Error {
+        Error::Raster(error)
     }
 }
 

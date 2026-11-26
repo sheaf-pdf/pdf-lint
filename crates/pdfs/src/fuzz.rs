@@ -180,6 +180,14 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
             assert_eq!(annots, annots_with, "annots fault sink invariance");
             let _ = page.plan_flatten(pdf_annots::FlattenOpts::DEFAULT);
             let _ = page.plan_flatten(pdf_annots::FlattenOpts::DEFAULT.with_redactions(true));
+            let ropts = pdf_raster::RenderOpts::with_viewport(pdf_raster::Viewport::Page {
+                width: 16,
+                rotation: pdf_gfx::Rotation::R0,
+            });
+            let r1 = page.render(&ropts).map_err(words);
+            let mut r_faults = Vec::new();
+            let r2 = page.render_with(&ropts, None, &mut r_faults).map_err(words);
+            assert_eq!(r1, r2, "render fault sink invariance");
             #[cfg(feature = "text-layout")]
             {
                 let tp1 = page
@@ -286,6 +294,19 @@ fn small() -> Limits {
     limits.gfx.marked = 4;
     limits.gfx.interpreted = 256;
     limits.gfx.decompressed = 1 << 12;
+    limits.images.max_width = 64;
+    limits.images.max_height = 64;
+    limits.images.max_pixels = 2048;
+    limits.images.max_sample_bytes = 8192;
+    limits.images.max_encoded_bytes = 8192;
+    limits.raster.max_width = 64;
+    limits.raster.max_height = 64;
+    limits.raster.max_pixels = 2048;
+    limits.raster.max_pixmap_bytes = 8192;
+    limits.raster.max_layer_depth = 4;
+    limits.raster.max_pattern_cells = 32;
+    limits.raster.max_shading_samples = 4096;
+    limits.raster.max_annots = 16;
     limits.font_budget = 1 << 12;
     limits
 }

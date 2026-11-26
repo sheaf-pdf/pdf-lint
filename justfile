@@ -609,10 +609,11 @@ raster-package: (_package "pdf-raster" "pdf-objects" "pdf-color" "pdf-images" "p
 linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-crypt" "pdf-structure" "pdf-semantics" "pdf-filters")
 
 # Package pdfs as a publish would, pdf-objects, pdf-crypt, pdf-color,
-# pdf-filters, pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts,
-# pdf-gfx, pdf-annots, pdf-forms and pdf-linearize beside it while the versions it names
-# aren't published; `_package` says what's checked.
-pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-forms" "pdf-linearize")
+# pdf-images, pdf-filters, pdf-structure, pdf-content-streams, pdf-semantics,
+# pdf-fonts, pdf-gfx, pdf-annots, pdf-forms, pdf-raster and pdf-linearize beside
+# it while the versions it names aren't published; `_package` says what's
+# checked.
+pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-images" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-forms" "pdf-raster" "pdf-linearize")
 
 # Package pdf-arlington as a publish would, the model it embeds with its
 # licence and notice beside its sources, and pdf-objects and pdf-color
@@ -833,7 +834,8 @@ forms-cmaps-msrv:
 
 # Test pdf-raster on its oldest supported Rust, as it's published, with no
 # feature, and with SIMD, zlib-rs, and numeric spans (`tracing`), which must be
-# installed.
+# installed; and the PDFium comparative backend crate, never published, on the
+# same Rust.
 raster-msrv:
     cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster
     cargo +{{ raster_msrv }} test --locked -p pdf-raster --doc
@@ -841,6 +843,8 @@ raster-msrv:
     cargo +{{ raster_msrv }} test --locked -p pdf-raster --no-default-features --doc
     cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster --features simd,zlib-rs,tracing
     cargo +{{ raster_msrv }} test --locked -p pdf-raster --features simd,zlib-rs,tracing --doc
+    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster-pdfium
+    cargo +{{ raster_msrv }} test --locked -p pdf-raster-pdfium --doc
 
 # Test pdf-raster with `predefined-cmaps` on that feature's oldest Rust, which
 # must be installed.

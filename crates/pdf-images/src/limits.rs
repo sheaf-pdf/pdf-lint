@@ -4,7 +4,7 @@
 ///
 /// Every dimension, pixel count, and buffer size is checked **before** allocating pixel buffers or
 /// running image codecs so adversarial headers cannot exhaust memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
     /// Maximum allowed image `/Width` in pixels (`32_768` by default).

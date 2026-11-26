@@ -28,7 +28,7 @@ pub enum LimitKind {
 }
 
 /// Resource limits for page, Form XObject, and appearance rasterization.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
     /// Maximum viewport or offscreen layer width in pixels (`<= 65,535`).

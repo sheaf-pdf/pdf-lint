@@ -126,6 +126,7 @@ pub use pdf_images;
 pub use pdf_objects;
 pub use pdf_semantics;
 
+mod backend;
 mod builtin_glyphs;
 mod canvas2d;
 mod engine;
@@ -141,6 +142,7 @@ mod paint;
 mod phases;
 mod pixmap;
 
+pub use backend::{BackendError, RenderBackend, RenderedDoc};
 pub use engine::{render_content, render_content_with, render_page, render_page_with};
 pub use error::Error;
 pub use fallback::{FontFallback, FontQuery, RenderCache};
@@ -175,6 +177,9 @@ mod doc_tests {
         check::<RenderSummary>();
         check::<FontQuery>();
         check::<RenderCache>();
+        check::<BackendError>();
+        check::<Box<dyn RenderedDoc>>();
+        check::<Box<dyn RenderBackend>>();
     }
 
     #[test]

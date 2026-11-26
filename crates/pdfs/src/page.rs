@@ -590,6 +590,124 @@ where
     )?)
 }
 
+/// Decodes an indirect Image XObject `image_id` in the context of `page`'s
+/// `/Resources` into straight `sRGB` `RGBA8` ([`pdf_images::RgbaImage`]),
+/// without collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Images`] if `image_id` is missing, malformed, exceeds
+/// `limits.images`, or fails to decode.
+pub fn decode_image<'o, O>(
+    objects: O,
+    page: &pages::Page<'o>,
+    image_id: pdf_objects::ObjectId,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<pdf_images::RgbaImage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    decode_image_with(objects, page, image_id, rules, limits, &mut ())
+}
+
+/// [`decode_image`](fn@decode_image), reporting recoverable ISO 32000-2
+/// departures to `sink` ([`pdf_images::Fault`]).
+///
+/// # Errors
+///
+/// As [`decode_image`](fn@decode_image) fails.
+pub fn decode_image_with<'o, O, K>(
+    objects: O,
+    page: &pages::Page<'o>,
+    image_id: pdf_objects::ObjectId,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<pdf_images::RgbaImage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_images::Fault> + ?Sized,
+{
+    phase!(DEBUG, "decode_image");
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let dec_opts = pdf_images::DecodeOptions::from_resources(objects, rules, resources)?;
+    let img_limits = limits.reading_images();
+    Ok(pdf_images::decode_xobject_with(
+        objects,
+        image_id,
+        resources,
+        &dec_opts,
+        &img_limits,
+        sink,
+    )?)
+}
+
+/// Rasterizes `page` into a [`pdf_raster::Pixmap`] under `opts`, `rules`, and
+/// `limits` without collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Raster`] on invalid viewports, exceeded resource caps, or
+/// unreadable objects/streams.
+#[allow(clippy::too_many_arguments)]
+pub fn render<'o, O>(
+    objects: O,
+    catalog: Option<&'o Dict>,
+    page: &pages::Page<'o>,
+    cache: &pdf_raster::RenderCache,
+    fallback: Option<&dyn pdf_raster::FontFallback>,
+    opts: &pdf_raster::RenderOpts,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    render_with(
+        objects,
+        catalog,
+        page,
+        cache,
+        fallback,
+        opts,
+        rules,
+        limits,
+        &mut (),
+    )
+}
+
+/// [`render`](fn@render), reporting recoverable ISO 32000-2 departures to
+/// `sink` ([`pdf_raster::Fault`]).
+///
+/// # Errors
+///
+/// As [`render`](fn@render) fails.
+#[allow(clippy::too_many_arguments)]
+pub fn render_with<'o, O, K>(
+    objects: O,
+    catalog: Option<&'o Dict>,
+    page: &pages::Page<'o>,
+    cache: &pdf_raster::RenderCache,
+    fallback: Option<&dyn pdf_raster::FontFallback>,
+    opts: &pdf_raster::RenderOpts,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_raster::Fault> + ?Sized,
+{
+    phase!(DEBUG, "render");
+    let mut effective = opts.clone();
+    effective.rules = rules;
+    effective.limits = limits.reading_raster();
+    Ok(pdf_raster::render_page_with(
+        objects, catalog, page, cache, fallback, &effective, sink,
+    )?)
+}
+
 /// The dictionary `value` is, as PDFium reaches one (`GetDict`): its own, or a
 /// stream's, through two references at most; none for anything else, or past
 /// that, or for a reference to nothing or to an object that's damaged.

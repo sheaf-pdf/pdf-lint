@@ -43,6 +43,14 @@ pub struct Limits {
     /// [`content`](Limits::content) and [`semantics`](Limits::semantics) at each
     /// call.
     pub annots: pdf_annots::Limits,
+    /// What Image XObjects and inline images decode under (`pdf-images`'s).
+    /// Its `content` and `color` are synced from [`content`](Limits::content)
+    /// at each call.
+    pub images: pdf_images::Limits,
+    /// What 2D page, tile, annotation, and form rasterization runs under
+    /// (`pdf-raster`'s). Its `gfx`, `images`, `color`, `semantics`, and
+    /// `annots` are synced from this struct's fields at each call.
+    pub raster: pdf_raster::Limits,
     /// What a file's linearization is checked under, and a document is
     /// linearized under (pdf-linearize's): the graph a plan is made of, and
     /// its hint tables. Its `page_depth`, `tree_depth` and `tree_nodes` are
@@ -69,6 +77,8 @@ impl Limits {
         fonts: pdf_fonts::Limits::DEFAULT,
         gfx: pdf_gfx::Limits::DEFAULT,
         annots: pdf_annots::Limits::DEFAULT,
+        images: pdf_images::Limits::DEFAULT,
+        raster: pdf_raster::Limits::DEFAULT,
         linearize: pdf_linearize::Limits::DEFAULT,
         font_budget: 256 << 20,
     };
@@ -96,6 +106,28 @@ impl Limits {
         annots.content = self.content;
         annots.semantics = self.semantics;
         annots
+    }
+
+    /// [`images`](Limits::images), its `content` and `color` synced from
+    /// [`content`](Limits::content).
+    pub(crate) const fn reading_images(&self) -> pdf_images::Limits {
+        let mut images = self.images;
+        images.content = self.content;
+        images.color = self.content.color;
+        images
+    }
+
+    /// [`raster`](Limits::raster), its subsystem limits synced from this
+    /// struct's fields.
+    pub(crate) const fn reading_raster(&self) -> pdf_raster::Limits {
+        let mut raster = self.raster;
+        raster.gfx = self.reading_gfx();
+        raster.images = self.reading_images();
+        raster.color = self.content.color;
+        raster.semantics = self.semantics;
+        raster.annots = self.reading_annots();
+        raster.forms.annots = raster.annots;
+        raster
     }
 
     /// [`linearize`](Limits::linearize), its walks' caps
@@ -137,6 +169,10 @@ mod tests {
         assert_eq!(limits.reading_gfx(), pdf_gfx::Limits::DEFAULT);
         assert_eq!(limits.annots, pdf_annots::Limits::DEFAULT);
         assert_eq!(limits.reading_annots(), pdf_annots::Limits::DEFAULT);
+        assert_eq!(limits.images, pdf_images::Limits::DEFAULT);
+        assert_eq!(limits.reading_images(), pdf_images::Limits::DEFAULT);
+        assert_eq!(limits.raster, pdf_raster::Limits::DEFAULT);
+        assert_eq!(limits.reading_raster(), pdf_raster::Limits::DEFAULT);
         assert_eq!(limits.linearize, pdf_linearize::Limits::DEFAULT);
         assert_eq!(limits.font_budget, 256 << 20);
         assert_eq!(limits.linearizing(), pdf_linearize::Limits::DEFAULT);

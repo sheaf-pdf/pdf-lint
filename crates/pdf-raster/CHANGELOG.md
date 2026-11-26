@@ -12,4 +12,5 @@ All notable changes to `pdf-raster` are documented in this file.
   TrueType/CFF/Type 1 & Type 3 fonts, fallback fonts, Image XObjects & inline
   images, transparency groups, blend modes, soft masks, tiling patterns,
   shadings, and optional content groups under both `Rules::Iso` and
-  `Rules::Pdfium` (as of chromium/8152).
+  `Rules::Pdfium` (as of chromium/8152), plus object-safe `RenderBackend`,
+  `RenderedDoc`, and `BackendError` traits for pluggable viewer rendering.

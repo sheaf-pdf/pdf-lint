@@ -10,8 +10,9 @@ resolver = "3"
 # then leaves out. pdfs, which takes every crate in the table but
 # pdf-arlington, is required by none, so it isn't in the table itself.
 # pdf-fixtures, the tests' file writer and qpdf, is never published: a crate
-# whose tests use it takes it by its path alone, a dev-dependency. So is
-# pdf-pdfium, the tests' PDFium rendering oracle and conformance rubric. Nor is
+# whose tests use it takes it by its path alone, a dev-dependency. So are
+# pdf-pdfium, the tests' PDFium rendering oracle and conformance rubric, and
+# pdf-raster-pdfium, the comparative RenderBackend adapter over it. Nor is
 # pdf-linearize-lopdf, the lopdf adapter, which no member depends on.
 # Nothing else is inherited from here.
 members = [
@@ -31,6 +32,7 @@ members = [
     "crates/pdf-annots",
     "crates/pdf-forms",
     "crates/pdf-raster",
+    "crates/pdf-raster-pdfium",
     "crates/pdf-linearize",
     "crates/pdf-linearize-lopdf",
     "crates/pdfs",

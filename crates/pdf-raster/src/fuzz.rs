@@ -75,7 +75,7 @@ pub fn run(data: &[u8]) {
         width: 32,
         rotation: Rotation::R0,
     });
-    opts.limits = lim.clone();
+    opts.limits = lim;
     opts.rules = if selector & 1 == 0 {
         Rules::Pdfium
     } else {

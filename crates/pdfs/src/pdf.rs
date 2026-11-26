@@ -41,7 +41,7 @@ pub struct Pdf<S: ByteSource = Vec<u8>> {
     reading: Reading<S>,
     limits: Limits,
     rules: Rules,
-    fonts: Fonts,
+    cache: pdf_raster::RenderCache,
     identity: Option<Identity>,
 }
 
@@ -67,7 +67,7 @@ impl<S: ByteSource> Pdf<S> {
             reading,
             limits: options.limits,
             rules: options.rules,
-            fonts: Fonts::default(),
+            cache: pdf_raster::RenderCache::default(),
             identity,
         }
     }
@@ -104,7 +104,15 @@ impl<S: ByteSource> Pdf<S> {
     /// leaves to it; for pdf-fonts' calls over [`Pdf::reading`] too.
     #[must_use]
     pub const fn fonts(&self) -> &Fonts {
-        &self.fonts
+        self.cache.fonts()
+    }
+
+    /// Its shared cross-page [`RenderCache`](pdf_raster::RenderCache) (wrapping
+    /// [`Self::fonts`] alongside cached fallback font programs for
+    /// [`Page::render`] and [`pdf_raster`] calls).
+    #[must_use]
+    pub const fn render_cache(&self) -> &pdf_raster::RenderCache {
+        &self.cache
     }
 
     /// The file it reads, where [`open`](crate::open) opened it by its path:
@@ -163,19 +171,19 @@ impl<S: ByteSource> Pdf<S> {
             reading,
             limits,
             rules,
-            fonts,
+            cache,
             identity,
         } = self;
-        let back = |reading, fonts| Pdf {
+        let back = |reading, cache| Pdf {
             reading,
             limits,
             rules,
-            fonts,
+            cache,
             identity: identity.clone(),
         };
         match reading.unlock(passwords) {
-            Ok(reading) => Ok(back(reading, Fonts::default())),
-            Err((reading, refused)) => Err((back(reading, fonts), refused)),
+            Ok(reading) => Ok(back(reading, pdf_raster::RenderCache::default())),
+            Err((reading, refused)) => Err((back(reading, cache), refused)),
         }
     }
 
@@ -924,7 +932,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         let mut budget = pdf.limits.font_budget;
         page::fonts(
             &pdf.reading,
-            &pdf.fonts,
+            pdf.fonts(),
             self.page,
             &pdf.limits,
             &mut budget,
@@ -946,7 +954,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         let mut budget = pdf.limits.font_budget;
         page::text(
             &pdf.reading,
-            &pdf.fonts,
+            pdf.fonts(),
             self.page,
             &pdf.limits,
             &mut budget,
@@ -984,7 +992,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         let pdf = self.pdf;
         page::interpret_with(
             &pdf.reading,
-            &pdf.fonts,
+            pdf.fonts(),
             self.page,
             &pdf.limits,
             opts,
@@ -1015,7 +1023,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         sink: &mut K,
     ) -> Result<pdf_gfx::EncodedPage, Error> {
         let pdf = self.pdf;
-        page::encode_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, sink)
+        page::encode_with(&pdf.reading, pdf.fonts(), self.page, &pdf.limits, sink)
     }
 
     /// Extracts reading-order text, line geometry, and search index
@@ -1042,7 +1050,14 @@ impl<'a, S: ByteSource> Page<'a, S> {
         sink: &mut K,
     ) -> Result<pdf_gfx::TextPage, Error> {
         let pdf = self.pdf;
-        page::text_page_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, opts, sink)
+        page::text_page_with(
+            &pdf.reading,
+            pdf.fonts(),
+            self.page,
+            &pdf.limits,
+            opts,
+            sink,
+        )
     }
 
     /// Searches reading-order text on the page for `query` under `opts`
@@ -1061,5 +1076,80 @@ impl<'a, S: ByteSource> Page<'a, S> {
         Ok(self
             .text_page(pdf_gfx::TextPageOpts::default())?
             .search(query, opts))
+    }
+
+    /// Decodes an indirect Image XObject `image_id` referenced on this page
+    /// into straight `sRGB` `RGBA8` ([`pdf_images::RgbaImage`]), without
+    /// collecting non-fatal faults.
+    ///
+    /// # Errors
+    ///
+    /// As [`page::decode_image`](fn@page::decode_image) fails.
+    pub fn decode_image(&self, image_id: ObjectId) -> Result<pdf_images::RgbaImage, Error> {
+        self.decode_image_with(image_id, &mut ())
+    }
+
+    /// [`Page::decode_image`], reporting recoverable ISO 32000-2 departures to
+    /// `sink` ([`pdf_images::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::decode_image`] fails.
+    pub fn decode_image_with<K: Sink<pdf_images::Fault> + ?Sized>(
+        &self,
+        image_id: ObjectId,
+        sink: &mut K,
+    ) -> Result<pdf_images::RgbaImage, Error> {
+        let pdf = self.pdf;
+        page::decode_image_with(
+            &pdf.reading,
+            self.page,
+            image_id,
+            pdf.rules,
+            &pdf.limits,
+            sink,
+        )
+    }
+
+    /// Rasterizes this page into a [`Pixmap`](pdf_raster::Pixmap) under `opts`,
+    /// the file's [`Rules`], and [`Limits::raster`], reusing the parent
+    /// [`Pdf::render_cache`] without collecting non-fatal faults.
+    ///
+    /// # Errors
+    ///
+    /// As [`page::render`](fn@page::render) fails.
+    pub fn render(
+        &self,
+        opts: &pdf_raster::RenderOpts,
+    ) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error> {
+        self.render_with(opts, None, &mut ())
+    }
+
+    /// [`Page::render`], accepting an optional [`FontFallback`](pdf_raster::FontFallback)
+    /// for unembedded fonts and reporting recoverable ISO 32000-2 departures to
+    /// `sink` ([`pdf_raster::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::render`] fails.
+    pub fn render_with<K: Sink<pdf_raster::Fault> + ?Sized>(
+        &self,
+        opts: &pdf_raster::RenderOpts,
+        fallback: Option<&dyn pdf_raster::FontFallback>,
+        sink: &mut K,
+    ) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error> {
+        let pdf = self.pdf;
+        let catalog = pdf.catalog().ok();
+        page::render_with(
+            &pdf.reading,
+            catalog,
+            self.page,
+            &pdf.cache,
+            fallback,
+            opts,
+            pdf.rules,
+            &pdf.limits,
+            sink,
+        )
     }
 }

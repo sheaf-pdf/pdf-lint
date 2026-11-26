@@ -13,8 +13,8 @@ pub use crate::EmbeddedFont;
 #[cfg(any(unix, windows))]
 pub use crate::open;
 pub use crate::{
-    Content, Document, Error, Limits, NamedFont, Options, Page, Pages, Pdf, Rect, from_bytes,
-    standard_font,
+    Content, Document, Error, Limits, NamedFont, Options, Page, Pages, Pdf, Rect, RustBackend,
+    from_bytes, standard_font,
 };
 
 pub use pdf_annots::{
@@ -30,10 +30,12 @@ pub use pdf_gfx::{Canvas, EncodedPage, Matrix, PageGeom, Point, Quad, Rotation};
 pub use pdf_gfx::{
     SearchOpts, TextAlign, TextBoxStyle, TextPage, TextPageOpts, VerticalAlign, WrapMode,
 };
+pub use pdf_images::{RawImage, RgbaImage};
 pub use pdf_linearize::check::Verdict;
 pub use pdf_objects::pdf_tokenizer::Rules;
 pub use pdf_objects::version::Version;
 pub use pdf_objects::{Dict, Object, ObjectId, Why};
+pub use pdf_raster::{PixelFormat, Pixmap, RenderOpts, Viewport};
 pub use pdf_semantics::action::{Action, OpenAction};
 pub use pdf_semantics::dest::{Dest, DestFit, DestTable, ResolvedDest};
 pub use pdf_semantics::files::{AfRelationship, EmbeddedFile, FileSpec, NewEmbeddedFile};

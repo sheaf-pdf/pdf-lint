@@ -1046,6 +1046,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-raster-pdfium"
+version = "0.0.0"
+dependencies = [
+ "pdf-fixtures",
+ "pdf-pdfium",
+ "pdf-raster",
+ "pdf-semantics",
+ "pdf-structure",
+ "pdfs",
+ "thiserror",
+]
+
+[[package]]
 name = "pdf-semantics"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -1102,8 +1115,10 @@ dependencies = [
  "pdf-fonts",
  "pdf-forms",
  "pdf-gfx",
+ "pdf-images",
  "pdf-linearize",
  "pdf-objects",
+ "pdf-raster",
  "pdf-semantics",
  "pdf-structure",
  "pdf-tokenizer",

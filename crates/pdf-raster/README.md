@@ -15,6 +15,7 @@ Zero-I/O pure-Rust PDF 2D page, Form XObject, annotation, and interactive form r
   - **Images & masks:** Indirect Image XObjects and `BI..ID..EI` inline images via `pdf-images` (`DCTDecode`, `CCITTFaxDecode`, `JBIG2Decode`, `JPXDecode`, `/ImageMask` stencils, `/Mask`, and `/SMask` + `/Matte`).
   - **Transparency, patterns & shadings:** Isolated Form XObject `/Group`s, all 16 PDF blend modes (`/BM`), constant opacities (`/ca`, `/CA`), `/Alpha` and `/Luminosity` soft masks (`/SMask` with `/BC` and `/TR`), colored/uncolored tiling patterns (`PatternType 1`), and shadings (`sh` and `PatternType 2`, `ShadingType 1..=5`).
   - **Optional content, annotations & AcroForms:** Evaluates catalog `/OCProperties` (`/OCG`, `/OCMD`, and `/Usage` `/View` vs. `/Print`), draws written `/AP /N` streams, and optionally synthesizes missing annotation and AcroForm widget appearances (`Appearances::Synthesize` vs. `Appearances::WrittenOnly`) without mutating the document.
+- **Swappable `RenderBackend` & `RenderedDoc` traits:** Layer 2 traits (`BackendError`, `RenderBackend`, `RenderedDoc`) allow applications and differential test harnesses to switch cleanly between `pdfs::RustBackend` and external/FFI engines.
 
 ## Quickstart
 
