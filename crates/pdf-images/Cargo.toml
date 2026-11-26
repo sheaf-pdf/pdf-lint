@@ -54,7 +54,7 @@ bench = false
 # Path-only dev-dependencies omitted from the published package manifest so
 # `pdf-images` packages cleanly over its zero-I/O library dependencies alone.
 pdf-fixtures = { path = "../pdf-fixtures" }
-pdf-pdfium = { path = "../pdf-pdfium" }
+pdf-raster = { path = "../pdf-raster", default-features = false, features = ["pdfium"] }
 pdf-structure = { path = "../pdf-structure" }
 
 [lints.rust]

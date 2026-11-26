@@ -10,6 +10,8 @@
 
 #[cfg(feature = "embed")]
 pub use crate::EmbeddedFont;
+#[cfg(feature = "pdfium")]
+pub use crate::PdfiumBackend;
 #[cfg(any(unix, windows))]
 pub use crate::open;
 pub use crate::{

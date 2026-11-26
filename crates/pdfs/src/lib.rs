@@ -89,9 +89,11 @@
 //!   Programs with CFF, CFF2 or bitmap-only outlines are refused, text is
 //!   drawn a character at a time without shaping, and justified text in an
 //!   embedded font is laid out flush left.
-//! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
-//!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
-//!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
+//! - **`image-ends`**, **`predefined-cmaps`**, **`simd`**, and **`pdfium`**: decode
+//!   inline DCT/CCITTFax images to find their end, bundle Adobe predefined CJK
+//!   CMaps, enable runtime CPU SIMD in `pdf-content-streams`, `pdf-images`, and
+//!   `pdf-raster`, and enable `PdfiumBackend` (a thin `RenderBackend` adapter
+//!   over `pdfium-render` `0.9.6`).
 //! - **`tracing`**: emit `debug`-level `tracing` spans (numeric counts and
 //!   lengths only, never file content).
 //! - **`insecure-test-writer`**: deterministic seeded encryption keys and IVs
@@ -137,6 +139,8 @@ pub use open::{Options, from_bytes};
 pub use page::{Content, NamedFont};
 pub use pdf::{Page, Pages, PagesIter, Pdf};
 pub use pdf_gfx::Rect;
+#[cfg(feature = "pdfium")]
+pub use pdf_raster::PdfiumBackend;
 
 pub mod backend;
 pub mod build;
@@ -463,6 +467,134 @@ mod tests {
         assert_eq!(rendered_doc.page_count(), 1);
         let (bpix, _) = rendered_doc.render_page(0, &opts).unwrap();
         assert_eq!(bpix, pix);
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    fn rust_and_pdfium_backends_agree_across_pages_tiles_formats_rotations_and_encryption() {
+        use std::sync::Arc;
+
+        use crate::pdf_raster::pdfium::Error as PdfiumError;
+        use crate::pdf_raster::rubric::{RubricProfile, compare_backends};
+        use crate::pdf_raster::{AntiAlias, BackendError, RenderBackend};
+        use crate::prelude::*;
+
+        let rust = RustBackend::new();
+        let pdfium = match PdfiumBackend::from_env() {
+            Ok(b) => b,
+            Err(PdfiumError::LibraryNotFound { .. }) => return,
+            Err(other) => panic!("unexpected libpdfium load error: {other}"),
+        };
+
+        let mut doc = Document::new();
+        {
+            let p1 = doc.add_page(Rect::new(0.0, 0.0, 200.0, 160.0));
+            p1.fill_color(Color::rgb8([30, 100, 210]));
+            p1.rect(20.0, 20.0, 70.0, 120.0);
+            p1.paint(Paint::Fill);
+            p1.fill_color(Color::rgb8([220, 70, 40]));
+            p1.rect(110.0, 40.0, 70.0, 80.0);
+            p1.paint(Paint::Fill);
+        }
+        {
+            let p2 = doc.add_page(Rect::new(0.0, 0.0, 160.0, 120.0));
+            p2.fill_color(Color::rgb8([40, 170, 90]));
+            p2.rect(15.0, 15.0, 130.0, 90.0);
+            p2.paint(Paint::Fill);
+        }
+
+        let user_pw = Password("viewer-pass").prepared().unwrap();
+        doc.encrypt(&Protection::new(&user_pw)).unwrap();
+        let bytes: Arc<[u8]> = Arc::from(doc.to_bytes().unwrap());
+
+        assert!(matches!(
+            rust.open_bytes(bytes.clone(), None),
+            Err(BackendError::Locked)
+        ));
+        assert!(matches!(
+            pdfium.open_bytes(bytes.clone(), None),
+            Err(BackendError::Locked)
+        ));
+
+        let rust_doc = rust.open_bytes(bytes.clone(), Some("viewer-pass")).unwrap();
+        let pdfium_doc = pdfium
+            .open_bytes(bytes.clone(), Some("viewer-pass"))
+            .unwrap();
+        assert_eq!(rust_doc.page_count(), 2);
+        assert_eq!(pdfium_doc.page_count(), 2);
+        assert_eq!(
+            rust_doc.page_geom(0).unwrap(),
+            pdfium_doc.page_geom(0).unwrap()
+        );
+        assert_eq!(
+            rust_doc.page_geom(1).unwrap(),
+            pdfium_doc.page_geom(1).unwrap()
+        );
+        assert!(matches!(
+            rust_doc.page_geom(5),
+            Err(BackendError::PageOutOfBounds {
+                page_index: 5,
+                page_count: 2
+            })
+        ));
+        assert!(matches!(
+            pdfium_doc.page_geom(5),
+            Err(BackendError::PageOutOfBounds {
+                page_index: 5,
+                page_count: 2
+            })
+        ));
+
+        let rubric = RubricProfile::ConformingCore.config();
+
+        for rot in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
+            let mut opts = RenderOpts::with_viewport(Viewport::Page {
+                width: 160,
+                rotation: rot,
+            });
+            opts.format = PixelFormat::Bgra8;
+            let outcome = compare_backends(
+                &rust,
+                &pdfium,
+                bytes.clone(),
+                Some("viewer-pass"),
+                0,
+                &opts,
+                &rubric,
+            )
+            .unwrap();
+            assert!(
+                outcome.passed,
+                "page 0 rotation {rot:?} failed: {outcome:?}"
+            );
+        }
+
+        for (tx, ty) in [(0, 0), (100, 0), (0, 80), (100, 80)] {
+            let mut tile_opts = RenderOpts::with_viewport(Viewport::Tile {
+                page_width: 200,
+                page_height: 160,
+                x: tx,
+                y: ty,
+                w: 100,
+                h: 80,
+                rotation: Rotation::R0,
+            });
+            tile_opts.anti_alias = AntiAlias::NONE;
+            let outcome = compare_backends(
+                &rust,
+                &pdfium,
+                bytes.clone(),
+                Some("viewer-pass"),
+                0,
+                &tile_opts,
+                &rubric,
+            )
+            .unwrap();
+            assert!(
+                outcome.passed,
+                "tile ({tx}, {ty}) failed ConformingCore rubric: {outcome:?}"
+            );
+        }
     }
 
     #[test]

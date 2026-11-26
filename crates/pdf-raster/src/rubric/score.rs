@@ -11,14 +11,12 @@
 //!   `PdfiumWild`, `IsoNormative`, `WriteAndSanitize`);
 //! - TSV baseline serialization, drift detection, and 4-up diagnostic diff strip rendering.
 
-#![forbid(unsafe_code)]
-
 use std::fmt;
 use std::ops::{BitAnd, BitOr, BitOrAssign};
 use std::str::FromStr;
 
-use crate::ffi::Error;
-use crate::image::RgbaImage;
+use super::Error;
+use super::image::RgbaImage;
 
 /// Qualitative grade band mapped from a `0.0..=100.0` [`VisualScore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -436,7 +434,7 @@ fn box_delta_e(p: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> f32 {
 /// # Errors
 ///
 /// Returns [`Error::DimensionMismatch`] or [`Error::InvalidDimensions`] if image sizes mismatch
-/// or the combined strip exceeds [`crate::image::MAX_PIXELS`].
+/// or the combined strip exceeds [`super::MAX_PIXELS`].
 pub fn render_diff_strip(candidate: &RgbaImage, reference: &RgbaImage) -> Result<RgbaImage, Error> {
     let (w, h) = (candidate.width(), reference.height());
     if candidate.height() != h || reference.width() != w {

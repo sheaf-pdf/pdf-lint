@@ -110,12 +110,12 @@ clippy:
     cargo clippy --locked -p pdf-forms --no-default-features --features embed,text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-raster --all-targets -- -D warnings
     cargo clippy --locked -p pdf-raster --no-default-features --all-targets -- -D warnings
-    cargo clippy --locked -p pdf-raster --features predefined-cmaps,simd,zlib-rs,tracing --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --features embed --all-targets -- -D warnings
-    cargo clippy --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
 
 # Workspace unit and integration tests through cargo-nextest (no doctests;
 # pass extra nextest arguments, e.g. `just test-unit -p pdf-structure`).
@@ -200,8 +200,8 @@ test:
     cargo test --locked -p pdf-raster --doc
     cargo nextest run --locked -p pdf-raster --no-default-features
     cargo test --locked -p pdf-raster --no-default-features --doc
-    cargo nextest run --locked -p pdf-raster --features predefined-cmaps,simd,zlib-rs,tracing
-    cargo test --locked -p pdf-raster --features predefined-cmaps,simd,zlib-rs,tracing --doc
+    cargo nextest run --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing
+    cargo test --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing --doc
     cargo nextest run --locked -p pdf-structure --features tracing
     cargo test --locked -p pdf-structure --features tracing --doc
     cargo nextest run --locked -p pdfs
@@ -209,8 +209,8 @@ test:
     cargo nextest run --locked -p pdfs --no-default-features
     cargo test --locked -p pdfs --no-default-features --doc
     cargo nextest run --locked -p pdfs --no-default-features --features embed
-    cargo nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
-    cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
+    cargo nextest run --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing
+    cargo test --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing --doc
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -305,12 +305,17 @@ test-pdfium:
     set -euo pipefail
     python3 -I -B oracle/pdfium.py cases {{ pdfium_sets }}
     if [ -n "${PDF_LINT_PDFIUM:-}" ]; then
-        env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check "$PDF_LINT_PDFIUM" {{ pdfium_sets }}
+        lib="$PDF_LINT_PDFIUM"
+        env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check "$lib" {{ pdfium_sets }}
     else
         "{{ just_executable() }}" _pdfium
+        lib="$PWD/target/pdfium-{{ pdfium_build }}/lib/libpdfium.so"
         env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check \
-            "$PWD/target/pdfium-{{ pdfium_build }}/lib/libpdfium.so" {{ pdfium_sets }} --build {{ pdfium_build }}
+            "$lib" {{ pdfium_sets }} --build {{ pdfium_build }}
     fi
+    env -u GH_TOKEN -u GITHUB_TOKEN PDF_RASTER_PDFIUM="$lib" cargo nextest run --locked \
+        -p pdf-color -p pdf-images -p pdf-raster -p pdfs \
+        --features pdf-color/icc,pdf-raster/pdfium,pdfs/pdfium
 
 # Write the crates' PDFium cases anew from their generators, and their
 # answers from the pinned build: when cases are added, and at a bump, once
@@ -833,18 +838,15 @@ forms-cmaps-msrv:
     cargo +{{ forms_msrv }} test --locked -p pdf-forms --features predefined-cmaps --doc
 
 # Test pdf-raster on its oldest supported Rust, as it's published, with no
-# feature, and with SIMD, zlib-rs, and numeric spans (`tracing`), which must be
-# installed; and the PDFium comparative backend crate, never published, on the
-# same Rust.
+# feature, and with its PDFium adapter, SIMD, zlib-rs, and numeric spans
+# (`tracing`), which must be installed.
 raster-msrv:
     cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster
     cargo +{{ raster_msrv }} test --locked -p pdf-raster --doc
     cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster --no-default-features
     cargo +{{ raster_msrv }} test --locked -p pdf-raster --no-default-features --doc
-    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster --features simd,zlib-rs,tracing
-    cargo +{{ raster_msrv }} test --locked -p pdf-raster --features simd,zlib-rs,tracing --doc
-    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster-pdfium
-    cargo +{{ raster_msrv }} test --locked -p pdf-raster-pdfium --doc
+    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster --features pdfium,simd,zlib-rs,tracing
+    cargo +{{ raster_msrv }} test --locked -p pdf-raster --features pdfium,simd,zlib-rs,tracing --doc
 
 # Test pdf-raster with `predefined-cmaps` on that feature's oldest Rust, which
 # must be installed.
@@ -873,8 +875,8 @@ pdfs-msrv:
     cargo +{{ pdfs_msrv }} test --locked -p pdfs --doc
     cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --no-default-features
     cargo +{{ pdfs_msrv }} test --locked -p pdfs --no-default-features --doc
-    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
-    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
+    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing --doc
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:

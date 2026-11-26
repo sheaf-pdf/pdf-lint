@@ -3,7 +3,7 @@
 //! (`1, 2, 4, 8, 16`), color spaces, masks (`/ImageMask`, explicit `/Mask`, color-key `/Mask`,
 //! `/SMask` + `/Matte`), inline images (`BI..ID..EI`), native-space redaction scrubbing, clean
 //! `FlateDecode` & `DCTDecode` re-encoding, resource caps, fault-sink parity, and live
-//! `pdf-pdfium` (`chromium/8152`) `0–100` rubric verification.
+//! `pdf_raster::pdfium` (`chromium/8152`) `0–100` rubric verification.
 
 use std::collections::BTreeMap;
 
@@ -21,9 +21,8 @@ use pdf_images::{
     decode_stream_with, decode_xobject, decode_xobject_with, encode_jpeg, encode_jpeg_bytes,
     encode_raw_flate, encode_rgba_flate,
 };
-use pdf_pdfium::{
-    CaseEvaluation, Pdfium, RenderOptions, RgbaImage as PdfiumImage, RubricProfile, evaluate_case,
-};
+use pdf_raster::pdfium::{Pdfium, RenderOptions};
+use pdf_raster::rubric::{CaseEvaluation, RgbaImage as PdfiumImage, RubricProfile, evaluate_case};
 use pdf_structure::read::{Options, Reading};
 
 fn empty_provider(
@@ -1090,7 +1089,7 @@ fn build_image_page_pdf(w: u32, h: u32, image_stream: Stream, extra_objs: Vec<St
 }
 
 /// Composites a `pdf_images::RgbaImage` over opaque white `[255, 255, 255, 255]` into a
-/// `pdf_pdfium::RgbaImage` for direct rubric comparison against `libpdfium`.
+/// `pdf_raster::rubric::RgbaImage` for direct rubric comparison against `libpdfium`.
 fn composite_over_white(img: &pdf_images::RgbaImage) -> PdfiumImage {
     let mut out = Vec::with_capacity(img.as_bytes().len());
     for &[r, g, b, a] in img.as_bytes().as_chunks::<4>().0 {

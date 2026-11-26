@@ -1,6 +1,6 @@
 //! Layer 2 document-level rendering traits ([`RenderBackend`], [`RenderedDoc`])
 //! for swappable multi-engine execution (`pdfs::RustBackend`,
-//! `pdf-raster-pdfium::PdfiumBackend`, and viewer/CLI engine pools).
+//! `pdf_raster::PdfiumBackend`, and viewer/CLI engine pools).
 
 use std::sync::Arc;
 

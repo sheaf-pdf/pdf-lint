@@ -99,6 +99,9 @@ predefined-cmaps = [
 # Runtime CPU SIMD dispatch in `pdf-content-streams`, `pdf-images`, and
 # `pdf-raster`.
 simd = ["pdf-content-streams/simd", "pdf-images/simd", "pdf-raster/simd"]
+# Optional thin `RenderBackend` adapter (`pdfs::PdfiumBackend`) over
+# `pdfium-render` (`0.9.6`, `thread_safe`).
+pdfium = ["pdf-raster/pdfium"]
 # The spans of every crate of the family that has them, through `tracing`.
 # Off by default; without it, none is compiled.
 tracing = [
@@ -121,9 +124,9 @@ tracing = [
 # the crate's API depends on it.
 insecure-test-writer = ["pdf-structure/insecure-test-writer", "pdf-linearize/insecure-test-writer"]
 
-# docs.rs documents the default and the spans.
+# docs.rs documents the default, the PDFium adapter, and the spans.
 [package.metadata.docs.rs]
-features = ["tracing"]
+features = ["pdfium", "tracing"]
 
 # `cargo bench` runs the benchmarks alone, not the unit tests' harness in
 # bench mode too, so criterion's options reach them as given.

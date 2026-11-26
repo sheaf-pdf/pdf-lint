@@ -97,6 +97,7 @@ assert_eq!(pixmap.pixel_rgba8(5, 5), Some([255, 255, 255, 255]));
 - **`programs`** *(default)*: Enables embedded TrueType, OpenType/CFF, CFF, and Type 1 glyph outline evaluation via `pdf-fonts/programs`.
 - **`text-layout`** *(default)*: Enables on-the-fly synthesis of FreeText annotation and AcroForm text, button, and choice widget appearances.
 - **`icc`** *(default)*: Enables pure-Rust `ICCBased` and `/OutputIntents` profile conversion via `pdf-color/icc` (`moxcms`).
+- **`pdfium`** *(optional)*: Enables `pdf_raster::pdfium` and `PdfiumBackend`, a thin `#![forbid(unsafe_code)]` `RenderBackend` adapter over `pdfium-render` (`0.9.6`, `thread_safe`) so callers can swap between `pdfs::RustBackend` and PDFium at runtime or compare them via `pdf_raster::rubric::compare_backends`.
 - **`predefined-cmaps`** *(optional)*: Bundles Adobe CJK CMaps via `pdf-fonts/predefined-cmaps`.
 - **`simd`** *(optional)*: Enables runtime CPU SIMD dispatch in the 2D compositor and image codecs.
 - **`zlib-rs`** *(optional)*: Enables `zlib-rs` in `pdf-images` inline filter chains.

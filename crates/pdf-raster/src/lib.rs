@@ -139,8 +139,11 @@ pub mod fuzz;
 mod limits;
 mod opts;
 mod paint;
+#[cfg(feature = "pdfium")]
+pub mod pdfium;
 mod phases;
 mod pixmap;
+pub mod rubric;
 
 pub use backend::{BackendError, RenderBackend, RenderedDoc};
 pub use engine::{render_content, render_content_with, render_page, render_page_with};
@@ -152,6 +155,8 @@ pub use opts::{
     AntiAlias, Appearances, Draw, RenderMedium, RenderOpts, RenderSummary, ResolvedViewport,
     Viewport,
 };
+#[cfg(feature = "pdfium")]
+pub use pdfium::PdfiumBackend;
 pub use pixmap::{PixelFormat, Pixmap};
 
 #[cfg(test)]
@@ -180,6 +185,17 @@ mod doc_tests {
         check::<BackendError>();
         check::<Box<dyn RenderedDoc>>();
         check::<Box<dyn RenderBackend>>();
+        check::<rubric::RgbaImage>();
+        check::<rubric::VisualScore>();
+        check::<rubric::RubricConfig>();
+        #[cfg(feature = "pdfium")]
+        {
+            check::<PdfiumBackend>();
+            check::<pdfium::Pdfium>();
+            check::<pdfium::Error>();
+            check::<pdfium::RenderFlags>();
+            check::<pdfium::RenderOptions>();
+        }
     }
 
     #[test]

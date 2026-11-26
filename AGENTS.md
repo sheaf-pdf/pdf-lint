@@ -55,7 +55,7 @@ This document gives developers and coding agents a fast mental model of the work
                                          └─────────────┘
 ```
 
-*(Internal workspace-only crates: `crates/pdf-fixtures` provides test PDF and TrueType program builders and `qpdf` oracle helpers; `crates/pdf-pdfium` provides runtime-loaded `libpdfium` rendering and the `0–100` visual/ISO conformance rubric; `crates/pdf-raster-pdfium` implements `pdf-raster`'s `RenderBackend` trait over `pdf-pdfium` for differential backend comparisons; `crates/pdf-linearize-lopdf` tests `pdf-linearize`'s model-agnostic engine against `lopdf`.)*
+*(Internal workspace-only crates: `crates/pdf-fixtures` provides test PDF and TrueType program builders and `qpdf` oracle helpers; `crates/pdf-linearize-lopdf` tests `pdf-linearize`'s model-agnostic engine against `lopdf`. `crates/pdf-raster` also ships `pdf_raster::rubric` for `0–100` visual/ISO conformance scoring and an additive `pdfium` feature providing a thin `PdfiumBackend` adapter over `pdfium-render`.)*
 
 ## 2. Core Cross-Crate Concepts
 

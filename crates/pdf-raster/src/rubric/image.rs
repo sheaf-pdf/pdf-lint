@@ -1,10 +1,8 @@
 //! Unpremultiplied straight-alpha sRGB `RGBA8` image buffer and compositing helpers.
 
-#![forbid(unsafe_code)]
-
 use std::fmt;
 
-use crate::ffi::Error;
+use super::Error;
 
 /// Maximum pixel count permitted in a single [`RgbaImage`] (64 megapixels = 256 MiB).
 pub const MAX_PIXELS: usize = 64 * 1024 * 1024;

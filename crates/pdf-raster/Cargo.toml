@@ -22,6 +22,7 @@ pdf-gfx.workspace = true
 pdf-images.workspace = true
 pdf-objects.workspace = true
 pdf-semantics.workspace = true
+pdfium-render = { version = "0.9.6", default-features = false, features = ["thread_safe", "pdfium_latest"], optional = true }
 thiserror = "2"
 vello_cpu = { version = "0.4.0", default-features = false, features = ["std", "u8_pipeline"] }
 tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
@@ -69,16 +70,18 @@ tracing = [
     "pdf-annots/tracing",
     "pdf-forms/tracing",
 ]
+# Optional thin adapter (`pdf_raster::pdfium`, `PdfiumBackend`) over
+# `pdfium-render` (`thread_safe`, runtime dynamic binding by default).
+pdfium = ["dep:pdfium-render"]
 
 [package.metadata.docs.rs]
-features = ["predefined-cmaps", "simd", "zlib-rs", "tracing"]
+features = ["pdfium", "predefined-cmaps", "simd", "zlib-rs", "tracing"]
 
 [lib]
 bench = false
 
 [dev-dependencies]
 pdf-fixtures = { path = "../pdf-fixtures" }
-pdf-pdfium = { path = "../pdf-pdfium" }
 pdf-structure = { path = "../pdf-structure" }
 
 [lints.rust]

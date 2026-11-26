@@ -17,7 +17,7 @@ First release. It's an alpha: any alpha may change the API, and each entry here 
 - `page`, `file` and `build`: each recipe as a function over the family's traits, for a reading or a document of the caller's own.
 - `Limits`, every crate's caps in one value, with `font_budget`, and `Error`, every crate's error wrapped as it is.
 - `prelude`: the facade's types and calls, and the family's items they take and give: `RustBackend`, `RawImage`, `RgbaImage`, `PixelFormat`, `Pixmap`, `RenderOpts`, `Viewport`, `Canvas`, `Color`, `ContentWriter`, `EncodedPage`, `Matrix`, `PageGeom`, `Paint`, `Point`, `Quad`, `Rect`, `Res`, `Rotation`, `SearchOpts`, `TextAlign`, `TextBoxStyle`, `TextPage`, `TextPageOpts`, `VerticalAlign`, `WrapMode`, `Std14`, `Font`, `Shown`, `ShownString`, `Unread`, `PdfBox`, `Claims`, `Info`, `Verdict`, `Encryption`, `Encoded`, `Password`, `Permissions`, `Protection`, `Rules`, `Version`, `Dict`, `Object`, `ObjectId` and `Why`, and what pdf-annots' builders take: `BuiltAnnot`, `RedactMark`, `DefaultAppearance`, `Quadding`, `QuadPoints` and `PaintStyle`.
-- Features, each the crates' own: `programs`, `text-layout`, `clock`, `embed` and `icc` by default, and `image-ends`, `predefined-cmaps`, `simd` and `tracing`. `embed` turns on pdf-fonts', pdf-gfx's and pdf-forms', and no `text-layout`.
+- Features, each the crates' own: `programs`, `text-layout`, `clock`, `embed` and `icc` by default, and `image-ends`, `predefined-cmaps`, `simd`, `pdfium` (`PdfiumBackend` over `pdfium-render`) and `tracing`. `embed` turns on pdf-fonts', pdf-gfx's and pdf-forms', and no `text-layout`.
 
 ### Security
 

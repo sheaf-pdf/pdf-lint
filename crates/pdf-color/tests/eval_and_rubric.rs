@@ -1,5 +1,5 @@
 //! Integration tests for `pdf-color` §7.10 function evaluation, §8.6 color space conversion,
-//! `/Decode` & lookup helpers, optional `icc` (`moxcms`) profiles, and live `pdf-pdfium`
+//! `/Decode` & lookup helpers, optional `icc` (`moxcms`) profiles, and live `pdf_raster::pdfium`
 //! (`chromium/8152`) `0–100` rubric verification across `ConformingCore`, `PdfiumWild`, and
 //! `IsoNormative` presets.
 
@@ -14,9 +14,10 @@ use pdf_color::{
     EvalOptions, Fault, Function, FunctionKind, Limits, Paint, PreparedSpace, Space, Spaces,
 };
 use pdf_fixtures::fixture::{self, Body, Xref};
-use pdf_pdfium::{
-    BaselineRow, CaseEvaluation, Pdfium, RenderOptions, RgbaImage, RubricProfile, evaluate_case,
-    format_baseline_tsv, parse_baseline_tsv,
+use pdf_raster::pdfium::{Pdfium, RenderOptions};
+use pdf_raster::rubric::{
+    BaselineRow, CaseEvaluation, RgbaImage, RubricProfile, evaluate_case, format_baseline_tsv,
+    parse_baseline_tsv,
 };
 use pdf_structure::read::{Options, Reading};
 

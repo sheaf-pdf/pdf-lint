@@ -5,19 +5,30 @@ use std::sync::Arc;
 
 use pdf_fixtures::fixture::{Body as FixtureBody, Xref, file as write_fixture_file};
 use pdf_fixtures::font::{Glyph as FixtureGlyph, TrueType};
-use pdf_pdfium::{
-    Pdfium, RenderFlags, RenderOptions as PdfiumRenderOptions, RgbaImage as PdfiumRgba,
-    RubricProfile, evaluate_case, score_images,
-};
 use pdf_raster::pdf_annots::{AnnotColor, AnnotFlags, BuiltAnnot, ShapeKind};
-use pdf_raster::pdf_content_streams::{Blend, Color, Concat, GState, Res, Reserved};
+#[cfg(feature = "pdfium")]
+use pdf_raster::pdf_content_streams::{Blend, GState, Res};
+use pdf_raster::pdf_content_streams::{Color, Concat, Reserved};
 use pdf_raster::pdf_fonts::Std14;
-use pdf_raster::pdf_gfx::{Canvas, Matrix, PageGeom, Rect, Rotation};
+#[cfg(feature = "pdfium")]
+use pdf_raster::pdf_gfx::Matrix;
+use pdf_raster::pdf_gfx::{Canvas, PageGeom, Rect, Rotation};
+#[cfg(feature = "pdfium")]
 use pdf_raster::pdf_images::{JpegColorSpace, encode_jpeg};
+#[cfg(feature = "pdfium")]
+use pdf_raster::pdf_objects::Dict;
 use pdf_raster::pdf_objects::pdf_tokenizer::Rules;
-use pdf_raster::pdf_objects::{Dict, Object, ObjectId, Resolve, Stream, Value, dict};
+use pdf_raster::pdf_objects::{Object, ObjectId, Resolve, Stream, Value, dict};
 use pdf_raster::pdf_semantics::Limits as SemLimits;
 use pdf_raster::pdf_semantics::pages::pages;
+#[cfg(feature = "pdfium")]
+use pdf_raster::pdfium::{
+    Error as PdfiumError, Pdfium, RenderFlags, RenderOptions as PdfiumRenderOptions,
+};
+#[cfg(feature = "pdfium")]
+use pdf_raster::rubric::{
+    CaseEvaluation, RgbaImage as PdfiumRgba, RubricProfile, evaluate_case, score_images,
+};
 use pdf_raster::{
     AntiAlias, Appearances, Draw, Error, LimitKind, PixelFormat, Pixmap, RenderCache, RenderMedium,
     RenderOpts, Viewport, render_content, render_page, render_page_with,
@@ -81,16 +92,18 @@ fn render_pdf_bytes(
     (pix, sum, faults)
 }
 
+#[cfg(feature = "pdfium")]
 fn try_pdfium() -> Option<Pdfium> {
     match Pdfium::try_global() {
         Ok(p) => Some(p),
-        Err(pdf_pdfium::Error::LibraryNotFound { .. }) => None,
+        Err(PdfiumError::LibraryNotFound { .. }) => None,
         Err(other) => panic!("unexpected libpdfium load error: {other}"),
     }
 }
 
+#[cfg(feature = "pdfium")]
 fn pixmap_to_pdfium_rgba(pix: &Pixmap) -> PdfiumRgba {
-    PdfiumRgba::from_rgba(pix.width(), pix.height(), pix.to_rgba8_vec()).unwrap()
+    PdfiumRgba::from_pixmap(pix).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +679,7 @@ fn ocg_visibility_annotations_and_acroform_widgets_respect_draw_and_appearances(
 // 5. Live PDFium (`chromium/8152`) `0–100` Rubric Conformance Suite
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "pdfium")]
 #[test]
 fn pdfium_8152_rubric_conformance_across_paths_text_images_groups_patterns_and_shadings() {
     let Some(pdfium) = try_pdfium() else {
@@ -1164,6 +1178,7 @@ fn pdfium_8152_rubric_conformance_across_paths_text_images_groups_patterns_and_s
     }
 }
 
+#[cfg(feature = "pdfium")]
 fn assert_rubric_case(
     pdfium: &Pdfium,
     name: &str,
@@ -1226,7 +1241,7 @@ fn assert_rubric_case(
 
     let eval = evaluate_case(
         &cfg,
-        &pdf_pdfium::CaseEvaluation {
+        &CaseEvaluation {
             candidate_pdfium: Some(&cand_pdfium),
             candidate_iso: Some(&cand_iso),
             pdfium_reference: Some(&oracle_img),

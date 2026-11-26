@@ -10,7 +10,7 @@ use crate::limits::{LimitKind, Limits};
 #[non_exhaustive]
 pub enum PixelFormat {
     /// Straight (unpremultiplied) 8-bit `sRGB` `[R, G, B, A]` — ready for PNG
-    /// encoding, transparent stamp overlays, and `pdf-pdfium` rubric scoring.
+    /// encoding, transparent stamp overlays, and [`crate::rubric`] scoring.
     #[default]
     Rgba8,
     /// Native 8-bit `[B, G, R, A]` (straight alpha when `background` is opaque,

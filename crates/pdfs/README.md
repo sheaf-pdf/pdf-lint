@@ -193,6 +193,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **`image-ends`** — Find inline DCT (JPEG) and CCITTFax image boundaries by decoding image data, matching PDFium.
 - **`predefined-cmaps`** — Bundle Adobe predefined CJK CMaps (via `hayro-cmap`) for CJK fonts without `/ToUnicode`.
 - **`simd`** — Enable runtime SIMD dispatch in `pdf-content-streams`, `pdf-images`, and `pdf-raster`.
+- **`pdfium`** — Enable `PdfiumBackend` (`pdfs::raster::pdfium`), a thin `RenderBackend` adapter over `pdfium-render` (`0.9.6`, `thread_safe`) for runtime renderer switching and differential testing alongside `RustBackend`.
 - **`tracing`** — Emit `debug`-level `tracing` spans (numeric metadata only) around major read/write operations.
 - **`insecure-test-writer`** — Deterministic seeded encryption keys/IVs for reproducible tests and fuzzing only (**never** enable in production builds).
 
