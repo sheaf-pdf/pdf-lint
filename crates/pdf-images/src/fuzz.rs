@@ -268,7 +268,7 @@ pub fn images(data: &[u8]) {
         if let (Ok(mut raw), Ok(rgba)) = (raw_silent, rgba_silent) {
             // Scrubbing and Flate round-trip on small images.
             let fill = [0_u16; 16];
-            raw.fill_rect_raw(0, 0, 2, 2, &fill);
+            let _ = raw.fill_rect_raw(0, 0, 2, 2, &fill);
             if raw.width() <= 32
                 && raw.height() <= 32
                 && matches!(

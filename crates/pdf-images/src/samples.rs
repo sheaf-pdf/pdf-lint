@@ -6,8 +6,8 @@ use std::fmt;
 
 use pdf_color::PreparedSpace;
 
-use crate::error::Error;
-use crate::header::{ImageCodec, ImageMeta, check_dimensions, check_sample_budget};
+use crate::error::{Error, ScrubError};
+use crate::header::{ImageCodec, ImageMeta, MaskSpec, check_dimensions, check_sample_budget};
 use crate::limits::Limits;
 
 /// Native sample storage for a decoded PDF image before `/Decode` mapping or color conversion.
@@ -340,25 +340,73 @@ impl RawImage {
         }
     }
 
-    /// Overwrites every pixel in `[x .. x + w) × [y .. y + h)` in-place with raw sample values
-    /// `fill` (`fill.len() >= self.components()`), clamped to the image bounds and bit depth.
+    /// Overwrites every pixel in `[x .. x + w) × [y .. y + h)` in-place with raw pre-`/Decode`
+    /// sample values `fill` (`fill.len() >= self.components()`), clamped to the image bounds and
+    /// bit depth, and returns the clipped `(x, y, w, h)` rectangle overwritten (`Ok(None)` when the
+    /// clipped rectangle is empty).
     ///
-    /// Designed for redaction pixel scrubbing: pixels outside the rectangle remain bit-for-bit
-    /// identical in their native color space and bit depth (`1, 2, 4, 8, 16` bpc). If an embedded
-    /// JPX alpha plane is present, alpha inside the scrubbed rectangle is set to `255` (opaque).
-    pub fn fill_rect_raw(&mut self, x: u32, y: u32, w: u32, h: u32, fill: &[u16]) {
+    /// # Redaction Semantics & Masks
+    ///
+    /// - **Pre-`/Decode` native samples:** `fill` values are raw integer samples before `/Decode`
+    ///   mapping (`[0, 0, 0, 0]` is `0%` ink = white in default `DeviceCMYK`; pass `[0, 0, 0, 255]`
+    ///   for 8-bit `DeviceCMYK` black).
+    /// - **Embedded JPX alpha:** If an embedded JPX alpha plane (`/SMaskInData`) is present, alpha
+    ///   inside the scrubbed rectangle is forced to `255` (opaque).
+    /// - **Color-key `/Mask`:** Checked upfront; if the clamped `fill` tuple matches the image's
+    ///   [`MaskSpec::ColorKey`] range (which would turn the scrubbed rectangle transparent!), this
+    ///   method returns [`ScrubError::ColorKeyTransparentFill`] without mutating samples.
+    /// - **Indirect `/SMask` and stencil `/Mask` streams:** Separate indirect mask streams
+    ///   referenced by [`ImageMeta::smask`] or [`MaskSpec::Stencil`] are **not** modified by
+    ///   scrubbing the parent `RawImage` alone (leaving their alpha silhouette—and any `/Matte`
+    ///   un-premultiplication against partial alpha—intact). To erase the alpha silhouette over a
+    ///   redacted region as well, scrub the companion mask stream or composite via
+    ///   [`RawImage::to_rgba8`] + [`RgbaImage::fill_rect`](crate::RgbaImage::fill_rect) +
+    ///   [`encode_rgba_flate`](crate::encode_rgba_flate).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScrubError::InsufficientComponents`] if `fill.len() < self.components()`, or
+    /// [`ScrubError::ColorKeyTransparentFill`] if `fill` falls inside the image's color-key mask.
+    pub fn fill_rect_raw(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        fill: &[u16],
+    ) -> Result<Option<(u32, u32, u32, u32)>, ScrubError> {
         let comps = usize::from(self.meta.components);
-        if fill.len() < comps || w == 0 || h == 0 {
-            return;
+        if fill.len() < comps {
+            return Err(ScrubError::InsufficientComponents {
+                actual: fill.len(),
+                expected: self.meta.components,
+            });
+        }
+        let max_sample = ((1_u32 << self.meta.bits_per_component) - 1) as u16;
+        if let MaskSpec::ColorKey(ranges) = &self.meta.mask
+            && ranges.len() >= comps
+        {
+            let matches_key = ranges[..comps]
+                .iter()
+                .zip(&fill[..comps])
+                .all(|(&(lo, hi), &v)| {
+                    let s = u32::from(v.min(max_sample));
+                    lo <= s && s <= hi
+                });
+            if matches_key {
+                return Err(ScrubError::ColorKeyTransparentFill);
+            }
+        }
+        if w == 0 || h == 0 {
+            return Ok(None);
         }
         let x0 = x.min(self.meta.width) as usize;
         let y0 = y.min(self.meta.height) as usize;
         let x1 = x.saturating_add(w).min(self.meta.width) as usize;
         let y1 = y.saturating_add(h).min(self.meta.height) as usize;
         if x0 >= x1 || y0 >= y1 {
-            return;
+            return Ok(None);
         }
-        let max_sample = ((1_u32 << self.meta.bits_per_component) - 1) as u16;
         let width_usize = self.meta.width as usize;
 
         match &mut self.samples {
@@ -405,6 +453,12 @@ impl RawImage {
                 alpha[row_start + x0..row_start + x1].fill(255);
             }
         }
+        Ok(Some((
+            x0 as u32,
+            y0 as u32,
+            (x1 - x0) as u32,
+            (y1 - y0) as u32,
+        )))
     }
 }
 

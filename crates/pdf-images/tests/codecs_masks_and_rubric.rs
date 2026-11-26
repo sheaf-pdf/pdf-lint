@@ -14,10 +14,10 @@ use pdf_images::pdf_objects::{
     Dict, Object, ObjectId, Resolve, Stream, Unreadable, Why, WithStreams, dict,
 };
 use pdf_images::{
-    DecodeOptions, Error, Fault, ImageCodec, JpegColorSpace, LimitKind, Limits, MaskSpec,
-    SMaskInData, SampleData, decode_inline, decode_inline_raw, decode_stream, decode_stream_raw,
-    decode_stream_with, decode_xobject, encode_jpeg, encode_jpeg_bytes, encode_raw_flate,
-    encode_rgba_flate,
+    DecodeOptions, EncodeError, Error, Fault, ImageCodec, JpegColorSpace, LimitKind, Limits,
+    MaskSpec, SMaskInData, SampleData, ScrubError, decode_inline, decode_inline_raw, decode_stream,
+    decode_stream_raw, decode_stream_with, decode_xobject, encode_jpeg, encode_jpeg_bytes,
+    encode_raw_flate, encode_rgba_flate,
 };
 
 fn empty_provider(
@@ -358,7 +358,7 @@ fn raw_and_flate_bit_depths_1_2_4_8_16_and_scrubbing() {
     assert_eq!(rgba2.pixel(3, 0), Some([255, 255, 255, 255]));
 
     // Scrub middle two pixels in 2-bit packed buffer to `0` (black) without touching pixel 3.
-    raw2.fill_rect_raw(1, 0, 2, 1, &[0]);
+    raw2.fill_rect_raw(1, 0, 2, 1, &[0]).unwrap();
     let rgba2_scrubbed = raw2
         .to_rgba8(provider, &DecodeOptions::PDFIUM, &Limits::DEFAULT)
         .unwrap();
@@ -399,7 +399,7 @@ fn raw_and_flate_bit_depths_1_2_4_8_16_and_scrubbing() {
     assert_eq!(rgba4.pixel(2, 0), Some([0, 0, 255, 255]));
 
     // Scrub index 1 -> palette entry 2 (Blue) and re-encode with Flate preserving Indexed space!
-    raw4.fill_rect_raw(1, 0, 1, 1, &[2]);
+    raw4.fill_rect_raw(1, 0, 1, 1, &[2]).unwrap();
     let enc4 = encode_raw_flate(&raw4, Some(cs4), Level::DEFAULT).unwrap();
     let rt4 = decode_stream(
         provider,
@@ -673,7 +673,7 @@ fn jbig2_embedded_and_jbig2_globals_halftone_and_clean_flate_reencode() {
 
     // Redact right half of row 2 (`x=4..8, y=2..4`) and re-encode: MUST become `FlateDecode`,
     // NEVER `JBIG2Decode`!
-    jb_raw.fill_rect_raw(4, 2, 4, 2, &[1]); // `1` = white in 1-bit DeviceGray
+    jb_raw.fill_rect_raw(4, 2, 4, 2, &[1]).unwrap(); // `1` = white in 1-bit DeviceGray
     let reencoded = encode_raw_flate(&jb_raw, None, Level::DEFAULT).unwrap();
     assert_eq!(
         reencoded
@@ -1116,4 +1116,788 @@ fn raw_image_with_more_than_32_components_decodes_without_panicking() {
     .unwrap();
     assert_eq!(rgba.pixel(0, 0), Some([255, 128, 0, 255]));
     assert_eq!(rgba.pixel(1, 0), Some([0, 128, 255, 255]));
+}
+
+#[test]
+fn explicit_stencil_mask_different_resolution_smask_precedence_and_indexed_matte() {
+    let mut store = BTreeMap::new();
+
+    // 1. Explicit 1-bit stencil `/Mask` stream (`2x2`) at a different resolution over a `4x4`
+    //    `DeviceRGB` parent image (`MaskSpec::Stencil`):
+    //    `(0,0)` painted (`0`), `(1,0)` transparent (`1`), `(0,1)` transparent (`1`), `(1,1)` painted (`0`).
+    let mask_id = ObjectId::new(1, 0);
+    store.insert(
+        mask_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 2,
+                "Height" => 2,
+                "ImageMask" => true,
+            },
+            // Row 0: bits `0, 1` (`0b0100_0000`); Row 1: bits `1, 0` (`0b1000_0000`)
+            vec![0b0100_0000, 0b1000_0000],
+        )),
+    );
+    let mut rgb_4x4 = Vec::with_capacity(4 * 4 * 3);
+    for _ in 0..16 {
+        rgb_4x4.extend_from_slice(&[200, 50, 25]);
+    }
+    let parent_with_mask = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 4,
+            "Height" => 4,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Mask" => mask_id,
+        },
+        rgb_4x4.clone(),
+    );
+    let raw_masked = decode_stream_raw(
+        empty_provider(&store),
+        &parent_with_mask,
+        None,
+        &DecodeOptions::PDFIUM,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(raw_masked.meta().mask, MaskSpec::Stencil(mask_id));
+    let out_masked = raw_masked
+        .to_rgba8(
+            empty_provider(&store),
+            &DecodeOptions::PDFIUM,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+    // Top-left 2x2 quadrant `(0..2, 0..2)` is opaque; top-right `(2..4, 0..2)` is transparent;
+    // bottom-left `(0..2, 2..4)` is transparent; bottom-right `(2..4, 2..4)` is opaque!
+    assert_eq!(out_masked.pixel(0, 0), Some([200, 50, 25, 255]));
+    assert_eq!(out_masked.pixel(1, 1), Some([200, 50, 25, 255]));
+    assert_eq!(out_masked.pixel(2, 0), Some([0, 0, 0, 0]));
+    assert_eq!(out_masked.pixel(0, 3), Some([0, 0, 0, 0]));
+    assert_eq!(out_masked.pixel(3, 3), Some([200, 50, 25, 255]));
+
+    // 2. When `/SMask` is ALSO present alongside `/Mask` (either stencil stream or color-key array),
+    //    `/Mask` MUST be ignored per ISO 32000-2 §8.9.6.1!
+    let smask_180_id = ObjectId::new(2, 0);
+    store.insert(
+        smask_180_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 4,
+                "Height" => 4,
+                "ColorSpace" => Object::name("DeviceGray"),
+                "BitsPerComponent" => 8,
+            },
+            vec![180_u8; 16],
+        )),
+    );
+    let both_masks = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 4,
+            "Height" => 4,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Mask" => mask_id,
+            "SMask" => smask_180_id,
+        },
+        rgb_4x4,
+    );
+    let out_both = decode_stream(
+        empty_provider(&store),
+        &both_masks,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    // Quadrant `(2, 0)` would have been masked to alpha `0` by `mask_id`, but `/SMask` wins (`180`)!
+    assert_eq!(out_both.pixel(2, 0), Some([200, 50, 25, 180]));
+
+    let both_ck_and_smask = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 1,
+            "ColorSpace" => Object::name("DeviceGray"),
+            "BitsPerComponent" => 8,
+            "Mask" => vec![Object::from(0), Object::from(0)],
+            "SMask" => Object::from(ObjectId::new(3, 0)),
+        },
+        vec![0, 255],
+    );
+    store.insert(
+        ObjectId::new(3, 0),
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 2,
+                "Height" => 1,
+                "ColorSpace" => Object::name("DeviceGray"),
+                "BitsPerComponent" => 8,
+            },
+            vec![200, 200],
+        )),
+    );
+    let out_ck_smask = decode_stream(
+        empty_provider(&store),
+        &both_ck_and_smask,
+        None,
+        &DecodeOptions::PDFIUM,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(out_ck_smask.pixel(0, 0), Some([0, 0, 0, 200]));
+
+    // 3. `Indexed` over `DeviceRGB` with `/SMask` + 3-component `/Matte [1.0, 1.0, 1.0]`
+    //    (ISO 32000-2 §11.6.5.3: `/Matte` is in the BASE color space, NOT 1-component `Indexed`!).
+    let indexed_smask_id = ObjectId::new(4, 0);
+    store.insert(
+        indexed_smask_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 2,
+                "Height" => 1,
+                "ColorSpace" => Object::name("DeviceGray"),
+                "BitsPerComponent" => 8,
+                "Matte" => vec![Object::from(1.0), Object::from(1.0), Object::from(1.0)],
+            },
+            vec![128, 255],
+        )),
+    );
+    let indexed_parent = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 1,
+            "ColorSpace" => vec![
+                Object::name("Indexed"),
+                Object::name("DeviceRGB"),
+                Object::from(1),
+                // Entry 0: `[255, 128, 128]` (pure red 50% premultiplied over white matte `[1, 1, 1]`)
+                // Entry 1: `[0, 200, 0]` (opaque green)
+                Object::bytes(&[255_u8, 128, 128, 0, 200, 0][..]),
+            ],
+            "BitsPerComponent" => 8,
+            "SMask" => indexed_smask_id,
+        },
+        vec![0, 1],
+    );
+    for opts in [DecodeOptions::ISO, DecodeOptions::PDFIUM] {
+        let mut faults = Vec::new();
+        let rgba = decode_stream_with(
+            empty_provider(&store),
+            &indexed_parent,
+            None,
+            &opts,
+            &Limits::DEFAULT,
+            &mut faults,
+        )
+        .unwrap();
+        assert!(faults.is_empty(), "unexpected faults: {faults:?}");
+        let p0 = rgba.pixel(0, 0).unwrap();
+        assert!(
+            p0[0] == 255 && p0[1] <= 2 && p0[2] <= 2 && p0[3] == 128,
+            "{p0:?}"
+        );
+        assert_eq!(rgba.pixel(1, 0), Some([0, 200, 0, 255]));
+    }
+
+    // Conversely, a 1-component `/Matte [1.0]` on `Indexed` over `DeviceRGB` is invalid and reports `Fault::InvalidMatte`.
+    let bad_matte_id = ObjectId::new(5, 0);
+    store.insert(
+        bad_matte_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 2,
+                "Height" => 1,
+                "ColorSpace" => Object::name("DeviceGray"),
+                "BitsPerComponent" => 8,
+                "Matte" => vec![Object::from(1.0)],
+            },
+            vec![128, 255],
+        )),
+    );
+    let bad_indexed_parent = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 1,
+            "ColorSpace" => vec![
+                Object::name("Indexed"),
+                Object::name("DeviceRGB"),
+                Object::from(1),
+                Object::bytes(&[255_u8, 128, 128, 0, 200, 0][..]),
+            ],
+            "BitsPerComponent" => 8,
+            "SMask" => bad_matte_id,
+        },
+        vec![0, 1],
+    );
+    let mut bad_faults = Vec::new();
+    let _ = decode_stream_with(
+        empty_provider(&store),
+        &bad_indexed_parent,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+        &mut bad_faults,
+    )
+    .unwrap();
+    assert!(
+        bad_faults.iter().any(|&(_, f)| f == Fault::InvalidMatte),
+        "{bad_faults:?}"
+    );
+}
+
+#[test]
+fn lab_color_space_multi_component_decode_and_jpx_stencil_and_indexed_precision() {
+    let objects = BTreeMap::new();
+    let provider = empty_provider(&objects);
+
+    // 1. `/Lab` image (`2x1`, 8-bit): default `/Decode` for Lab is `[0 100 a_min a_max b_min b_max]`!
+    //    Sample `(255, 128, 128)` -> `L* = 100, a* ~ 0, b* ~ 0` (white `[255, 255, 255, 255]`);
+    //    Sample `(0, 128, 128)` -> `L* = 0, a* ~ 0, b* ~ 0` (black `[0, 0, 0, 255]`).
+    let lab_cs = Object::from(vec![
+        Object::name("Lab"),
+        Object::from(dict! {
+            "WhitePoint" => vec![Object::from(0.9505), Object::from(1.0), Object::from(1.089)],
+            "Range" => vec![
+                Object::from(-128.0),
+                Object::from(127.0),
+                Object::from(-128.0),
+                Object::from(127.0),
+            ],
+        }),
+    ]);
+    let lab_stream = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 1,
+            "ColorSpace" => lab_cs,
+            "BitsPerComponent" => 8,
+        },
+        vec![255, 128, 128, 0, 128, 128],
+    );
+    let lab_rgba = decode_stream(
+        provider,
+        &lab_stream,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    let white = lab_rgba.pixel(0, 0).unwrap();
+    assert!(
+        white[0] >= 252 && white[1] >= 252 && white[2] >= 252 && white[3] == 255,
+        "{white:?}"
+    );
+    assert_eq!(lab_rgba.pixel(1, 0), Some([0, 0, 0, 255]));
+
+    // 2. Non-default `/Decode [1 0 1 0 0 1]` on a 3-component `DeviceRGB` image (`[0, 255, 255]` -> `[255, 0, 255]`)!
+    let inv_rg_stream = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 1,
+            "Height" => 1,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Decode" => vec![
+                Object::from(1.0),
+                Object::from(0.0),
+                Object::from(1.0),
+                Object::from(0.0),
+                Object::from(0.0),
+                Object::from(1.0),
+            ],
+        },
+        vec![0, 255, 200],
+    );
+    let inv_rgba = decode_stream(
+        provider,
+        &inv_rg_stream,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(inv_rgba.pixel(0, 0), Some([255, 0, 200, 255]));
+
+    // 3. 1-bit single-channel `JPXDecode` stencil (`/ImageMask true`):
+    //    `build_j2c_mid_gray(2, 2, 1, 1)` produces raw 1-bit sample `1 << 0 == 1` everywhere!
+    //    - With default `/Decode [0 1]`, sample `1` -> `1.0` -> unpainted (`[0, 0, 0, 0]`);
+    //    - With inverted `/Decode [1 0]`, sample `1` -> `0.0` -> painted in `stencil_color`!
+    let j2c_1bit = build_j2c_mid_gray(2, 2, 1, 1);
+    let jpx_stencil_default = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "ImageMask" => true,
+            "Filter" => Object::name("JPXDecode"),
+        },
+        j2c_1bit.clone(),
+    );
+    let mut stencil_opts = DecodeOptions::ISO;
+    stencil_opts.stencil_color = [30, 140, 220, 255];
+    let st_def = decode_stream(
+        provider,
+        &jpx_stencil_default,
+        None,
+        &stencil_opts,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(st_def.pixel(0, 0), Some([0, 0, 0, 0]));
+
+    let jpx_stencil_inv = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "ImageMask" => true,
+            "Decode" => vec![Object::from(1), Object::from(0)],
+            "Filter" => Object::name("JPXDecode"),
+        },
+        j2c_1bit,
+    );
+    let st_inv = decode_stream(
+        provider,
+        &jpx_stencil_inv,
+        None,
+        &stencil_opts,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(st_inv.pixel(0, 0), Some([30, 140, 220, 255]));
+
+    // 4. `JPXDecode` ignores `/BitsPerComponent` on the stream dictionary (§7.4.9) AND ignores
+    //    `/Decode` when `/ColorSpace` is omitted (§8.9.5.2)!
+    let j2c_8bit_rgb = build_j2c_mid_gray(2, 2, 3, 8); // raw `[128, 128, 128]`
+    let jpx_ignored_entries = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "BitsPerComponent" => 12, // invalid PDF bpc, must be ignored on JPX!
+            "Decode" => vec![
+                Object::from(0.0), Object::from(0.0),
+                Object::from(0.0), Object::from(0.0),
+                Object::from(0.0), Object::from(0.0),
+            ], // must be ignored when `/ColorSpace` is absent on JPX!
+            "Filter" => Object::name("JPXDecode"),
+        },
+        j2c_8bit_rgb,
+    );
+    let raw_jpx = decode_stream_raw(
+        provider,
+        &jpx_ignored_entries,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(raw_jpx.bits_per_component(), 8);
+    let rgba_jpx = raw_jpx
+        .to_rgba8(provider, &DecodeOptions::ISO, &Limits::DEFAULT)
+        .unwrap();
+    assert_eq!(rgba_jpx.pixel(0, 0), Some([128, 128, 128, 255]));
+
+    // 5. Non-PDF-depth (`3-bit`) `JPXDecode` with PDF `/ColorSpace [/Indexed /DeviceRGB 15 ...]`:
+    //    `build_j2c_mid_gray(2, 2, 1, 3)` produces raw 3-bit index `4` (`1 << 2`).
+    //    Palette index MUST remain `4` (pure green `[0, 255, 0]`), NOT rescaled to `(4 * 15 + 3) / 7 = 9`!
+    let j2c_3bit = build_j2c_mid_gray(2, 2, 1, 3);
+    let mut lut_16 = [0_u8; 16 * 3];
+    lut_16[4 * 3..4 * 3 + 3].copy_from_slice(&[0, 255, 0]); // index 4 = green
+    lut_16[9 * 3..9 * 3 + 3].copy_from_slice(&[255, 0, 0]); // index 9 = red (buggy rescaled index)
+    let jpx_indexed_3bit = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "ColorSpace" => vec![
+                Object::name("Indexed"),
+                Object::name("DeviceRGB"),
+                Object::from(15),
+                Object::bytes(&lut_16[..]),
+            ],
+            "Filter" => Object::name("JPXDecode"),
+        },
+        j2c_3bit,
+    );
+    let idx_rgba = decode_stream(
+        provider,
+        &jpx_indexed_3bit,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(idx_rgba.pixel(0, 0), Some([0, 255, 0, 255]));
+}
+
+#[test]
+fn flate_raw_sample_limit_scrub_safety_and_encode_raw_flate_preservation() {
+    // 1. Flate-compressed raw `16x16` `DeviceRGB` image (`768` decoded sample bytes, `< 30` compressed bytes):
+    //    with `max_encoded_bytes = 64` and `max_sample_bytes = 4096`, BOTH `decode_stream` and `decode_xobject`
+    //    must succeed (enforcing `max_sample_bytes`, NOT `max_encoded_bytes`, on non-image-codec streams!).
+    let solid_rgb = vec![42_u8; 16 * 16 * 3];
+    let raw_in = decode_stream_raw(
+        empty_provider(&BTreeMap::new()),
+        &Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 16,
+                "Height" => 16,
+                "ColorSpace" => Object::name("DeviceRGB"),
+                "BitsPerComponent" => 8,
+            },
+            solid_rgb,
+        ),
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    let flate_img = encode_raw_flate(&raw_in, None, Level::DEFAULT).unwrap();
+    assert!(flate_img.stream.data.bytes().unwrap().len() < 64);
+
+    let mut store = BTreeMap::new();
+    let xobj_id = ObjectId::new(10, 0);
+    // Uncompressed raw `16x16` `DeviceRGB` stream (`768` bytes) in `store` so `decode_xobject`
+    // directly verifies `objects.decoded(id, fetch_cap)` uses `max_sample_bytes` (`4096`),
+    // NOT `max_encoded_bytes` (`64`), while `decode_stream` on `flate_img.stream` verifies
+    // `FlateDecode` raw streams also enforce `max_sample_bytes` (`4096`)!
+    store.insert(
+        xobj_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 16,
+                "Height" => 16,
+                "ColorSpace" => Object::name("DeviceRGB"),
+                "BitsPerComponent" => 8,
+            },
+            vec![42_u8; 16 * 16 * 3],
+        )),
+    );
+    let mut lim = Limits::DEFAULT;
+    lim.max_encoded_bytes = 64;
+    lim.max_sample_bytes = 4096;
+    let d1 = decode_stream(
+        empty_provider(&store),
+        &flate_img.stream,
+        None,
+        &DecodeOptions::ISO,
+        &lim,
+    )
+    .unwrap();
+    let d2 = decode_xobject(
+        empty_provider(&store),
+        xobj_id,
+        None,
+        &DecodeOptions::ISO,
+        &lim,
+    )
+    .unwrap();
+    assert_eq!(d1.pixel(0, 0), Some([42, 42, 42, 255]));
+    assert_eq!(d2.pixel(15, 15), Some([42, 42, 42, 255]));
+
+    // 2. `fill_rect_raw` rejects short `fill` slices and color-key-transparent fills, leaving samples intact!
+    let ck_rgb_stream = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 1,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Mask" => vec![
+                Object::from(10), Object::from(20),
+                Object::from(30), Object::from(40),
+                Object::from(50), Object::from(60),
+            ],
+            "SMask" => ObjectId::new(90, 0),
+            "OC" => ObjectId::new(91, 0),
+        },
+        vec![100, 110, 120, 200, 210, 220],
+    );
+    let mut ck_raw = decode_stream_raw(
+        empty_provider(&store),
+        &ck_rgb_stream,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(
+        ck_raw.fill_rect_raw(0, 0, 1, 1, &[0, 0]),
+        Err(ScrubError::InsufficientComponents {
+            actual: 2,
+            expected: 3,
+        })
+    );
+    assert_eq!(
+        ck_raw.fill_rect_raw(0, 0, 1, 1, &[15, 35, 55]),
+        Err(ScrubError::ColorKeyTransparentFill)
+    );
+    let mut untouched = [0_u16; 3];
+    assert!(ck_raw.pixel_raw(0, 0, &mut untouched));
+    assert_eq!(untouched, [100, 110, 120]);
+
+    // Valid opaque fill succeeds, and `encode_raw_flate` preserves `/Mask`, `/SMask`, and `/OC`!
+    assert_eq!(
+        ck_raw.fill_rect_raw(0, 0, 1, 1, &[0, 0, 0]),
+        Ok(Some((0, 0, 1, 1)))
+    );
+    let mut reencoded = encode_raw_flate(&ck_raw, None, Level::DEFAULT).unwrap();
+    assert!(reencoded.stream.dict.get(b"Mask").is_some());
+    assert_eq!(
+        reencoded
+            .stream
+            .dict
+            .get(b"SMask")
+            .and_then(Object::as_reference),
+        Some(ObjectId::new(90, 0))
+    );
+    assert_eq!(
+        reencoded
+            .stream
+            .dict
+            .get(b"OC")
+            .and_then(Object::as_reference),
+        Some(ObjectId::new(91, 0))
+    );
+    reencoded.attach_mask(ObjectId::new(92, 0));
+    assert_eq!(
+        reencoded
+            .stream
+            .dict
+            .get(b"Mask")
+            .and_then(Object::as_reference),
+        Some(ObjectId::new(92, 0))
+    );
+
+    // 3. `encode_raw_flate` refuses `color_space: None` on non-device spaces (`Indexed`).
+    let idx_stream = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 1,
+            "Height" => 1,
+            "ColorSpace" => vec![
+                Object::name("Indexed"),
+                Object::name("DeviceRGB"),
+                Object::from(1),
+                Object::bytes(&[0_u8, 0, 0, 255, 255, 255][..]),
+            ],
+            "BitsPerComponent" => 8,
+        },
+        vec![1],
+    );
+    let idx_raw = decode_stream_raw(
+        empty_provider(&store),
+        &idx_stream,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(
+        encode_raw_flate(&idx_raw, None, Level::DEFAULT).unwrap_err(),
+        EncodeError::MissingColorSpace
+    );
+}
+
+#[test]
+fn dct_subsampled_progressive_restart_markers_and_app14_transform_pinning() {
+    use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
+
+    let objects = BTreeMap::new();
+    let provider = empty_provider(&objects);
+
+    // Build an 8x8 RGB image: left half solid red `[240, 20, 20]`, right half solid blue `[20, 40, 240]`.
+    let mut rgb_8x8 = Vec::with_capacity(8 * 8 * 3);
+    for _y in 0..8 {
+        for x in 0..8 {
+            if x < 4 {
+                rgb_8x8.extend_from_slice(&[240, 20, 20]);
+            } else {
+                rgb_8x8.extend_from_slice(&[20, 40, 240]);
+            }
+        }
+    }
+
+    // 1. 4:2:0 chroma-subsampled JPEG (`SamplingFactor::F_2_2`, `SOF0` with `0x22` H2V2 luma sampling)
+    let mut jpeg_420 = Vec::new();
+    {
+        let mut enc = Encoder::new(&mut jpeg_420, 98);
+        enc.set_sampling_factor(SamplingFactor::F_2_2);
+        enc.encode(&rgb_8x8, 8, 8, ColorType::Rgb).unwrap();
+    }
+    // Verify `SOF0` has `H=2, V=2` (`0x22`) on component 1
+    assert!(jpeg_420.windows(2).any(|w| w == [0xFF, 0xC0]));
+
+    // 2. Multi-scan progressive JPEG (`.set_progressive(true)`, `SOF2` `0xFF, 0xC2`, zero `SOF0`)
+    let mut jpeg_prog = Vec::new();
+    {
+        let mut enc = Encoder::new(&mut jpeg_prog, 98);
+        enc.set_progressive(true);
+        enc.encode(&rgb_8x8, 8, 8, ColorType::Rgb).unwrap();
+    }
+    assert!(jpeg_prog.windows(2).any(|w| w == [0xFF, 0xC2]));
+    assert!(!jpeg_prog.windows(2).any(|w| w == [0xFF, 0xC0]));
+
+    // 3. Restart-marker JPEG (`.set_restart_interval(1)` on `16x16` -> `DRI` `0xFF, 0xDD` + `RST0..RST2`)
+    let mut rgb_16x16 = Vec::with_capacity(16 * 16 * 3);
+    for _y in 0..16 {
+        for x in 0..16 {
+            if x < 8 {
+                rgb_16x16.extend_from_slice(&[240, 20, 20]);
+            } else {
+                rgb_16x16.extend_from_slice(&[20, 40, 240]);
+            }
+        }
+    }
+    let mut jpeg_rst = Vec::new();
+    {
+        let mut enc = Encoder::new(&mut jpeg_rst, 98);
+        enc.set_restart_interval(1);
+        enc.encode(&rgb_16x16, 16, 16, ColorType::Rgb).unwrap();
+    }
+    assert!(jpeg_rst.windows(2).any(|w| w == [0xFF, 0xDD]));
+    assert!(jpeg_rst.windows(2).any(|w| w == [0xFF, 0xD0]));
+
+    for (w, h, data, right_x) in [
+        (8_i64, 8_i64, jpeg_420, 7_u32),
+        (8, 8, jpeg_prog, 7),
+        (16, 16, jpeg_rst, 15),
+    ] {
+        let s = Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => w,
+                "Height" => h,
+                "ColorSpace" => Object::name("DeviceRGB"),
+                "BitsPerComponent" => 8,
+                "Filter" => Object::name("DCTDecode"),
+            },
+            data,
+        );
+        let rgba = decode_stream(
+            empty_provider(&objects),
+            &s,
+            None,
+            &DecodeOptions::ISO,
+            &Limits::DEFAULT,
+        )
+        .unwrap();
+        let left = rgba.pixel(0, 0).unwrap();
+        let right = rgba.pixel(right_x, 0).unwrap();
+        assert!(left[0] > 200 && left[2] < 60, "left={left:?}");
+        assert!(right[2] > 200 && right[0] < 60, "right={right:?}");
+    }
+
+    // 4. Pin `APP14` injection against `zune-jpeg` `0.5.15`:
+    //    Strip any `APP0..APP15` segments from a raw 3-channel JPEG encoded with `ColorType::Ycbcr`
+    //    (so raw stored channels are literal `[80, 200, 40]` with NO JFIF or Adobe marker).
+    //    - `/DecodeParms << /ColorTransform 0 >>` injects `APP14 transform=0`, so `zune-jpeg`
+    //      returns literal RGB `[~80, ~200, ~40]`;
+    //    - `/DecodeParms << /ColorTransform 1 >>` injects `APP14 transform=1`, so `zune-jpeg`
+    //      converts Y=80, Cb=200, Cr=40 -> RGB `[~0, ~105, ~208]`!
+    fn strip_app_markers(jpeg: &[u8]) -> Vec<u8> {
+        let mut out = Vec::from(&jpeg[..2]); // SOI
+        let mut i = 2;
+        while i + 1 < jpeg.len() {
+            if jpeg[i] != 0xFF {
+                out.extend_from_slice(&jpeg[i..]);
+                break;
+            }
+            let m = jpeg[i + 1];
+            if m == 0xDA || m == 0xD9 {
+                out.extend_from_slice(&jpeg[i..]);
+                break;
+            }
+            let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+            if !(0xE0..=0xEF).contains(&m) {
+                out.extend_from_slice(&jpeg[i..i + 2 + seg_len]);
+            }
+            i += 2 + seg_len;
+        }
+        out
+    }
+
+    let mut raw_3ch = Vec::new();
+    {
+        let mut enc = Encoder::new(&mut raw_3ch, 100);
+        enc.set_sampling_factor(SamplingFactor::R_4_4_4);
+        // `ColorType::Ycbcr` writes the 3 channels verbatim without RGB->YCbCr conversion!
+        let samples = [80_u8, 200, 40].repeat(4);
+        enc.encode(&samples, 2, 2, ColorType::Ycbcr).unwrap();
+    }
+    let bare_3ch = strip_app_markers(&raw_3ch);
+    assert!(!bare_3ch.windows(5).any(|w| w == b"JFIF\0" || w == b"Adobe"));
+
+    let s_ct0 = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Filter" => Object::name("DCTDecode"),
+            "DecodeParms" => dict! { "ColorTransform" => 0 },
+        },
+        bare_3ch.clone(),
+    );
+    let s_ct1 = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Filter" => Object::name("DCTDecode"),
+            "DecodeParms" => dict! { "ColorTransform" => 1 },
+        },
+        bare_3ch,
+    );
+    let p_ct0 = decode_stream(
+        provider,
+        &s_ct0,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap()
+    .pixel(0, 0)
+    .unwrap();
+    let p_ct1 = decode_stream(
+        provider,
+        &s_ct1,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap()
+    .pixel(0, 0)
+    .unwrap();
+    // Literal RGB: `[~80, ~200, ~40]`
+    assert!(
+        (i16::from(p_ct0[0]) - 80).abs() <= 2
+            && (i16::from(p_ct0[1]) - 200).abs() <= 2
+            && (i16::from(p_ct0[2]) - 40).abs() <= 2,
+        "ColorTransform 0 expected literal [80, 200, 40], got {p_ct0:?}"
+    );
+    // YCbCr converted to RGB (`Y=80, Cb=200, Cr=40` -> BT.601 `[0, 118, 208]`):
+    assert!(
+        p_ct1[0] < 5
+            && (i16::from(p_ct1[1]) - 118).abs() <= 3
+            && (i16::from(p_ct1[2]) - 208).abs() <= 3,
+        "ColorTransform 1 expected YCbCr->RGB [~0, ~118, ~208], got {p_ct1:?}"
+    );
 }

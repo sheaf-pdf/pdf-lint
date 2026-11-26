@@ -248,8 +248,18 @@ where
     }
 
     let place = Place::new(Some(id), obj.at());
-
-    let decoded_stream = objects.decoded_standard(id, limits.max_encoded_bytes)?;
+    let (stream_cap, limit_kind) = standard_filter_cap(objects, dict, limits)?;
+    let decoded_stream = match objects.decoded_standard(id, stream_cap) {
+        Ok(ds) => ds,
+        Err(u) if u.why == pdf_objects::Why::Limit => {
+            return Err(Error::Limit {
+                kind: limit_kind,
+                value: (stream_cap as u64).saturating_add(1),
+                max: stream_cap as u64,
+            });
+        }
+        Err(u) => return Err(Error::Unreadable(u)),
+    };
     decode_from_dict_and_stream(
         objects,
         dict,
@@ -319,14 +329,16 @@ where
         Rules::Iso => FilterReading::Qpdf,
         _ => FilterReading::Pdfium,
     };
+    let (stream_cap, limit_kind) = standard_filter_cap(objects, &stream.dict, limits)?;
     let decoded_stream = decode_inline_standard(
         objects,
         &stream.dict,
         raw_bytes,
-        limits.max_encoded_bytes,
+        stream_cap,
         filter_reading,
         sink,
-    )?;
+    )
+    .map_err(|e| remap_inline_limit(e, limit_kind, stream_cap))?;
     decode_from_dict_and_stream(
         objects,
         &stream.dict,
@@ -446,14 +458,10 @@ where
         inner: objects,
         _marker: core::marker::PhantomData,
     };
-    let decoded_stream = decode_inline_standard(
-        narrowed,
-        &dict,
-        raw_slice,
-        limits.max_encoded_bytes,
-        filter_reading,
-        sink,
-    )?;
+    let (stream_cap, limit_kind) = standard_filter_cap(narrowed, &dict, limits)?;
+    let decoded_stream =
+        decode_inline_standard(narrowed, &dict, raw_slice, stream_cap, filter_reading, sink)
+            .map_err(|e| remap_inline_limit(e, limit_kind, stream_cap))?;
     let place = Place::from(Span::new(None, at.start, at.end));
     let mut local_opts = DecodeOptions {
         color: EvalOptions::from_spaces(options.color.rules, None),
@@ -694,24 +702,26 @@ impl RawImage {
         };
 
         // 2. Resolve optional `/SMask` + `/Matte` and explicit `/Mask` when `apply_masks` is on.
+        //    Per ISO 32000-2 §8.9.5.1 (Table 87) and §11.6.5.2 (Table 144):
+        //    - `/Matte` has as many components as the parent image's `/ColorSpace`—or, when the
+        //      parent space is `Indexed`, its underlying base color space.
+        //    - When `/SMask` (or embedded `/SMaskInData` alpha) is present, `/Mask` is ignored.
+        let matte_space = space.base_space().unwrap_or(space);
+        let matte_comps = u8::try_from(matte_space.components()).unwrap_or(self.meta.components);
         let resolved_smask = if options.apply_masks {
             match self.meta.smask {
-                Some(smask_id) => load_smask(
-                    objects,
-                    smask_id,
-                    self.meta.components,
-                    options,
-                    limits,
-                    depth,
-                    sink,
-                )?,
+                Some(smask_id) => {
+                    load_smask(objects, smask_id, matte_comps, options, limits, depth, sink)?
+                }
                 None => None,
             }
         } else {
             None
         };
 
-        let resolved_stencil_mask = if options.apply_masks {
+        let has_soft_alpha = resolved_smask.is_some() || self.embedded_alpha.is_some();
+
+        let resolved_stencil_mask = if options.apply_masks && !has_soft_alpha {
             match &self.meta.mask {
                 MaskSpec::Stencil(mask_id) => {
                     load_stencil_mask(objects, *mask_id, options, limits, depth, sink)?
@@ -722,7 +732,7 @@ impl RawImage {
             None
         };
 
-        let color_key = if options.apply_masks {
+        let color_key = if options.apply_masks && !has_soft_alpha {
             match &self.meta.mask {
                 MaskSpec::ColorKey(ranges) => Some(ranges.as_slice()),
                 _ => None,
@@ -731,11 +741,11 @@ impl RawImage {
             None
         };
 
-        // Pre-evaluate `/Matte` into sRGB for PDFium mode (`Rules::Pdfium`) when needed.
+        // Pre-evaluate `/Matte` into sRGB using `matte_space` (the base space for `Indexed`).
         let matte_srgb: Option<[f32; 3]> = resolved_smask
             .as_ref()
             .and_then(|sm| sm.matte.as_deref())
-            .and_then(|m| space.eval_with_rules(m, options.color.rules, &limits.color))
+            .and_then(|m| matte_space.eval_with_rules(m, options.color.rules, &limits.color))
             .and_then(|p| p.srgb());
 
         let comps = usize::from(self.meta.components);
@@ -848,6 +858,77 @@ impl RawImage {
             height,
             pixels: out,
         })
+    }
+}
+
+fn is_standard_or_crypt_filter(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"FlateDecode"
+            | b"Fl"
+            | b"LZWDecode"
+            | b"LZW"
+            | b"ASCIIHexDecode"
+            | b"AHx"
+            | b"ASCII85Decode"
+            | b"A85"
+            | b"RunLengthDecode"
+            | b"RL"
+            | b"Crypt"
+    )
+}
+
+fn standard_filter_cap<'o, R: Resolve<'o> + Copy>(
+    objects: R,
+    dict: &'o Dict,
+    limits: &Limits,
+) -> Result<(usize, LimitKind), Error> {
+    let has_codec_tail = match dict
+        .get(b"Filter")
+        .or_else(|| dict.get(b"F"))
+        .map(|o| resolve_obj(objects, o))
+        .transpose()?
+        .flatten()
+    {
+        None => false,
+        Some(obj) if obj.is_null() => false,
+        Some(obj) => {
+            if let Some(name) = obj.as_name() {
+                !is_standard_or_crypt_filter(name)
+            } else if let Some(arr) = obj.as_array() {
+                let mut non_std = false;
+                for item in arr {
+                    if let Some(name) = resolve_obj(objects, item)?.and_then(Object::as_name)
+                        && !is_standard_or_crypt_filter(name)
+                    {
+                        non_std = true;
+                        break;
+                    }
+                }
+                non_std
+            } else {
+                false
+            }
+        }
+    };
+    if has_codec_tail {
+        Ok((limits.max_encoded_bytes, LimitKind::EncodedBytes))
+    } else {
+        Ok((limits.max_sample_bytes, LimitKind::SampleBytes))
+    }
+}
+
+fn remap_inline_limit(err: Error, limit_kind: LimitKind, cap: usize) -> Error {
+    match err {
+        Error::Limit {
+            kind: LimitKind::EncodedBytes,
+            ..
+        } => Error::Limit {
+            kind: limit_kind,
+            value: (cap as u64).saturating_add(1),
+            max: cap as u64,
+        },
+        other => other,
     }
 }
 
@@ -1140,11 +1221,11 @@ where
         }
     }
 
-    let prepared_space = if stencil {
+    let (prepared_space, had_pdf_color_space) = if stencil {
         if dict.get(b"ColorSpace").is_some() {
             sink.fault(place_or_nowhere, Fault::StencilHasColorSpace);
         }
-        None
+        (None, false)
     } else if let Some(cs_obj) = lookup_color_space_object(objects, dict, spaces)? {
         let mut forwarder = ColorFaultForwarder { inner: sink };
         let Some(prep) =
@@ -1152,23 +1233,25 @@ where
         else {
             return Err(Error::MissingColorSpace);
         };
-        Some(prep)
+        (Some(prep), true)
     } else if codec == ImageCodec::Jpx {
         // JPXDecode allows omitting `/ColorSpace`; `decode_jpx` supplies the JP2 container's space.
-        None
+        (None, false)
     } else {
         return Err(Error::MissingColorSpace);
     };
 
     // Validate initial `/BitsPerComponent` before running codecs.
-    let initial_bpc: u8 = if stencil {
+    // Per ISO 32000-2 §7.4.9, `/BitsPerComponent` is optional and ignored for `JPXDecode`.
+    let initial_bpc: u8 = if codec == ImageCodec::Jpx {
+        if stencil { 1 } else { 8 }
+    } else if stencil {
         match dict_bpc {
             None | Some(1) => 1,
             Some(other) => return Err(Error::InvalidBitsPerComponent { bpc: other }),
         }
     } else {
         match (codec, dict_bpc) {
-            (ImageCodec::Jpx, None) => 8, // Overridden by JPX codestream bit depth below.
             (ImageCodec::CcittFax | ImageCodec::Jbig2, None) => 1,
             (ImageCodec::Dct, None) => 8,
             (_, Some(v @ (1 | 2 | 4 | 8 | 16))) => v as u8,
@@ -1308,46 +1391,54 @@ where
                 )
             }
             ImageCodec::Jpx => {
-                if stencil {
-                    return Err(Error::Codec {
-                        codec: ImageCodec::Jpx,
-                        detail: "JPXDecode cannot be used with /ImageMask true".to_string(),
-                    });
-                }
                 let jpx = decode_jpx(
                     &decoded_stream.data,
                     width,
                     height,
                     prepared_space.as_ref(),
+                    stencil,
                     smask_in_data,
                     &eval_opts,
                     limits,
                     place_or_nowhere,
                     sink,
                 )?;
-                let space = prepared_space.or(jpx.embedded_space);
-                let Some(sp) = space else {
-                    return Err(Error::MissingColorSpace);
-                };
-                if u32::from(jpx.components) != sp.components() {
-                    return Err(Error::Codec {
-                        codec: ImageCodec::Jpx,
-                        detail: format!(
-                            "JPX component count ({}) does not match /ColorSpace ({})",
-                            jpx.components,
-                            sp.components()
-                        ),
-                    });
+                if stencil {
+                    if jpx.components != 1 || jpx.raw_depth != 1 {
+                        return Err(Error::Codec {
+                            codec: ImageCodec::Jpx,
+                            detail: format!(
+                                "JPXDecode with /ImageMask true requires a single 1-bit channel, got {} channels at {} bpc",
+                                jpx.components, jpx.raw_depth
+                            ),
+                        });
+                    }
+                    (jpx.width, jpx.height, 1, 1, jpx.samples, None, None)
+                } else {
+                    let space = prepared_space.or(jpx.embedded_space);
+                    let Some(sp) = space else {
+                        return Err(Error::MissingColorSpace);
+                    };
+                    if u32::from(jpx.components) != sp.components() {
+                        return Err(Error::Codec {
+                            codec: ImageCodec::Jpx,
+                            detail: format!(
+                                "JPX component count ({}) does not match /ColorSpace ({})",
+                                jpx.components,
+                                sp.components()
+                            ),
+                        });
+                    }
+                    (
+                        jpx.width,
+                        jpx.height,
+                        jpx.bpc,
+                        jpx.components,
+                        jpx.samples,
+                        jpx.embedded_alpha,
+                        Some(sp),
+                    )
                 }
-                (
-                    jpx.width,
-                    jpx.height,
-                    jpx.bpc,
-                    jpx.components,
-                    jpx.samples,
-                    jpx.embedded_alpha,
-                    Some(sp),
-                )
             }
         };
 
@@ -1360,7 +1451,13 @@ where
             .unwrap_or_else(|| vec![(0.0, 1.0); usize::from(final_comps)])
     };
 
-    let decode = parse_decode(objects, dict, final_comps, default_decode, place, sink)?;
+    // Per ISO 32000-2 §7.4.9 / Table 87, `/Decode` is ignored on `JPXDecode` streams that omit
+    // `/ColorSpace` unless `/ImageMask` is `true`.
+    let decode = if codec == ImageCodec::Jpx && !stencil && !had_pdf_color_space {
+        default_decode
+    } else {
+        parse_decode(objects, dict, final_comps, default_decode, place, sink)?
+    };
 
     let mask = parse_mask(objects, dict, final_comps, final_bpc, stencil, place, sink)?;
 

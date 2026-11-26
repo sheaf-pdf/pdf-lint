@@ -188,7 +188,7 @@ pub use path::{PathDrawn, Seg};
 pub use program::ProgramFont;
 pub use state::{
     ActiveColorSpace, BlendState, ColorValues, DashPattern, RenderingIntent, SoftMask,
-    SoftMaskKind, State, TextState,
+    SoftMaskKind, SoftMaskParams, State, TextState,
 };
 pub use text::{Glyph, Glyphs, TextShow};
 #[cfg(feature = "text-layout")]

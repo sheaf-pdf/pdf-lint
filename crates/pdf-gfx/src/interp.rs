@@ -31,7 +31,7 @@ use crate::phases::phase;
 use crate::reader::ObjReader;
 use crate::state::{
     self, ActiveColorSpace, BlendState, ColorValues, DashPattern, RenderingIntent, SoftMask,
-    SoftMaskKind, State, nums,
+    SoftMaskKind, SoftMaskParams, State, nums,
 };
 use crate::text::{self, TextShow};
 use crate::xobject::{
@@ -917,8 +917,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         if let Some(smask_val) = gs.get(b"SMask") {
             if self.reader.seen(smask_val).and_then(Object::as_name) == Some(b"None") {
                 state.soft_mask = SoftMask::None;
-                state.soft_mask_backdrop = None;
-                state.soft_mask_transfer = None;
+                state.soft_mask_params = None;
             } else if let Some(smask_dict) = self.reader.dict_of_value(smask_val) {
                 let kind = match self.reader.name_or_bytes_for(smask_dict, b"S") {
                     Some(b"Alpha") => Some(SoftMaskKind::Alpha),
@@ -949,8 +948,11 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
                     }
                 });
                 state.soft_mask = SoftMask::Mask { kind, group };
-                state.soft_mask_backdrop = backdrop;
-                state.soft_mask_transfer = transfer;
+                state.soft_mask_params = Some(SoftMaskParams {
+                    backdrop,
+                    transfer,
+                    ctm: state.ctm,
+                });
             }
         }
         if let Some(font_arr) = self.reader.array_for(gs, b"Font") {

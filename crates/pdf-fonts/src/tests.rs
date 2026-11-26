@@ -763,3 +763,444 @@ fn type1_charstrings_found() {
 fn refused(program: &[u8], limits: &Limits) -> Option<type1::Refusal> {
     type1::read(program, limits).err()
 }
+
+#[test]
+fn classify_style_strips_subset_tags_excludes_monotype_and_emits_no_faults() {
+    use pdf_objects::{Object, ObjectId, Stream, Unreadable, Why, WithStreams, dict, resolve_fn};
+
+    let mut objs = HashMap::<ObjectId, Object>::new();
+    // Non-numeric `/FontWeight /Bold` and `/Flags /Bogus` on Type 0 / GBK descriptors must emit
+    // zero new faults when `classify_style` inspects them!
+    objs.insert(
+        ObjectId::new(10, 0),
+        Object::from(dict! {
+            "Type" => Object::name("FontDescriptor"),
+            "FontBBox" => vec![Object::from(0), Object::from(-200), Object::from(800), Object::from(800)],
+            "Ascent" => 800,
+            "Descent" => -200,
+            "FontWeight" => Object::name("Bold"),
+            "Flags" => Object::name("Bogus"),
+        }),
+    );
+    objs.insert(
+        ObjectId::new(11, 0),
+        Object::from(dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("CIDFontType2"),
+            "BaseFont" => Object::name("ABBOLD+MicrosoftSansSerif"),
+            "FontDescriptor" => Object::reference(10),
+        }),
+    );
+    // Type 3 `/CharProcs` streams: `d0` (colored) vs `d1` (uncolored).
+    objs.insert(
+        ObjectId::new(20, 0),
+        Object::from(Stream::new(dict! {}, b"500 0 d0 0 0 400 700 re f".to_vec())),
+    );
+    objs.insert(
+        ObjectId::new(21, 0),
+        Object::from(Stream::new(
+            dict! {},
+            b"500 0 0 0 400 700 d1 0 0 400 700 re f".to_vec(),
+        )),
+    );
+
+    let streams = WithStreams::new(resolve_fn(|id| objs.get(&id)), |id, limit| {
+        let Some(s) = objs.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "missing"));
+        };
+        let bytes = s.data.bytes().unwrap();
+        if bytes.len() > limit {
+            return Err(Unreadable::new(id, Why::Limit, "past limit"));
+        }
+        Ok(bytes.to_vec())
+    });
+
+    // 1. Type 0 with `ABBOLD+MicrosoftSansSerif` + `/FontWeight /Bold` + `/Flags /Bogus`:
+    //    - `ABBOLD+` subset prefix stripped (`bold == false`);
+    //    - `Sans` excluded from `Serif` (`serif == false`);
+    //    - ZERO faults emitted!
+    let t0_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("ABBOLD+MicrosoftSansSerif"),
+        "Encoding" => Object::name("Identity-H"),
+        "DescendantFonts" => vec![Object::reference(11)],
+    };
+    let mut faults = Vec::new();
+    let mut budget = 1 << 20;
+    let t0 = Font::read(
+        streams,
+        &t0_dict,
+        &Limits::DEFAULT,
+        &mut budget,
+        &mut faults,
+    )
+    .unwrap();
+    assert!(faults.is_empty(), "unexpected faults: {faults:?}");
+    assert!(!t0.style().bold, "subset tag ABBOLD+ must not trigger bold");
+    assert!(
+        !t0.style().serif,
+        "MicrosoftSansSerif must be sans-serif, not serif"
+    );
+    assert!(!t0.style().fixed_pitch);
+
+    // 2. `MonotypeCorsiva` is NOT fixed-pitch, whereas `DejaVuSansMono-Oblique` IS fixed-pitch + italic + sans!
+    let monotype_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("ABCDEF+MonotypeCorsiva"),
+        "FirstChar" => 32,
+        "LastChar" => 32,
+        "Widths" => vec![Object::from(500)],
+    };
+    let monotype = Font::read(
+        streams,
+        &monotype_dict,
+        &Limits::DEFAULT,
+        &mut budget,
+        &mut (),
+    )
+    .unwrap();
+    assert!(
+        !monotype.style().fixed_pitch,
+        "MonotypeCorsiva must not be classified as fixed_pitch"
+    );
+
+    let mono_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("XYZWTQ+DejaVuSansMono-BoldOblique"),
+        "FirstChar" => 32,
+        "LastChar" => 32,
+        "Widths" => vec![Object::from(600)],
+    };
+    let mono = Font::read(streams, &mono_dict, &Limits::DEFAULT, &mut budget, &mut ()).unwrap();
+    assert!(mono.style().fixed_pitch);
+    assert!(!mono.style().serif);
+    assert!(mono.style().bold);
+    assert!(mono.style().italic);
+
+    // 3. `Type3Glyph::uncolored` distinguishes `d0` (`false`) from `d1` (`true`).
+    let t3_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type3"),
+        "FontBBox" => vec![Object::from(0), Object::from(0), Object::from(500), Object::from(700)],
+        "FontMatrix" => vec![
+            Object::from(0.001), Object::from(0), Object::from(0),
+            Object::from(0.001), Object::from(0), Object::from(0),
+        ],
+        "Encoding" => dict! {
+            "Differences" => vec![Object::from(65), Object::name("A"), Object::name("B")],
+        },
+        "CharProcs" => dict! {
+            "A" => Object::reference(20),
+            "B" => Object::reference(21),
+        },
+    };
+    let t3 = Font::read(streams, &t3_dict, &Limits::DEFAULT, &mut budget, &mut ()).unwrap();
+    let ga = t3.type3_glyph(65).unwrap();
+    let gb = t3.type3_glyph(66).unwrap();
+    assert!(!ga.uncolored);
+    assert!(gb.uncolored);
+
+    #[cfg(not(feature = "programs"))]
+    assert!(FallbackProgram::open(fixture::truetype_program(), &Limits::DEFAULT).is_none());
+}
+
+#[cfg(feature = "programs")]
+#[test]
+fn outline_bounds_match_char_box_with_shifted_matrices_and_fallback_advances_are_exact() {
+    use pdf_objects::{Object, ObjectId, Stream, Unreadable, Why, WithStreams, dict, resolve_fn};
+
+    fn verb_control_bounds(verbs: &[OutlineVerb]) -> Option<GlyphBox> {
+        let mut bbox: Option<[f32; 4]> = None;
+        let mut add = |x: f32, y: f32| {
+            let b = bbox.get_or_insert([x, y, x, y]);
+            *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        };
+        for &v in verbs {
+            match v {
+                OutlineVerb::MoveTo(x, y) | OutlineVerb::LineTo(x, y) => add(x, y),
+                OutlineVerb::QuadTo(cx, cy, x, y) => {
+                    add(cx, cy);
+                    add(x, y);
+                }
+                OutlineVerb::CurveTo(cx0, cy0, cx1, cy1, x, y) => {
+                    add(cx0, cy0);
+                    add(cx1, cy1);
+                    add(x, y);
+                }
+                OutlineVerb::Close => {}
+            }
+        }
+        bbox.map(|[x0, y0, x1, y1]| GlyphBox::new(x0, y0, x1, y1))
+    }
+
+    // Shift Type 1 `/FontMatrix` by `(dx = 0.1, dy = 0.05)` (`+100`, `+50` glyph units!)
+    let mut shifted_t1 = fixture::type1_program();
+    let old_mat = b"/FontMatrix [0.001 0 0 0.001 0 0]";
+    let new_mat = b"/FontMatrix [0.001 0 0 0.001 0.1 0.05]";
+    let pos = shifted_t1
+        .windows(old_mat.len())
+        .position(|w| w == old_mat)
+        .unwrap();
+    shifted_t1.splice(pos..pos + old_mat.len(), new_mat.iter().copied());
+
+    // Shift CID-CFF `/FontMatrix` by `(dx = 0.12, dy = -0.04)` (`+120`, `-40` glyph units!)
+    let shifted_cid_cff =
+        fixture::cid_cff_with(Some(["0.001", "0", "0", "0.001", "0.12", "-0.04"]), None);
+
+    let mut objs = HashMap::<ObjectId, Object>::new();
+    objs.insert(
+        ObjectId::new(1, 0),
+        Object::from(Stream::new(dict! {}, fixture::truetype_program())),
+    );
+    objs.insert(
+        ObjectId::new(2, 0),
+        Object::from(Stream::new(dict! {}, shifted_t1)),
+    );
+    objs.insert(
+        ObjectId::new(3, 0),
+        Object::from(Stream::new(
+            dict! { "Subtype" => Object::name("CIDFontType0C") },
+            shifted_cid_cff,
+        )),
+    );
+    objs.insert(
+        ObjectId::new(4, 0),
+        Object::from(dict! {
+            "Type" => Object::name("FontDescriptor"),
+            "FontFile2" => Object::reference(1),
+        }),
+    );
+    objs.insert(
+        ObjectId::new(5, 0),
+        Object::from(dict! {
+            "Type" => Object::name("FontDescriptor"),
+            "FontFile" => Object::reference(2),
+        }),
+    );
+    objs.insert(
+        ObjectId::new(6, 0),
+        Object::from(dict! {
+            "Type" => Object::name("FontDescriptor"),
+            "FontFile3" => Object::reference(3),
+        }),
+    );
+    objs.insert(
+        ObjectId::new(7, 0),
+        Object::from(dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("CIDFontType0"),
+            "BaseFont" => Object::name("ShiftedCid"),
+            "FontDescriptor" => Object::reference(6),
+        }),
+    );
+
+    let streams = WithStreams::new(resolve_fn(|id| objs.get(&id)), |id, limit| {
+        let Some(s) = objs.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "missing"));
+        };
+        let bytes = s.data.bytes().unwrap();
+        if bytes.len() > limit {
+            return Err(Unreadable::new(id, Why::Limit, "past limit"));
+        }
+        Ok(bytes.to_vec())
+    });
+
+    let mut budget = 16 << 20;
+
+    // 1. TrueType (`glyf`) outline bounds == `char_box`, plus `/BaseEncoding /PDFDocEncoding`
+    //    (`Gid::Unknown` in `char_box` still draws the outline!).
+    let tt_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("FixTT"),
+        "Encoding" => dict! { "BaseEncoding" => Object::name("PDFDocEncoding") },
+        "FontDescriptor" => Object::reference(4),
+        "FirstChar" => 32,
+        "LastChar" => 122,
+        "Widths" => vec![Object::from(600); 91],
+    };
+    let tt_font = Font::read(streams, &tt_dict, &Limits::DEFAULT, &mut budget, &mut ()).unwrap();
+    // Under `PDFDocEncoding`, `char_box(b'A')` is `None` (`Gid::Unknown`), YET `outline` succeeds!
+    assert_eq!(tt_font.char_box(u32::from(b'A')), None);
+    let mut verbs = Vec::new();
+    assert!(tt_font.outline(u32::from(b'A'), None, &mut verbs));
+    assert_eq!(
+        verb_control_bounds(&verbs),
+        Some(GlyphBox::new(0.0, 0.0, 600.0, 750.0))
+    );
+
+    // Standard `WinAnsiEncoding` TrueType: `outline` control bounds equal `char_box`!
+    let tt_win_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("TrueType"),
+        "BaseFont" => Object::name("FixTTWin"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
+        "FontDescriptor" => Object::reference(4),
+        "FirstChar" => 32,
+        "LastChar" => 122,
+        "Widths" => vec![Object::from(600); 91],
+    };
+    let tt_win = Font::read(
+        streams,
+        &tt_win_dict,
+        &Limits::DEFAULT,
+        &mut budget,
+        &mut (),
+    )
+    .unwrap();
+    for code in [
+        u32::from(b'A'),
+        u32::from(b'B'),
+        u32::from(b'C'),
+        u32::from(b'g'),
+    ] {
+        verbs.clear();
+        assert!(tt_win.outline(code, None, &mut verbs));
+        let got = verb_control_bounds(&verbs).unwrap();
+        let exp = tt_win.char_box(code).unwrap();
+        // `char_box` uses FreeType 26.6 fixed-point `FT_MulFix` scaling (`±1` unit vs exact `f32`).
+        assert!(
+            (got.x0 - exp.x0).abs() <= 1.0
+                && (got.y0 - exp.y0).abs() <= 1.0
+                && (got.x1 - exp.x1).abs() <= 1.0
+                && (got.y1 - exp.y1).abs() <= 1.0,
+            "code {code}: got {got:?}, exp {exp:?}"
+        );
+    }
+    // Unmapped code (`> 255` on a simple font) leaves `verbs` unchanged!
+    let sentinel = vec![OutlineVerb::MoveTo(7.0, 9.0)];
+    verbs = sentinel.clone();
+    assert!(!tt_win.outline(300, None, &mut verbs));
+    assert_eq!(verbs, sentinel);
+
+    // 2. Shifted Type 1 (`/FontMatrix [0.001 0 0 0.001 0.1 0.05]`): outline bounds == `char_box`!
+    let t1_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("FixT1"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
+        "FontDescriptor" => Object::reference(5),
+        "FirstChar" => 32,
+        "LastChar" => 122,
+        "Widths" => vec![Object::from(600); 91],
+    };
+    let t1_font = Font::read(streams, &t1_dict, &Limits::DEFAULT, &mut budget, &mut ()).unwrap();
+    for code in [u32::from(b'A'), u32::from(b'g')] {
+        verbs.clear();
+        assert!(t1_font.outline(code, None, &mut verbs));
+        let got = verb_control_bounds(&verbs).unwrap();
+        let expected = t1_font.char_box(code).unwrap();
+        assert!(
+            (got.x0 - expected.x0).abs() <= 1.0
+                && (got.y0 - expected.y0).abs() <= 1.0
+                && (got.x1 - expected.x1).abs() <= 1.0
+                && (got.y1 - expected.y1).abs() <= 1.0,
+            "Type 1 shifted matrix mismatch for {code}: got {got:?}, expected {expected:?}"
+        );
+    }
+    // Verify `A` was shifted to `100..700 x 50..800` (not `0..600 x 0..750`!).
+    assert_eq!(
+        t1_font.char_box(u32::from(b'A')),
+        Some(GlyphBox::new(100.0, 50.0, 700.0, 800.0))
+    );
+
+    // 3. Shifted CID-CFF (`[0.001 0 0 0.001 0.12 -0.04]`): outline bounds match shifted glyph box
+    //    (recall `cid_box` raises `y1` by `y1 / 64` for PDFium `GetCharBBox` parity, so `x0`, `y0`, `x1`
+    //    match identically: `120..720`, `y0 = -40`, raw `y1 = 710`!).
+    let cid_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type0"),
+        "BaseFont" => Object::name("ShiftedCid"),
+        "Encoding" => Object::name("Identity-H"),
+        "DescendantFonts" => vec![Object::reference(7)],
+    };
+    let cid_font = Font::read(streams, &cid_dict, &Limits::DEFAULT, &mut budget, &mut ()).unwrap();
+    verbs.clear();
+    assert!(cid_font.outline(7, None, &mut verbs));
+    let cid_got = verb_control_bounds(&verbs).unwrap();
+    let cid_box = cid_font.char_box(7).unwrap();
+    assert!(
+        (cid_got.x0 - cid_box.x0).abs() <= 1.0
+            && (cid_got.y0 - cid_box.y0).abs() <= 1.0
+            && (cid_got.x1 - cid_box.x1).abs() <= 1.0,
+        "cid_got={cid_got:?}, cid_box={cid_box:?}"
+    );
+    assert_eq!(cid_got, GlyphBox::new(119.0, -40.0, 719.0, 710.0));
+    // Out-of-fuel glyph leaves `verbs` unchanged!
+    let mut zero_fuel_limits = Limits::DEFAULT;
+    zero_fuel_limits.glyph_fuel = 2;
+    zero_fuel_limits.font_fuel = 2;
+    let heavy_id = ObjectId::new(30, 0);
+    objs.insert(
+        heavy_id,
+        Object::from(Stream::new(
+            dict! { "Subtype" => Object::name("Type1C") },
+            fixture::heavy_cff_program(6),
+        )),
+    );
+    objs.insert(
+        ObjectId::new(31, 0),
+        Object::from(dict! {
+            "Type" => Object::name("FontDescriptor"),
+            "FontFile3" => Object::from(heavy_id),
+        }),
+    );
+    let streams2 = WithStreams::new(resolve_fn(|id| objs.get(&id)), |id, limit| {
+        let Some(s) = objs.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "missing"));
+        };
+        let bytes = s.data.bytes().unwrap();
+        if bytes.len() > limit {
+            return Err(Unreadable::new(id, Why::Limit, "past limit"));
+        }
+        Ok(bytes.to_vec())
+    });
+    let heavy_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("HeavyCFF"),
+        "Encoding" => Object::name("WinAnsiEncoding"),
+        "FontDescriptor" => Object::reference(31),
+        "FirstChar" => 65,
+        "LastChar" => 65,
+        "Widths" => vec![Object::from(600)],
+    };
+    let heavy_font = Font::read(
+        streams2,
+        &heavy_dict,
+        &zero_fuel_limits,
+        &mut budget,
+        &mut (),
+    )
+    .unwrap();
+    verbs = sentinel.clone();
+    assert!(!heavy_font.outline(u32::from(b'A'), None, &mut verbs));
+    assert_eq!(verbs, sentinel);
+
+    // 4. `FallbackProgram::outline_char` returns exact charstring/hmtx advances (not fixed 600.0),
+    //    and returns `None` (leaving `out` untouched) when a bare CFF defines neither charstring
+    //    width nor `defaultWidthX`!
+    let fb_t1 = FallbackProgram::open(fixture::type1_program(), &Limits::DEFAULT).unwrap();
+    verbs.clear();
+    assert_eq!(fb_t1.outline_char('A', None, &mut verbs), Some(600.0));
+    assert!(!verbs.is_empty());
+    verbs.clear();
+    assert_eq!(fb_t1.outline_char('g', None, &mut verbs), Some(500.0));
+    verbs.clear();
+    assert_eq!(fb_t1.outline_char(' ', None, &mut verbs), Some(250.0));
+    assert!(verbs.is_empty());
+
+    let fb_tt = FallbackProgram::open(fixture::truetype_program(), &Limits::DEFAULT).unwrap();
+    verbs.clear();
+    assert_eq!(fb_tt.outline_char('B', None, &mut verbs), Some(450.0));
+    verbs.clear();
+    assert_eq!(fb_tt.outline_char('C', None, &mut verbs), Some(700.0));
+
+    let fb_cff_no_w = FallbackProgram::open(fixture::cff_program(), &Limits::DEFAULT).unwrap();
+    verbs = sentinel.clone();
+    assert_eq!(fb_cff_no_w.outline_char('A', None, &mut verbs), None);
+    assert_eq!(verbs, sentinel);
+}

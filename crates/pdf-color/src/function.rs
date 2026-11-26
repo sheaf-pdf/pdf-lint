@@ -412,10 +412,11 @@ pub(crate) fn clamp_pair(v: f32, a: f32, b: f32) -> f32 {
 #[inline]
 fn interpolate(x: f32, x_min: f32, x_max: f32, y_min: f32, y_max: f32) -> f32 {
     let denom = x_max - x_min;
-    if denom.abs() <= f32::EPSILON {
+    if denom == 0.0 {
         y_min
     } else {
-        y_min + (x - x_min) * (y_max - y_min) / denom
+        let v = y_min + (x - x_min) * (y_max - y_min) / denom;
+        if v.is_finite() { v } else { y_min }
     }
 }
 

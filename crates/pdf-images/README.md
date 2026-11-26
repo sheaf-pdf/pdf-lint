@@ -16,9 +16,9 @@ Zero-I/O PDF Image XObject and inline image (`BI..ID..EI`) decoder, mask composi
   - `JBIG2Decode` (`hayro-jbig2`): Embedded and sequential/random-access segments with indirect `/JBIG2Globals` resolution via `Streams::decoded`.
   - `JPXDecode` (`hayro-jpeg2000`): Codestream and JP2 container decoding preserving native bit depth (`1..=16` bpc), embedded JP2 color specifications (including `colr` ICC profiles with `icc`), and `/SMaskInData` (`0, 1, 2`).
 - **Redaction pixel scrubbing & clean re-encoding (`RawImage::fill_rect_raw`, `encode_raw_flate`, `encode_rgba_flate`, `encode_jpeg`):**
-  - Burn rectangular redaction regions directly in an image's native sample space and bit depth (`RawImage::fill_rect_raw`) without touching surrounding pixels, then re-encode cleanly via lossless `FlateDecode` + PNG `Sub` prediction or pure-Rust baseline `DCTDecode` ([jpeg-encoder](https://crates.io/crates/jpeg-encoder))—stripping EXIF, XMP, IPTC, comment metadata, and JBIG2 symbol dictionaries (writing only a minimal JFIF or Adobe `APP14` header on JPEG output).
-- **Bounded resources & fault sinks (`Limits`, `Fault`):**
-  - Dimensions, pixel counts, and byte budgets are checked before allocating buffers, and recoverable departures (`Fault`) are reported to any `pdf-objects` `fault::Sink<Fault>` at zero cost when `()` is passed.
+  - Burn rectangular redaction regions directly in an image's native pre-`/Decode` sample space and bit depth (`RawImage::fill_rect_raw`, which rejects short `fill` slices and color-key-transparent fills via `ScrubError`) without touching surrounding pixels, then re-encode cleanly via lossless `FlateDecode` + PNG `Sub` prediction (preserving `/Mask`, `/SMask`, and `/OC`) or pure-Rust baseline `DCTDecode` ([jpeg-encoder](https://crates.io/crates/jpeg-encoder))—stripping EXIF, XMP, IPTC, comment metadata, and JBIG2 symbol dictionaries (writing only a minimal JFIF or Adobe `APP14` header on JPEG output). Note that separate indirect `/SMask` and explicit stencil `/Mask` streams are preserved by reference and not modified by `fill_rect_raw` alone.
+- **Bounded resources, codec isolation & fault sinks (`Limits`, `Fault`):**
+  - Dimensions, pixel counts, and byte budgets are checked before allocating buffers, recoverable departures (`Fault`) are reported to any `pdf-objects` `fault::Sink<Fault>` at zero cost when `()` is passed, and internal panics in third-party decoders are converted to `Error::Codec` via `std::panic::catch_unwind` under default `panic = "unwind"` builds (`panic = "abort"` binaries bypass unwind guards).
 
 ## Quickstart
 
@@ -56,7 +56,7 @@ let mut raw = decode_stream_raw(
     &Limits::DEFAULT,
 )
 .unwrap();
-raw.fill_rect_raw(0, 0, 2, 2, &[0, 0, 0]);
+raw.fill_rect_raw(0, 0, 2, 2, &[0, 0, 0]).unwrap();
 let clean_flate = encode_raw_flate(&raw, None, Level::DEFAULT).unwrap();
 
 // Tier 2: evaluate the scrubbed Flate Image XObject to straight-alpha RGBA8.

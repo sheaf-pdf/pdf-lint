@@ -1243,12 +1243,14 @@ impl CharstringContext for Type1<'_> {
 }
 
 /// The glyph PDFium's `glyph_index_` holds for a code: one, `0xffff` for
-/// none, or unknown here.
+/// none, or unknown here (carrying a best-effort glyph ID when available so
+/// [`crate::Font::outline`] can still render the embedded glyph while
+/// [`crate::Font::char_box`] stays conservative).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gid {
     Glyph(u16),
     None,
-    Unknown,
+    Unknown(Option<u16>),
 }
 
 impl Gid {
@@ -1258,6 +1260,36 @@ impl Gid {
             0xffff => Gid::None,
             g => Gid::Glyph(g),
         }
+    }
+
+    fn best_non_zero(self) -> Option<u16> {
+        match self {
+            Gid::Glyph(g) | Gid::Unknown(Some(g)) if g != 0 => Some(g),
+            _ => None,
+        }
+    }
+}
+
+/// ISO 32000-2 Annex D.2 `PDFDocEncoding` scalar lookup for best-effort glyph
+/// resolution when `/BaseEncoding /PDFDocEncoding` is used with an embedded program.
+fn pdf_doc_unicode(code: u8) -> Option<u32> {
+    const LOW: [u32; 8] = [
+        0x02d8, 0x02c7, 0x02c6, 0x02d9, 0x02dd, 0x02db, 0x02da, 0x02dc,
+    ];
+    const HIGH: [u32; 32] = [
+        0x2022, 0x2020, 0x2021, 0x2026, 0x2014, 0x2013, 0x0192, 0x2044, 0x2039, 0x203a, 0x2212,
+        0x2030, 0x201e, 0x201c, 0x201d, 0x2018, 0x2019, 0x201a, 0x2122, 0xfb01, 0xfb02, 0x0141,
+        0x0152, 0x0160, 0x0178, 0x017d, 0x0131, 0x0142, 0x0153, 0x0161, 0x017e, 0,
+    ];
+    match code {
+        0x18..=0x1f => Some(LOW[usize::from(code - 0x18)]),
+        0x80..=0x9f => match HIGH[usize::from(code - 0x80)] {
+            0 => None,
+            u => Some(u),
+        },
+        0x7f | 0xad => None,
+        0x20..=0x7e | 0xa0..=0xff => Some(u32::from(code)),
+        _ => None,
     }
 }
 
@@ -1305,7 +1337,8 @@ impl Face {
         }
         map.gids = Box::new(gids.map(|gid| match gid {
             Gid::Glyph(g) => Some(g),
-            Gid::None | Gid::Unknown => None,
+            Gid::Unknown(g) => g,
+            Gid::None => None,
         }));
         // Where its boxes aren't PDFium's, none is said, what has no glyph among them.
         if !self.exact {
@@ -1321,7 +1354,7 @@ impl Face {
                     found
                 }),
                 Gid::None => Some(GlyphBox::new(-1.0, -1.0, -1.0, -1.0)),
-                Gid::Unknown => None,
+                Gid::Unknown(_) => None,
             };
         }
         map.cost = cost;
@@ -1430,7 +1463,20 @@ fn truetype_gids(
         for (code, slot) in gids.iter_mut().enumerate() {
             let name = match names.name(code as u8) {
                 Named::Unknown => {
-                    *slot = Gid::Unknown;
+                    let best = (names.base == Base::PdfDoc)
+                        .then(|| pdf_doc_unicode(code as u8))
+                        .flatten()
+                        .and_then(|u| match kind {
+                            Mapped::Unicode => charmaps.gid(u).best_non_zero(),
+                            Mapped::MacRoman => {
+                                mac_roman_code(u).and_then(|m| charmaps.gid(m).best_non_zero())
+                            }
+                            Mapped::Symbol => u8::try_from(u)
+                                .ok()
+                                .and_then(|b| charmaps.ms_symbol(b).best_non_zero()),
+                            Mapped::Other => None,
+                        });
+                    *slot = Gid::Unknown(best);
                     text.push(None);
                     continue;
                 }
@@ -1547,9 +1593,15 @@ fn type1_gids(
                     Gid::Glyph(0) => (Gid::Glyph(0), Some(None)),
                     Gid::Glyph(g) => (Gid::Glyph(g), Some(charmaps.glyph_text(u32::from(g)))),
                     Gid::None => (Gid::None, Some(None)),
-                    Gid::Unknown => (Gid::Unknown, None),
+                    Gid::Unknown(best) => (Gid::Unknown(best), None),
                 },
-                Named::Unknown => (Gid::Unknown, None),
+                Named::Unknown => {
+                    let best = (encoding.base == Base::PdfDoc)
+                        .then(|| pdf_doc_unicode(code as u8))
+                        .flatten()
+                        .and_then(|u| charmaps.gid(u).best_non_zero());
+                    (Gid::Unknown(best), None)
+                }
             };
             *slot = gid;
             text.push(said);
@@ -1565,7 +1617,11 @@ fn type1_gids(
                 continue;
             }
             Named::Unknown => {
-                *slot = Gid::Unknown;
+                let best = (encoding.base == Base::PdfDoc && unicode)
+                    .then(|| pdf_doc_unicode(code as u8))
+                    .flatten()
+                    .and_then(|u| charmaps.gid(u).best_non_zero());
+                *slot = Gid::Unknown(best);
                 text.push(None);
                 continue;
             }
@@ -1910,14 +1966,25 @@ impl<'a> Charmaps<'a> {
             return Gid::Glyph(0);
         };
         let found = match &map.lookup {
-            Lookup::Table(CmapSubtable::Format8(_)) => return Gid::Unknown,
+            Lookup::Table(sub @ CmapSubtable::Format8(_)) => {
+                let best = sub
+                    .map_codepoint(code)
+                    .map(|g| g.to_u32())
+                    .filter(|&g| g < self.glyphs && g as u16 != 0xffff)
+                    .map(|g| g as u16);
+                return Gid::Unknown(best);
+            }
             Lookup::Format2(table) => table.glyph(code),
             Lookup::Table(table) => table.map_codepoint(code).map_or(0, |g| g.to_u32()),
             Lookup::Format4(table) => table.glyph(code, self.glyphs),
             Lookup::Codes(codes) => codes.get(code as usize).copied().unwrap_or(0),
             Lookup::Names(unicodes) => match unicodes.glyph(code) {
-                Some(found) => found,
-                None => return Gid::Unknown,
+                Ok(found) => found,
+                Err(first) => {
+                    let best =
+                        (first < self.glyphs && first as u16 != 0xffff).then_some(first as u16);
+                    return Gid::Unknown(best);
+                }
             },
         };
         Gid::of(if found < self.glyphs { found } else { 0 })
@@ -2162,10 +2229,11 @@ impl<'a> Format4<'a> {
 /// share a code point, which FreeType finds rests on how its sort orders
 /// them, so it's unknown.
 struct PsUnicodes {
-    /// Code points' glyphs: None where more than one has it.
-    plain: HashMap<u32, Option<u32>>,
+    /// Code points' glyphs: `(first_gid, unique)` (`unique == false` when more than one glyph
+    /// shares the code point).
+    plain: HashMap<u32, (u32, bool)>,
     /// Variants' code points' glyphs, the same way.
-    variants: HashMap<u32, Option<u32>>,
+    variants: HashMap<u32, (u32, bool)>,
 }
 
 /// The code points FreeType adds for glyphs by these names, where no name
@@ -2192,10 +2260,10 @@ impl PsUnicodes {
             variants: HashMap::new(),
         };
         let mut extra: [Option<Option<u32>>; 10] = [None; 10];
-        let add = |map: &mut HashMap<u32, Option<u32>>, unicode: u32, gid: u32| {
+        let add = |map: &mut HashMap<u32, (u32, bool)>, unicode: u32, gid: u32| {
             map.entry(unicode)
-                .and_modify(|g| *g = g.filter(|&g| g == gid))
-                .or_insert(Some(gid));
+                .and_modify(|(first, unique)| *unique &= *first == gid)
+                .or_insert((gid, true));
         };
         for (gid, name) in named.iter().filter(|(_, n)| !n.is_empty()) {
             if let Some(n) = EXTRA_GLYPHS.iter().position(|(_, e)| *e == &name[..]) {
@@ -2223,11 +2291,17 @@ impl PsUnicodes {
         (!unicodes.plain.is_empty() || !unicodes.variants.is_empty()).then_some(unicodes)
     }
 
-    /// The glyph `unicode` maps to, 0 for none; None where that can't be said.
-    fn glyph(&self, unicode: u32) -> Option<u32> {
-        match self.plain.get(&unicode) {
-            Some(found) => *found,
-            None => self.variants.get(&unicode).copied().unwrap_or(Some(0)),
+    /// The glyph `unicode` maps to (`Ok(0)` for none), or `Err(first_gid)` when multiple
+    /// glyphs share `unicode` and FreeType's sort order cannot be predicted for `char_box`.
+    fn glyph(&self, unicode: u32) -> Result<u32, u32> {
+        let &(first, unique) = self
+            .plain
+            .get(&unicode)
+            .or_else(|| self.variants.get(&unicode))
+            .unwrap_or(&(0, true));
+        match unique {
+            true => Ok(first),
+            false => Err(first),
         }
     }
 }
@@ -2440,20 +2514,33 @@ impl Face {
         hint_ppem: Option<f32>,
         out: &mut Vec<OutlineVerb>,
     ) -> bool {
+        self.outline_gid_with_advance(view, gid, hint_ppem, out).0
+    }
+
+    fn outline_gid_with_advance(
+        &self,
+        view: &View<'_>,
+        gid: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> (bool, Option<f32>) {
         if self.upem == 0 {
-            return false;
+            return (false, None);
         }
         let start_len = out.len();
-        let ok = match view {
-            View::Glyf(font) => outline_glyf(
-                font,
-                gid,
-                self.upem,
-                self.glyphs,
-                self.composites,
-                self.tricky,
-                hint_ppem,
-                out,
+        let (ok, ps_adv) = match view {
+            View::Glyf(font) => (
+                outline_glyf(
+                    font,
+                    gid,
+                    self.upem,
+                    self.glyphs,
+                    self.composites,
+                    self.tricky,
+                    hint_ppem,
+                    out,
+                ),
+                None,
             ),
             View::Cff { cff, .. } => {
                 outline_cff(cff, self.cids.as_deref(), gid, self.upem, self.fuel, out)
@@ -2465,7 +2552,7 @@ impl Face {
         if !ok {
             out.truncate(start_len);
         }
-        ok
+        (ok, ps_adv)
     }
 
     /// Maps `ch` via this face's charmaps, emits its outline in glyph units, and
@@ -2482,25 +2569,21 @@ impl Face {
         let view = self.view()?;
         let mut charmaps = Charmaps::of(&view, self.glyphs);
         let gid = if charmaps.select_unicode() {
-            match charmaps.gid(u32::from(ch)) {
-                Gid::Glyph(g) if g != 0 => Some(u32::from(g)),
-                _ => None,
-            }
+            charmaps.gid(u32::from(ch)).best_non_zero().map(u32::from)
         } else {
             None
         }
         .or_else(|| {
             if u32::from(ch) <= 0xFF && charmaps.select_id(3, 0) {
-                match charmaps.ms_symbol(ch as u8) {
-                    Gid::Glyph(g) if g != 0 => Some(u32::from(g)),
-                    _ => None,
-                }
+                charmaps.ms_symbol(ch as u8).best_non_zero().map(u32::from)
             } else {
                 None
             }
         })?;
 
-        if !self.outline_gid(&view, gid, hint_ppem, out) {
+        let start_len = out.len();
+        let (ok, ps_adv) = self.outline_gid_with_advance(&view, gid, hint_ppem, out);
+        if !ok {
             return None;
         }
         let scale = 1000.0 / f32::from(self.upem);
@@ -2512,11 +2595,13 @@ impl Face {
                 .hmtx()
                 .ok()
                 .and_then(|hmtx| hmtx.advance(GlyphId::new(gid)))
-                .map(|adv| f32::from(adv) * scale)
-                .unwrap_or(600.0),
-            _ => 600.0,
+                .map(|adv| f32::from(adv) * scale),
+            View::Cff { sfnt: None, .. } | View::Type1 { .. } => ps_adv,
         };
-        Some(advance)
+        if advance.is_none() {
+            out.truncate(start_len);
+        }
+        advance
     }
 }
 
@@ -2687,8 +2772,8 @@ impl PsOutlineSink<'_> {
         let (mut xf, mut yf) = (x.to_f64(), y.to_f64());
         if let Some(m) = self.matrix {
             (xf, yf) = (
-                xf * m.xx.to_f64() + yf * m.xy.to_f64() + m.dx.to_f64(),
-                xf * m.yx.to_f64() + yf * m.yy.to_f64() + m.dy.to_f64(),
+                xf * m.xx.to_f64() + yf * m.xy.to_f64() + f64::from(m.dx.to_bits()),
+                xf * m.yx.to_f64() + yf * m.yy.to_f64() + f64::from(m.dy.to_bits()),
             );
         }
         if let Some(s) = self.scale {
@@ -2782,6 +2867,23 @@ impl CommandSink for PsOutlineSink<'_> {
     }
 }
 
+fn transform_ps_advance(
+    w: Fixed,
+    matrix: Option<FontMatrix>,
+    scale: Option<i64>,
+    upem: u16,
+) -> Option<f32> {
+    let mut wf = w.to_f64();
+    if let Some(m) = matrix {
+        wf = wf * m.xx.to_f64() + f64::from(m.dx.to_bits());
+    }
+    if let Some(s) = scale {
+        wf *= s as f64 / 65536.0;
+    }
+    let adv = (wf * (1000.0 / f64::from(upem))) as f32;
+    adv.is_finite().then_some(adv)
+}
+
 fn outline_cff(
     cff: &CffFontRef<'_>,
     cids: Option<&[Option<u16>]>,
@@ -2789,13 +2891,13 @@ fn outline_cff(
     upem: u16,
     fuel: usize,
     out: &mut Vec<OutlineVerb>,
-) -> bool {
+) -> (bool, Option<f32>) {
     let gid = match cids {
         Some(cids) if gid != 0 => match cids.get(gid as usize).copied().flatten() {
             Some(g) => u32::from(g),
-            None => return false,
+            None => return (false, None),
         },
-        _ if gid >= cff.num_glyphs() => return false,
+        _ if gid >= cff.num_glyphs() => return (false, None),
         _ => gid,
     };
     let glyph = GlyphId::new(gid);
@@ -2803,7 +2905,7 @@ fn outline_cff(
         .subfont_index(glyph)
         .and_then(|i| cff.subfont(i, &[]).ok())
     else {
-        return false;
+        return (false, None);
     };
     let top = cff.matrix().copied();
     let top_units = top.map_or(i32::from(upem), |m| m.scale);
@@ -2827,11 +2929,11 @@ fn outline_cff(
             .and_then(|d| Index::new(d, false).ok())
         {
             Some(index) => index,
-            None => return false,
+            None => return (false, None),
         },
     };
     let Some(charstring) = cff.charstrings().get(gid as usize) else {
-        return false;
+        return (false, None);
     };
     let context = Type2 {
         cff,
@@ -2839,10 +2941,11 @@ fn outline_cff(
         fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
     };
     if context.fuel.0.get() == 0 {
-        return false;
+        return (false, None);
     }
+    let filtered_matrix = matrix.filter(|&m| m != FontMatrix::IDENTITY);
     let mut sink = PsOutlineSink {
-        matrix: matrix.filter(|&m| m != FontMatrix::IDENTITY),
+        matrix: filtered_matrix,
         scale,
         to_glyph: 1000.0 / f64::from(upem),
         at: (Fixed::ZERO, Fixed::ZERO),
@@ -2852,11 +2955,16 @@ fn outline_cff(
         out,
         ok: true,
     };
-    if charstring::evaluate(&context, None, charstring, &mut sink).is_ok() && sink.ok {
-        sink.finish();
-        true
-    } else {
-        false
+    match charstring::evaluate(&context, None, charstring, &mut sink) {
+        Ok(wx_opt) if sink.ok => {
+            sink.finish();
+            let raw_w = wx_opt
+                .map(|w| w + subfont.nominal_width())
+                .or_else(|| subfont.default_width());
+            let adv = raw_w.and_then(|w| transform_ps_advance(w, filtered_matrix, scale, upem));
+            (true, adv)
+        }
+        _ => (false, None),
     }
 }
 
@@ -2867,15 +2975,15 @@ fn outline_type1(
     upem: u16,
     fuel: usize,
     out: &mut Vec<OutlineVerb>,
-) -> bool {
+) -> (bool, Option<f32>) {
     if gid >= font.num_glyphs() {
-        return false;
+        return (false, None);
     }
     let found = font
         .glyph_name(GlyphId::new(gid))
         .and_then(|n| scanned.charstrings.get(n.as_bytes()));
     let Some(Some(charstring)) = found else {
-        return false;
+        return (false, None);
     };
     let context = Type1 {
         font,
@@ -2883,13 +2991,14 @@ fn outline_type1(
         fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
     };
     if context.fuel.0.get() == 0 {
-        return false;
+        return (false, None);
     }
+    let filtered_matrix = font
+        .subfont(0)
+        .map(Subfont::matrix)
+        .filter(|&m| m != FontMatrix::IDENTITY);
     let mut sink = PsOutlineSink {
-        matrix: font
-            .subfont(0)
-            .map(Subfont::matrix)
-            .filter(|&m| m != FontMatrix::IDENTITY),
+        matrix: filtered_matrix,
         scale: None,
         to_glyph: 1000.0 / f64::from(upem),
         at: (Fixed::ZERO, Fixed::ZERO),
@@ -2899,10 +3008,12 @@ fn outline_type1(
         out,
         ok: true,
     };
-    if charstring::evaluate(&context, None, charstring, &mut sink).is_ok() && sink.ok {
-        sink.finish();
-        true
-    } else {
-        false
+    match charstring::evaluate(&context, None, charstring, &mut sink) {
+        Ok(wx_opt) if sink.ok => {
+            sink.finish();
+            let adv = wx_opt.and_then(|w| transform_ps_advance(w, filtered_matrix, None, upem));
+            (true, adv)
+        }
+        _ => (false, None),
     }
 }

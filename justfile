@@ -328,6 +328,8 @@ test-pdfium:
     fi
     env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/cmyk_lut.py check "$lib"
     env -u GH_TOKEN -u GITHUB_TOKEN PDF_RASTER_PDFIUM="$lib" cargo nextest run --locked \
+        --run-ignored only -E 'test(pdfium)' -p pdf-raster --features pdfium
+    env -u GH_TOKEN -u GITHUB_TOKEN PDF_RASTER_PDFIUM="$lib" cargo nextest run --locked \
         --run-ignored only -E 'test(pdfium)' -p pdf-raster-oracle
 
 # Write the crates' PDFium cases anew from their generators, and their

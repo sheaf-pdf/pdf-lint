@@ -485,16 +485,82 @@ mod tests {
         let (dpix, _) = RenderedDoc::render_page(&pdf, 0, &opts).unwrap();
         assert_eq!(dpix, pix);
 
-        // `RustBackend` (`RenderBackend` trait) + `From<BackendError> for Error`:
+        // `RustBackend` (`RenderBackend` trait) + `Page::render` both honor `Options::rules`
+        // (`Rules::Iso` vs `Rules::Pdfium` on CMYK cyan `(1, 0, 0, 0)`) and custom `Options::limits`!
+        let mut cmyk_doc = Document::new();
+        {
+            let cp = cmyk_doc.add_page(Rect::new(0.0, 0.0, 40.0, 40.0));
+            cp.fill_color(Color::Cmyk([1.0, 0.0, 0.0, 0.0]));
+            cp.rect(0.0, 0.0, 40.0, 40.0);
+            cp.paint(Paint::Fill);
+        }
+        let cmyk_bytes = cmyk_doc.to_bytes().unwrap();
+        let cmyk_vp = RenderOpts::with_viewport(Viewport::Page {
+            width: 40,
+            rotation: Rotation::R0,
+        });
+        let pdfium_page_px = crate::from_bytes(&cmyk_bytes[..])
+            .unwrap()
+            .pages()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .render(&cmyk_vp)
+            .unwrap()
+            .0
+            .pixel_rgba8(20, 20)
+            .unwrap();
+        let mut iso_open = Options::DEFAULT;
+        iso_open.rules = Rules::Iso;
+        let iso_pdf = iso_open.from_bytes(&cmyk_bytes[..]).unwrap();
+        let iso_page_px = iso_pdf
+            .pages()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .render(&cmyk_vp)
+            .unwrap()
+            .0
+            .pixel_rgba8(20, 20)
+            .unwrap();
+        let iso_backend_px = RustBackend::new()
+            .with_options(iso_open)
+            .open_bytes(Arc::from(cmyk_bytes), None)
+            .unwrap()
+            .render_page(0, &cmyk_vp)
+            .unwrap()
+            .0
+            .pixel_rgba8(20, 20)
+            .unwrap();
+        assert_eq!(iso_page_px, [0, 255, 255, 255]);
+        assert_eq!(iso_backend_px, [0, 255, 255, 255]);
+        assert!(pdfium_page_px[1] < 200, "PDFium LUT cyan != [0, 255, 255]");
+
         let mut tight_open = Options::DEFAULT;
         tight_open.rules = Rules::Iso;
         tight_open.limits.raster.max_pixels = 5_000;
+        let tight_pdf = tight_open.from_bytes(&bytes[..]).unwrap();
         let backend = RustBackend::new().with_options(tight_open);
-        let rendered_doc = backend.open_bytes(Arc::from(bytes), None).unwrap();
+        let rendered_doc = backend
+            .open_bytes(Arc::from(bytes.as_slice()), None)
+            .unwrap();
         assert_eq!(rendered_doc.page_count(), 1);
-        // Customizing one field on `opts.limits` must NOT drop `Pdf`'s `max_pixels = 5_000` cap!
+        // Customizing one field on `opts.limits` must NOT drop `Pdf`'s `max_pixels = 5_000` cap
+        // on EITHER `Page::render` OR `RustBackend`!
         let mut tweaked_opts = opts.clone();
         tweaked_opts.limits.max_annots = 10;
+        assert!(matches!(
+            tight_pdf
+                .pages()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .render(&tweaked_opts)
+                .unwrap_err(),
+            Error::Raster(crate::pdf_raster::Error::Limit(
+                crate::pdf_raster::LimitKind::Pixels
+            ))
+        ));
         let capped_err = rendered_doc.render_page(0, &tweaked_opts).unwrap_err();
         assert!(matches!(
             Error::from(capped_err),

@@ -16,8 +16,8 @@ use crate::{
     ColorValues, DashPattern, DefaultAppearance, EncodedPage, Error, Fault, FormUse, Forms,
     ImageDrawn, ImageOf, Kind, Limits, Mark, MarkProps, Marks, Matrix, Opts, PageGeom, PathDrawn,
     Point, Quad, Rect, Refused, RenderingIntent, Rotation, Seg, ShadingDrawn, SoftMask,
-    SoftMaskKind, State, Summary, TextPiece, TextState, Unwritable, UseId, Wants, encode,
-    encode_with, fuzz, interpret, interpret_with,
+    SoftMaskKind, SoftMaskParams, State, Summary, TextPiece, TextState, TransparencyGroup,
+    Unwritable, UseId, Wants, encode, encode_with, fuzz, interpret, interpret_with,
 };
 
 #[derive(Default)]
@@ -100,6 +100,8 @@ fn public_types_are_send_and_sync() {
     check::<BlendState>();
     check::<SoftMask>();
     check::<SoftMaskKind>();
+    check::<SoftMaskParams>();
+    check::<TransparencyGroup<'static>>();
     check::<Clip>();
     check::<ClipPart>();
     check::<Mark>();
@@ -3698,6 +3700,183 @@ fn box_border_fuzz_body_holds_over_extreme_numbers() {
         }
         fuzz::check(&data);
     }
+}
+
+#[test]
+fn user_segments_transparency_groups_and_soft_mask_params_track_state() {
+    let mut store = Store::default();
+    let tr_fn_id = store.put_stream(
+        dict! {
+            "FunctionType" => 2,
+            "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+            "C0" => vec![Object::from(1.0)],
+            "C1" => vec![Object::from(0.0)],
+            "N" => 1.0,
+        },
+        Vec::new(),
+    );
+    let smask_group = store.put_stream(
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(50), Object::from(50)],
+            "Group" => dict! {
+                "S" => Object::name("Transparency"),
+                "I" => true,
+                "CS" => Object::name("DeviceGray"),
+            },
+        },
+        b"0.5 g 0 0 50 50 re f".to_vec(),
+    );
+    let form_group_dict = store.put(Object::from(dict! {
+        "S" => Object::name("Transparency"),
+        "I" => true,
+        "K" => true,
+        "CS" => Object::name("SecretGroupCS"),
+    }));
+    let form_id = store.put_stream(
+        dict! {
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(40), Object::from(40)],
+            "Matrix" => vec![
+                Object::from(1), Object::from(0), Object::from(0),
+                Object::from(1), Object::from(5), Object::from(7),
+            ],
+            "Group" => Object::from(form_group_dict),
+        },
+        b"0 0 m 10 20 l 30 40 50 60 70 80 c h B".to_vec(),
+    );
+
+    // Direct `TransparencyGroup::from_dict` parsing (indirect `/Group`, non-transparency `/S`, Debug hygiene)
+    let form_obj = store.objects.get(&form_id).unwrap().as_stream().unwrap();
+    let parsed_group = TransparencyGroup::from_dict(&store.objects, &form_obj.dict).unwrap();
+    assert!(parsed_group.isolated);
+    assert!(parsed_group.knockout);
+    assert_eq!(
+        parsed_group.color_space.and_then(Object::as_name),
+        Some(&b"SecretGroupCS"[..])
+    );
+    let dbg_group = format!("{parsed_group:?}");
+    assert!(
+        !dbg_group.contains("SecretGroupCS"),
+        "Debug leaked /CS name: {dbg_group}"
+    );
+    let non_trans = dict! { "Group" => dict! { "S" => Object::name("Luminosity") } };
+    assert!(TransparencyGroup::from_dict(&store.objects, &non_trans).is_none());
+
+    let resources = Object::from(dict! {
+        "ExtGState" => dict! {
+            "GS1" => dict! {
+                "SMask" => dict! {
+                    "S" => Object::name("Luminosity"),
+                    "G" => smask_group,
+                    "BC" => vec![Object::from(0.25), Object::from(0.5), Object::from(0.75)],
+                    "TR" => dict! { "SecretTrKey" => Object::text("SecretTransferPayload"), "Ref" => tr_fn_id },
+                },
+            },
+            "GSId" => dict! {
+                "SMask" => dict! {
+                    "S" => Object::name("Alpha"),
+                    "G" => smask_group,
+                    "TR" => Object::name("Identity"),
+                },
+            },
+            "GSOff" => dict! {
+                "SMask" => Object::name("None"),
+            },
+        },
+        "XObject" => dict! { "FmG" => form_id },
+    });
+
+    // Set CTM to `[2 0 0 3 10 20]`, apply `/GS1 gs` (must snapshot that CTM!),
+    // then apply another `cm` (`[1 0 0 1 100 200]`): `soft_mask_params.ctm` MUST remain
+    // `[2 0 0 3 10 20]` while `state.ctm` advances, and `user_segments` transformed by
+    // `state.ctm` must equal `segments`!
+    let content = Concat::new(&[br#"
+        q
+        2 0 0 3 10 20 cm
+        /GS1 gs
+        1 0 0 1 100 200 cm
+        3 4 m 12 15 l 20 25 30 35 40 45 c h S
+        /FmG Do
+        /GSId gs
+        0 0 5 5 re f
+        /GSOff gs
+        0 0 5 5 re f
+        Q
+    "#]);
+
+    let fonts = Fonts::default();
+    let mut path_states = Vec::new();
+    let mut seen_form_group = None;
+    interpret(
+        store.as_streams(),
+        &content,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        Opts::default(),
+        |ev| {
+            match ev.kind {
+                Kind::Path(drawn) => {
+                    assert_eq!(drawn.user_segments.len(), drawn.segments.len());
+                    for (&u, &p) in drawn.user_segments.iter().zip(drawn.segments.iter()) {
+                        let mapped = match u {
+                            Seg::Move(pt) => Seg::Move(ev.state.ctm.apply(pt)),
+                            Seg::Line(pt) => Seg::Line(ev.state.ctm.apply(pt)),
+                            Seg::Curve(c1, c2, pt) => Seg::Curve(
+                                ev.state.ctm.apply(c1),
+                                ev.state.ctm.apply(c2),
+                                ev.state.ctm.apply(pt),
+                            ),
+                            Seg::Close => Seg::Close,
+                        };
+                        assert_eq!(mapped, p);
+                    }
+                    path_states.push(ev.state.clone());
+                }
+                Kind::FormBegin(f) => {
+                    seen_form_group = f
+                        .group
+                        .map(|g| (g.isolated, g.knockout, g.color_space.is_some()));
+                }
+                _ => {}
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(seen_form_group, Some((true, true, true)));
+    assert_eq!(path_states.len(), 4);
+
+    // Path 0 (after `/GS1 gs` and subsequent `cm`):
+    let p0 = path_states[0]
+        .soft_mask_params
+        .as_ref()
+        .expect("GS1 params");
+    assert_eq!(p0.backdrop.as_ref().unwrap().as_slice(), &[0.25, 0.5, 0.75]);
+    assert!(p0.transfer.is_some());
+    assert_eq!(p0.ctm, Matrix::new(2.0, 0.0, 0.0, 3.0, 10.0, 20.0));
+    assert_ne!(path_states[0].ctm, p0.ctm);
+    let dbg_state = format!("{:?}", path_states[0]);
+    assert!(
+        !dbg_state.contains("SecretTransferPayload") && !dbg_state.contains("SecretTrKey"),
+        "{dbg_state}"
+    );
+
+    // Path 2 (after `/GSId gs`): `/TR /Identity` normalized to `None`, `backdrop` cleared to `None`,
+    // and `ctm` updated to the CTM active when `/GSId gs` executed!
+    let p2 = path_states[2]
+        .soft_mask_params
+        .as_ref()
+        .expect("GSId params");
+    assert!(p2.backdrop.is_none());
+    assert!(p2.transfer.is_none());
+    assert_eq!(p2.ctm, path_states[2].ctm);
+
+    // Path 3 (after `/GSOff gs`): `/SMask /None` clears both `soft_mask` and `soft_mask_params`!
+    assert_eq!(path_states[3].soft_mask, SoftMask::None);
+    assert!(path_states[3].soft_mask_params.is_none());
 }
 
 /// A font for layout's numbers: every ASCII character 500 units wide but the

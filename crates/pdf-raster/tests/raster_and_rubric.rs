@@ -994,3 +994,720 @@ fn nested_pattern_and_type3_cycles_and_exponential_dags_are_bounded_and_cached()
         );
     }
 }
+
+#[test]
+fn bgra8_transparent_semi_opaque_pixels_and_large_shading_downsampling() {
+    // 1. Semi-opaque fill (`0.5 ca`, red `[200, 0, 0]`) over `background: None` in `PixelFormat::Bgra8`:
+    //    must be unpremultiplied ONCE (`[200, 0, 0, 128]`), never twice (`[255, 0, 0, 128]`)!
+    let content = b"/GS1 gs 0.7843137 0 0 rg 10 10 20 20 re f\n";
+    let pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(40), Object::from(40)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! {
+                    "ExtGState" => dict! { "GS1" => dict! { "ca" => 0.5019608 } },
+                },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (4, Object::from(Stream::new(dict! {}, content.to_vec()))),
+    ]);
+
+    let mut bgra_opts = RenderOpts::with_viewport(Viewport::Page {
+        width: 40,
+        rotation: Rotation::R0,
+    });
+    bgra_opts.background = None;
+    bgra_opts.format = PixelFormat::Bgra8;
+    let (bgra, _, _) = render_pdf_bytes(&pdf, &bgra_opts);
+    let px = bgra.pixel_rgba8(20, 20).unwrap();
+    assert!(
+        (i16::from(px[0]) - 200).abs() <= 2 && px[1] == 0 && px[2] == 0 && px[3] == 128,
+        "expected straight [~200, 0, 0, 128], got {px:?}"
+    );
+    let vec_rgba = bgra.to_rgba8_vec();
+    let idx = (20 * 40 + 20) * 4;
+    assert_eq!(&vec_rgba[idx..idx + 4], &px);
+
+    // 2. Full-page axial shading rendered at `1200 × 1000 = 1,200,000` pixels (> default
+    //    `max_shading_samples = 1,048,576`): must succeed with `summary.approximated == true`
+    //    rather than failing the page with `Error::Limit(ShadingSamples)`!
+    let sh_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(120), Object::from(100)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! {
+                    "Shading" => dict! { "Sh1" => Object::reference(5) },
+                },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(dict! {}, b"/Sh1 sh\n".to_vec())),
+        ),
+        (
+            5,
+            Object::from(dict! {
+                "ShadingType" => 2,
+                "ColorSpace" => Object::name("DeviceRGB"),
+                "Coords" => vec![Object::from(0), Object::from(0), Object::from(120), Object::from(0)],
+                "Extend" => vec![Object::from(true), Object::from(true)],
+                "Function" => dict! {
+                    "FunctionType" => 2,
+                    "Domain" => vec![Object::from(0), Object::from(1)],
+                    "C0" => vec![Object::from(1), Object::from(0), Object::from(0)],
+                    "C1" => vec![Object::from(0), Object::from(0), Object::from(1)],
+                    "N" => 1,
+                },
+            }),
+        ),
+    ]);
+    let large_opts = RenderOpts::with_viewport(Viewport::Page {
+        width: 1200,
+        rotation: Rotation::R0,
+    });
+    let (sh_pix, sh_sum, _) = render_pdf_bytes(&sh_pdf, &large_opts);
+    assert_eq!((sh_pix.width(), sh_pix.height()), (1200, 1000));
+    assert!(sh_sum.approximated);
+    let left_px = sh_pix.pixel_rgba8(10, 500).unwrap();
+    let right_px = sh_pix.pixel_rgba8(1190, 500).unwrap();
+    assert!(left_px[0] > 240 && left_px[2] < 15, "{left_px:?}");
+    assert!(right_px[2] > 240 && right_px[0] < 15, "{right_px:?}");
+}
+
+#[test]
+fn nested_form_pattern_matrix_and_soft_mask_ctm_backdrop_and_transfer_cache() {
+    // 1. Pattern inside `Fm2` inside `Fm1` where `Fm1` translates by `(+13, +0)` and `Fm2`
+    //    is identity: pattern has `XStep = 20`, red in `x = 0..10`, blue in `x = 10..20`.
+    //    In PageSpace, `Fm2`'s origin is at `x = 13`:
+    //    - Correct single application of `Fm1` shift (`+13`): at PageSpace `x = 15` (`pat_x = 2`),
+    //      pixel MUST be RED `[255, 0, 0, 255]`!
+    //    - Buggy double application (`+26`): at PageSpace `x = 15`, `15 - 26 = -11 -> +9`? Wait:
+    //      at PageSpace `x = 18`: single shift `+13` gives `pat_x = 5` (RED `[255, 0, 0]`),
+    //      whereas double shift `+26` gives `18 - 26 = -8 == 12 mod 20` (BLUE `[0, 0, 255]`)!
+    let pat_body = b"1 0 0 rg 0 0 10 20 re f 0 0 1 rg 10 0 10 20 re f\n";
+    let fm2_body = b"/Pattern cs /P1 scn 0 0 40 40 re f\n";
+    let fm1_body = b"/Fm2 Do\n";
+    let page_body = b"/Fm1 Do\n";
+    let nested_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(60), Object::from(40)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! {
+                    "XObject" => dict! { "Fm1" => Object::reference(5) },
+                },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (4, Object::from(Stream::new(dict! {}, page_body.to_vec()))),
+        (
+            5,
+            Object::from(Stream::new(
+                dict! {
+                    "Subtype" => Object::name("Form"),
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(50), Object::from(40)],
+                    "Matrix" => vec![
+                        Object::from(1), Object::from(0), Object::from(0),
+                        Object::from(1), Object::from(13), Object::from(0),
+                    ],
+                    "Resources" => dict! {
+                        "XObject" => dict! { "Fm2" => Object::reference(6) },
+                    },
+                },
+                fm1_body.to_vec(),
+            )),
+        ),
+        (
+            6,
+            Object::from(Stream::new(
+                dict! {
+                    "Subtype" => Object::name("Form"),
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(40), Object::from(40)],
+                    "Resources" => dict! {
+                        "Pattern" => dict! { "P1" => Object::reference(7) },
+                    },
+                },
+                fm2_body.to_vec(),
+            )),
+        ),
+        (
+            7,
+            Object::from(Stream::new(
+                dict! {
+                    "Type" => Object::name("Pattern"),
+                    "PatternType" => 1,
+                    "PaintType" => 1,
+                    "TilingType" => 1,
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(20), Object::from(20)],
+                    "XStep" => 20,
+                    "YStep" => 20,
+                },
+                pat_body.to_vec(),
+            )),
+        ),
+    ]);
+    let mut nested_opts = RenderOpts::with_viewport(Viewport::Page {
+        width: 60,
+        rotation: Rotation::R0,
+    });
+    nested_opts.anti_alias = AntiAlias::NONE;
+    let (npix, _, _) = render_pdf_bytes(&nested_pdf, &nested_opts);
+    assert_eq!(
+        npix.pixel_rgba8(18, 20),
+        Some([255, 0, 0, 255]),
+        "nested Form pattern applied outer matrix twice!"
+    );
+
+    // 2. Soft-mask CTM at `gs` (`q 0.5 0 0 0.5 40 0 cm /GS1 gs`) + distinct `/BC` on the same `/G`:
+    //    `/G` paints white (`1 g`) in `[0, 0, 40, 40]` over a `100 × 40` page.
+    //    - Under `q 0.5 0 0 0.5 40 0 cm /GSBlack gs` (`/BC [0]`): the white square lands at
+    //      PageSpace `[40..60] × [0..20]` (`y_px = 20..40`). Painting solid red (`1 0 0 rg`)
+    //      over the whole page turns `(50, 30)` red while `(10, 30)` stays white!
+    //    - Next, under identity CTM, `/GSWhite gs` references the SAME `/G` stream with `/BC [1]`
+    //      (white backdrop = luminosity 1 everywhere): painting solid blue (`0 0 1 rg`) at
+    //      `[70, 0, 20, 40]` (outside `/G`'s `[0..40]` box!) MUST paint blue because `/BC [1]`
+    //      rebuilt the mask instead of reusing `/GSBlack`'s cached mask!
+    let smask_g = b"1 g 0 0 40 40 re f\n";
+    let sm_page = b"\
+        q 0.5 0 0 0.5 40 0 cm /GSBlack gs 1 0 0 rg -80 0 200 80 re f Q \
+        q /GSWhite gs 0 0 1 rg 70 0 20 40 re f Q\n";
+    let sm_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(40)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! {
+                    "ExtGState" => dict! {
+                        "GSBlack" => dict! {
+                            "SMask" => dict! {
+                                "S" => Object::name("Luminosity"),
+                                "G" => Object::reference(5),
+                                "BC" => vec![Object::from(0.0)],
+                            },
+                        },
+                        "GSWhite" => dict! {
+                            "SMask" => dict! {
+                                "S" => Object::name("Luminosity"),
+                                "G" => Object::reference(5),
+                                "BC" => vec![Object::from(1.0)],
+                            },
+                        },
+                    },
+                },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (4, Object::from(Stream::new(dict! {}, sm_page.to_vec()))),
+        (
+            5,
+            Object::from(Stream::new(
+                dict! {
+                    "Subtype" => Object::name("Form"),
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(40)],
+                    "Group" => dict! {
+                        "S" => Object::name("Transparency"),
+                        "CS" => Object::name("DeviceGray"),
+                    },
+                },
+                smask_g.to_vec(),
+            )),
+        ),
+    ]);
+    let mut sm_opts = RenderOpts::with_viewport(Viewport::Page {
+        width: 100,
+        rotation: Rotation::R0,
+    });
+    sm_opts.anti_alias = AntiAlias::NONE;
+    let (smpix, _, _) = render_pdf_bytes(&sm_pdf, &sm_opts);
+    // `(10, 30)` was NOT covered when `GSBlack` was shifted to `x = 40..60`, so it stays white!
+    assert_eq!(smpix.pixel_rgba8(10, 30), Some([255, 255, 255, 255]));
+    // `(50, 30)` WAS inside `GSBlack`'s shifted `[40..60] × [0..20]` box, so it is red!
+    assert_eq!(smpix.pixel_rgba8(50, 30), Some([255, 0, 0, 255]));
+    // `(80, 20)` is outside `/G`'s `0..40` rect, where `GSWhite` has `/BC [1.0]`, so it is blue!
+    assert_eq!(smpix.pixel_rgba8(80, 20), Some([0, 0, 255, 255]));
+}
+
+#[test]
+fn type4_and_type5_gouraud_meshes_byte_alignment_parametric_interp_and_caps() {
+    fn pack_vertex_records(records: &[&[(u32, u8)]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for rec in records {
+            let mut acc = 0_u64;
+            let mut nb = 0_u8;
+            for &(val, width) in *rec {
+                acc = (acc << width) | u64::from(val & ((1_u32 << width) - 1));
+                nb += width;
+                while nb >= 8 {
+                    nb -= 8;
+                    out.push(((acc >> nb) & 0xFF) as u8);
+                }
+            }
+            if nb > 0 {
+                out.push(((acc << (8 - nb)) & 0xFF) as u8);
+            }
+        }
+        out
+    }
+
+    // 1. Type 4 free-form Gouraud mesh with `BitsPerFlag = 2`, `BitsPerCoordinate = 12` (`0..4095`),
+    //    `BitsPerComponent = 8` (`34` bits/vertex -> padded to 5 bytes/vertex!) and a PostScript
+    //    step `/Function { 0.5 lt { 1 0 0 } { 0 1 0 } ifelse }`:
+    //    Triangle `(0,0, t=0)` - `(40,0, t=1)` - `(0,40, t=0)` + edge-flag=1 `(40,40, t=1)`.
+    //    At `(10, 30)` (`x=10, y=10` in PDF coords -> `t = 0.25 < 0.5`): MUST be pure RED `[255, 0, 0]`
+    //    (interpolating sRGB at vertices would have blended red & green into `[191, 64, 0]`!).
+    //    At `(35, 10)` (in second triangle via `flag = 1`, `x=35, y=30` -> `t = 0.875 > 0.5`):
+    //    MUST be pure GREEN `[0, 255, 0]`!
+    let t4_bytes = pack_vertex_records(&[
+        &[(0, 2), (0, 12), (0, 12), (0, 8)],
+        &[(0, 2), (4095, 12), (0, 12), (255, 8)],
+        &[(0, 2), (0, 12), (4095, 12), (0, 8)],
+        &[(1, 2), (4095, 12), (4095, 12), (255, 8)],
+    ]);
+    let ps_step = b"{ 0.5 lt { 1 0 0 } { 0 1 0 } ifelse }";
+
+    // 2. Type 5 `2x2` lattice mesh with `BitsPerCoordinate = 12`, `BitsPerComponent = 12`
+    //    (`60` bits/vertex -> padded to 8 bytes/vertex!) in `[40..80] × [0..40]` pure BLUE `[0, 0, 1]`.
+    let t5_bytes = pack_vertex_records(&[
+        &[(0, 12), (0, 12), (0, 12), (0, 12), (4095, 12)],
+        &[(4095, 12), (0, 12), (0, 12), (0, 12), (4095, 12)],
+        &[(0, 12), (4095, 12), (0, 12), (0, 12), (4095, 12)],
+        &[(4095, 12), (4095, 12), (0, 12), (0, 12), (4095, 12)],
+    ]);
+
+    let mesh_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(80), Object::from(40)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! {
+                    "Shading" => dict! {
+                        "Sh4" => Object::reference(5),
+                        "Sh5" => Object::reference(7),
+                    },
+                },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(dict! {}, b"/Sh4 sh /Sh5 sh\n".to_vec())),
+        ),
+        (
+            5,
+            Object::from(Stream::new(
+                dict! {
+                    "ShadingType" => 4,
+                    "ColorSpace" => Object::name("DeviceRGB"),
+                    "BitsPerFlag" => 2,
+                    "BitsPerCoordinate" => 12,
+                    "BitsPerComponent" => 8,
+                    "Decode" => vec![
+                        Object::from(0), Object::from(40),
+                        Object::from(0), Object::from(40),
+                        Object::from(0), Object::from(1),
+                    ],
+                    "Function" => Object::reference(6),
+                },
+                t4_bytes,
+            )),
+        ),
+        (
+            6,
+            Object::from(Stream::new(
+                dict! {
+                    "FunctionType" => 4,
+                    "Domain" => vec![Object::from(0), Object::from(1)],
+                    "Range" => vec![
+                        Object::from(0), Object::from(1),
+                        Object::from(0), Object::from(1),
+                        Object::from(0), Object::from(1),
+                    ],
+                },
+                ps_step.to_vec(),
+            )),
+        ),
+        (
+            7,
+            Object::from(Stream::new(
+                dict! {
+                    "ShadingType" => 5,
+                    "ColorSpace" => Object::name("DeviceRGB"),
+                    "VerticesPerRow" => 2,
+                    "BitsPerCoordinate" => 12,
+                    "BitsPerComponent" => 12,
+                    "Decode" => vec![
+                        Object::from(40), Object::from(80),
+                        Object::from(0), Object::from(40),
+                        Object::from(0), Object::from(1),
+                        Object::from(0), Object::from(1),
+                        Object::from(0), Object::from(1),
+                    ],
+                },
+                t5_bytes,
+            )),
+        ),
+    ]);
+
+    let mesh_opts = RenderOpts::with_viewport(Viewport::Page {
+        width: 80,
+        rotation: Rotation::R0,
+    });
+    let (mpix, msum, mfaults) = render_pdf_bytes(&mesh_pdf, &mesh_opts);
+    assert!(mfaults.is_empty(), "{mfaults:?}");
+    assert!(!msum.approximated);
+    assert_eq!(mpix.pixel_rgba8(10, 30), Some([255, 0, 0, 255]));
+    assert_eq!(mpix.pixel_rgba8(35, 10), Some([0, 255, 0, 255]));
+    assert_eq!(mpix.pixel_rgba8(60, 20), Some([0, 0, 255, 255]));
+
+    // Capping `max_shading_samples = 1` truncates the 2-triangle mesh, setting `approximated`
+    // and reporting `Fault::InvalidShading`!
+    let mut capped_mesh_opts = mesh_opts;
+    capped_mesh_opts.limits.max_shading_samples = 1;
+    let (_, csum, cfaults) = render_pdf_bytes(&mesh_pdf, &capped_mesh_opts);
+    assert!(csum.approximated);
+    assert!(cfaults.contains(&pdf_raster::Fault::InvalidShading));
+}
+
+#[test]
+fn hidden_oc_applies_clips_and_unwinds_unbalanced_form_save_and_pattern_stencil_draws() {
+    // 1. Inside hidden `/OC /LOff BDC ... EMC`, `10 10 20 20 re W n` MUST still clip the
+    //    subsequent visible `1 0 0 rg 0 0 60 60 re f` fill (`ISO 32000-2`, §8.11.3.1),
+    //    and an unbalanced `q` inside a hidden `/OC` Form XObject (`FmHidden`) MUST be
+    //    unwound cleanly at `FormEnd`!
+    let hidden_form = b"q 0 0 5 5 re W n 0 1 0 rg 0 0 60 60 re f\n"; // unbalanced `q` inside hidden form!
+    let page_content = b"\
+        q \
+        /FmHidden Do \
+        /OC /LOff BDC 0 0 1 rg 0 0 60 60 re f 10 10 20 20 re W n EMC \
+        1 0 0 rg 0 0 60 60 re f \
+        Q \
+        /Pattern cs /PatRB scn \
+        q 40 0 0 20 10 35 cm /ImMask Do Q\n";
+    let pat_rb = b"1 0 0 rg 0 0 20 20 re f 0 0 1 rg 20 0 20 20 re f\n";
+
+    // Also include a high-numbered object `(1, 65535)` to verify `EphemeralOverlay`
+    // collision avoidance never shadows existing objects!
+    let sq = BuiltAnnot::shape(
+        ShapeKind::Square,
+        Rect::from_xywh(42.0, 5.0, 14.0, 14.0),
+        &pdf_raster::pdf_annots::PaintStyle::new(
+            Some(AnnotColor::Rgb([0.0, 0.8, 0.0])),
+            Some(AnnotColor::Rgb([0.0, 0.8, 0.0])),
+        ),
+    );
+    let mut sq_dict = sq.dict;
+    sq_dict.remove(b"AP");
+    sq_dict.set("F", AnnotFlags::PRINT.bits() as i64);
+
+    let pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(dict! {
+                "Type" => Object::name("Catalog"),
+                "Pages" => Object::reference(2),
+                "OCProperties" => dict! {
+                    "OCGs" => vec![Object::reference(5)],
+                    "D" => dict! {
+                        "BaseState" => Object::name("ON"),
+                        "OFF" => vec![Object::reference(5)],
+                    },
+                },
+            }),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(60), Object::from(60)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! {
+                    "Properties" => dict! { "LOff" => Object::reference(5) },
+                    "XObject" => dict! {
+                        "FmHidden" => Object::reference(6),
+                        "ImMask" => Object::reference(7),
+                    },
+                    "Pattern" => dict! { "PatRB" => Object::reference(8) },
+                },
+                "Contents" => Object::reference(4),
+                "Annots" => vec![Object::reference(9)],
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(dict! {}, page_content.to_vec())),
+        ),
+        (
+            5,
+            Object::from(dict! { "Type" => Object::name("OCG"), "Name" => Object::text("Hidden") }),
+        ),
+        (
+            6,
+            Object::from(Stream::new(
+                dict! {
+                    "Subtype" => Object::name("Form"),
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(60), Object::from(60)],
+                    "OC" => Object::reference(5),
+                },
+                hidden_form.to_vec(),
+            )),
+        ),
+        (
+            7,
+            Object::from(Stream::new(
+                dict! {
+                    "Subtype" => Object::name("Image"),
+                    "Width" => 2,
+                    "Height" => 1,
+                    "ImageMask" => true,
+                },
+                // Bit 0 = `0` (painted), Bit 1 = `0` (painted): full 2x1 bar painted with `PatRB`!
+                vec![0b0000_0000],
+            )),
+        ),
+        (
+            8,
+            Object::from(Stream::new(
+                dict! {
+                    "Type" => Object::name("Pattern"),
+                    "PatternType" => 1,
+                    "PaintType" => 1,
+                    "TilingType" => 1,
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(40), Object::from(20)],
+                    "XStep" => 40,
+                    "YStep" => 20,
+                },
+                pat_rb.to_vec(),
+            )),
+        ),
+        (9, Object::from(sq_dict)),
+    ]);
+
+    let mut opts = RenderOpts::with_viewport(Viewport::Page {
+        width: 60,
+        rotation: Rotation::R0,
+    });
+    opts.anti_alias = AntiAlias::NONE;
+    let (pix, sum, _) = render_pdf_bytes(&pdf, &opts);
+
+    // Clip `[10..30] × [10..30]` (`y_px = 30..50`) from hidden `/OC` restricted the red fill:
+    // `(20, 40)` is RED, while `(5, 55)` outside `[10..30]` stayed WHITE!
+    assert_eq!(pix.pixel_rgba8(20, 40), Some([255, 0, 0, 255]));
+    assert_eq!(pix.pixel_rgba8(5, 55), Some([255, 255, 255, 255]));
+
+    // Pattern-filled `/ImageMask true` at `x = 10..50, y = 35..55` (`y_px = 5..25`):
+    // `PatRB` has red in `x = 0..20` (`x = 40..50` wraps to `0..10` red) and blue in `x = 20..40`!
+    assert_eq!(pix.pixel_rgba8(15, 15), Some([255, 0, 0, 255]));
+    assert_eq!(pix.pixel_rgba8(25, 15), Some([0, 0, 255, 255]));
+    assert_eq!(sum.images_drawn, 1);
+    assert_eq!(sum.annots_drawn, 1);
+    assert_eq!(pix.pixel_rgba8(49, 48), Some([0, 204, 0, 255]));
+}
+
+#[cfg(feature = "pdfium")]
+#[test]
+#[ignore = "requires libpdfium (run via `just test-pdfium`)"]
+fn pdfium_backend_trait_covers_dpi_premul_transparent_bg_crop_rotate_tile_overhang_and_limits() {
+    use pdf_raster::{BackendError, PdfiumBackend, RenderBackend};
+
+    let backend = PdfiumBackend::from_env().expect("PDF_RASTER_PDFIUM or PDFIUM_LIB_DIR set");
+
+    // Page with `/CropBox [20 10 120 90]` (`100 × 80` cropped view), `/Rotate 90` (-> `80 × 100`),
+    // and a semi-transparent (`0.5 ca`) red square filling the cropped view!
+    let content = b"/GS1 gs 0.8 0 0 rg 20 10 100 80 re f\n";
+    let pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(200), Object::from(200)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "CropBox" => vec![Object::from(20), Object::from(10), Object::from(120), Object::from(90)],
+                "Rotate" => 90,
+                "Resources" => dict! {
+                    "ExtGState" => dict! { "GS1" => dict! { "ca" => 0.5019608 } },
+                },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (4, Object::from(Stream::new(dict! {}, content.to_vec()))),
+    ]);
+
+    let doc: Arc<dyn pdf_raster::RenderedDoc> =
+        Arc::from(backend.open_bytes(Arc::from(pdf), None).unwrap());
+    assert_eq!(doc.page_count(), 1);
+    assert!(matches!(
+        doc.render_page(3, &RenderOpts::default()),
+        Err(BackendError::PageOutOfBounds {
+            page_index: 3,
+            page_count: 1
+        })
+    ));
+
+    // 1. `Viewport::Dpi(72.0)` with `/Rotate 90` + `/CropBox 100×80` -> `80 × 100`!
+    //    Test both `Rgba8Premul` and `Bgra8` over `background: None` (single unpremultiplication!).
+    let mut dpi_premul = RenderOpts::with_viewport(Viewport::Dpi {
+        dpi: 72.0,
+        rotation: Rotation::R0,
+    });
+    dpi_premul.background = None;
+    dpi_premul.format = PixelFormat::Rgba8Premul;
+    let (p_premul, sum_pdfium) = doc.render_page(0, &dpi_premul).unwrap();
+    assert!(!sum_pdfium.reported);
+    assert_eq!((p_premul.width(), p_premul.height()), (80, 100));
+    let raw_premul_idx = (50 * 80 + 40) * 4;
+    let raw_premul = &p_premul.as_bytes()[raw_premul_idx..raw_premul_idx + 4];
+    assert!(
+        (i16::from(raw_premul[0]) - 102).abs() <= 3 && raw_premul[3] == 128,
+        "expected premultiplied [~102, 0, 0, 128], got {raw_premul:?}"
+    );
+
+    let mut dpi_bgra = dpi_premul.clone();
+    dpi_bgra.format = PixelFormat::Bgra8;
+    let (p_bgra, _) = doc.render_page(0, &dpi_bgra).unwrap();
+    let straight_from_bgra = p_bgra.pixel_rgba8(40, 50).unwrap();
+    assert!(
+        (i16::from(straight_from_bgra[0]) - 204).abs() <= 3 && straight_from_bgra[3] == 128,
+        "expected straight [~204, 0, 0, 128] (no double unpremul!), got {straight_from_bgra:?}"
+    );
+
+    // 2. Limit errors (`LimitKind::Pixels`) enforced upfront before PDFium allocation!
+    let mut capped = dpi_bgra.clone();
+    capped.limits.max_pixels = 1_000;
+    assert!(matches!(
+        doc.render_page(0, &capped),
+        Err(BackendError::Raster(Error::Limit(LimitKind::Pixels)))
+    ));
+
+    // 3. `Viewport::Tile` overhang with extra rotation (`R90`) and non-white background
+    //    (`Some([10, 20, 30, 255])`): overhang pixels outside page must equal `[10, 20, 30, 255]`!
+    let mut overhang_tile = RenderOpts::with_viewport(Viewport::Tile {
+        page_width: 100,
+        page_height: 80,
+        x: 70,
+        y: 50,
+        w: 50,
+        h: 50,
+        rotation: Rotation::R90,
+    });
+    overhang_tile.background = Some([10, 20, 30, 255]);
+    let (tile_pix, _) = doc.render_page(0, &overhang_tile).unwrap();
+    assert_eq!(tile_pix.pixel_rgba8(48, 48), Some([10, 20, 30, 255]));
+
+    // 4. Concurrent renders of the SAME `Arc<dyn RenderedDoc>` across 4 OS threads!
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let shared = doc.clone();
+            let opts = dpi_bgra.clone();
+            std::thread::spawn(move || shared.render_page(0, &opts).unwrap().0)
+        })
+        .collect();
+    for h in handles {
+        assert_eq!(h.join().unwrap(), p_bgra);
+    }
+}

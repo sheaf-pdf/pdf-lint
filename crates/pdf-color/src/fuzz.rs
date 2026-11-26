@@ -366,7 +366,7 @@ where
     let mut small = Limits::DEFAULT;
     small.space_depth = 8;
     small.space_visits = 64;
-    small.stream_bytes = 256;
+    small.stream_bytes = 16 * 1024;
     small.sample_values = 512;
     small.postscript_ops = 128;
     small.postscript_stack = 32;
@@ -451,6 +451,17 @@ pub fn counts(data: &[u8]) {
             }
         }
         a_resources(resolve, Some(value)).expect("nothing fails");
+    }
+    if data.len() <= 16 * 1024 {
+        let mut oi_opts = EvalOptions::ISO;
+        oi_opts.output_intent_profile = Some(data);
+        for dev in [Space::DeviceGray, Space::DeviceRGB, Space::DeviceCMYK] {
+            if let Ok(Some(prep)) =
+                PreparedSpace::from_space(with_streams, &dev, &oi_opts, &Limits::DEFAULT, &mut ())
+            {
+                let _ = prep.eval(&[0.2, 0.4, 0.6, 0.1], &Limits::DEFAULT);
+            }
+        }
     }
     assert_eq!(a_resources(resolve, None), Ok(None));
 }

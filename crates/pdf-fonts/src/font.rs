@@ -129,7 +129,13 @@ impl FallbackProgram {
 
     /// Appends the contour of `ch` in glyph units (`1000.0` = 1 em) to `out`
     /// and returns its horizontal advance in glyph units, or `None` if `ch` has
-    /// no glyph in this program.
+    /// no glyph or no defined advance width in this program (leaving `out`
+    /// unchanged).
+    ///
+    /// When `hint_ppem` is `Some(p)` with `p >= 4.0`, TrueType (`glyf`) contours
+    /// are grid-fitted at `p.min(512.0)` ppem (`Some(p)` with `p < 4.0` disables
+    /// hinting); when `hint_ppem` is `None`, contours are unhinted except for
+    /// FreeType's tricky CJK TrueType families, which are hinted at `16.0` ppem.
     pub fn outline_char(
         &self,
         ch: char,
@@ -950,10 +956,15 @@ impl Font {
     /// Appends the contour of `code`'s glyph in glyph units (`1000.0` = 1 em)
     /// to `out` when this font embeds a readable program.
     ///
+    /// When `hint_ppem` is `Some(p)` with `p >= 4.0`, TrueType (`glyf`) contours
+    /// are grid-fitted at `p.min(512.0)` ppem (`Some(p)` with `p < 4.0` disables
+    /// hinting); when `hint_ppem` is `None`, contours are unhinted except for
+    /// FreeType's tricky CJK TrueType families, which are hinted at `16.0` ppem.
+    ///
     /// Returns `true` when `code` resolved to a valid glyph in the embedded
     /// program (including whitespace glyphs that emit zero contour verbs), and
     /// `false` when no program was read, `code` has no glyph, or evaluation
-    /// exceeded resource bounds.
+    /// exceeded resource bounds (leaving `out` unchanged).
     pub fn outline(&self, code: u32, hint_ppem: Option<f32>, out: &mut Vec<OutlineVerb>) -> bool {
         match &self.outlines {
             Outlines::None => false,
@@ -1377,11 +1388,11 @@ fn standard_named(name: &[u8]) -> Option<Std14> {
 }
 
 /// Extracts [`FontStyle`] classification from descriptor `/Flags`,
-/// `/FontWeight`, `/BaseFont` name substrings, and [`Std14`].
+/// `/FontWeight`, `/BaseFont` name substrings (past any `ABCDEF+` subset tag),
+/// and [`Std14`], without emitting faults for auxiliary entries.
 fn classify_style<'o, O, S>(
     reader: &Reader<'_, O, S>,
     descriptor: Option<&'o Dict>,
-    descriptor_id: Option<ObjectId>,
     name: Option<&[u8]>,
     std14: Option<Std14>,
     flags: i32,
@@ -1396,9 +1407,21 @@ where
             .any(|w| w.eq_ignore_ascii_case(needle))
     };
     let name_bytes = name.unwrap_or_default();
-    let weight = descriptor.map_or(0, |d| {
-        reader.integer_for(d, b"FontWeight", 0, descriptor_id)
+    let bare = match name_bytes {
+        [a, b, c, d, e, f, b'+', rest @ ..]
+            if [a, b, c, d, e, f].into_iter().all(u8::is_ascii_uppercase) =>
+        {
+            rest
+        }
+        _ => name_bytes,
+    };
+    let has_mono = bare.windows(4).enumerate().any(|(i, w)| {
+        w.eq_ignore_ascii_case(b"Mono")
+            && !bare[i + 4..]
+                .get(..4)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(b"type"))
     });
+    let weight = descriptor.map_or(0, |d| reader.quiet_integer_for(d, b"FontWeight", 0));
     let std_fixed = std14.is_some_and(fixed_pitch);
     let std_serif = matches!(
         std14,
@@ -1427,27 +1450,23 @@ where
         )
     );
     FontStyle {
-        fixed_pitch: flags & 1 != 0
-            || std_fixed
-            || has_ci(name_bytes, b"Mono")
-            || has_ci(name_bytes, b"Courier"),
+        fixed_pitch: flags & 1 != 0 || std_fixed || has_mono || has_ci(bare, b"Courier"),
         serif: flags & 2 != 0
             || std_serif
-            || has_ci(name_bytes, b"Times")
-            || has_ci(name_bytes, b"Serif")
-            || has_ci(name_bytes, b"Mincho"),
+            || (!has_ci(bare, b"Sans")
+                && (has_ci(bare, b"Times") || has_ci(bare, b"Serif") || has_ci(bare, b"Mincho"))),
         symbolic: flags & SYMBOLIC != 0
             || matches!(std14, Some(Std14::Symbol | Std14::ZapfDingbats)),
         italic: flags & (1 << 6) != 0
             || std_italic
-            || has_ci(name_bytes, b"Italic")
-            || has_ci(name_bytes, b"Oblique"),
+            || has_ci(bare, b"Italic")
+            || has_ci(bare, b"Oblique"),
         bold: flags & (1 << 18) != 0
             || weight >= 600
             || std_bold
-            || has_ci(name_bytes, b"Bold")
-            || has_ci(name_bytes, b"Black")
-            || has_ci(name_bytes, b"Heavy"),
+            || has_ci(bare, b"Bold")
+            || has_ci(bare, b"Black")
+            || has_ci(bare, b"Heavy"),
     }
 }
 
@@ -1669,14 +1688,7 @@ where
     let (metrics, guessed, descriptor_heights) =
         heights(reader, descriptor, descriptor_id, std14, program_heights);
     approx.heights = guessed;
-    let style = classify_style(
-        reader,
-        descriptor,
-        descriptor_id,
-        encoded.base_font,
-        std14,
-        encoded.flags,
-    );
+    let style = classify_style(reader, descriptor, encoded.base_font, std14, encoded.flags);
     Ok(Font {
         id: None,
         loaded: true,
@@ -1768,10 +1780,9 @@ where
     let style = classify_style(
         reader,
         descriptor,
-        descriptor_id,
         reader.byte_string(font, b"BaseFont"),
         None,
-        descriptor.map_or(0, |d| reader.integer_for(d, b"Flags", 0, descriptor_id)),
+        descriptor.map_or(0, |d| reader.quiet_integer_for(d, b"Flags", 0)),
     );
     Font {
         id: None,
@@ -2214,10 +2225,9 @@ where
     let style = classify_style(
         reader,
         descriptor,
-        descriptor_id,
         named,
         None,
-        descriptor.map_or(0, |d| reader.integer_for(d, b"Flags", 0, descriptor_id)),
+        descriptor.map_or(0, |d| reader.quiet_integer_for(d, b"Flags", 0)),
     );
     let mut read = Font {
         id: None,

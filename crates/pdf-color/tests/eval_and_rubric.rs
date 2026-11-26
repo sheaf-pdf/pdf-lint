@@ -722,3 +722,257 @@ fn icc_based_at_space_depth_limit_never_panics_and_stitching_shares_sample_budge
         "expected TooManySamples fault on Type 3 sample amplification: {fn_faults:?}"
     );
 }
+
+#[test]
+fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
+    use std::collections::BTreeMap;
+
+    // 1. Tint transform with MORE outputs than the alternate space (`[/Separation /Spot /DeviceRGB f]`
+    //    where `f` has 5 outputs) evaluates using the first 3 outputs rather than failing!
+    let mut store: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let tint_5_out = Object::from(dict! {
+        "FunctionType" => 2,
+        "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+        "Range" => vec![
+            Object::from(0.0), Object::from(1.0),
+            Object::from(0.0), Object::from(1.0),
+            Object::from(0.0), Object::from(1.0),
+            Object::from(0.0), Object::from(1.0),
+            Object::from(0.0), Object::from(1.0),
+        ],
+        "C0" => vec![
+            Object::from(0.0), Object::from(0.0), Object::from(0.0),
+            Object::from(0.9), Object::from(0.9),
+        ],
+        "C1" => vec![
+            Object::from(1.0), Object::from(0.5), Object::from(0.0),
+            Object::from(0.2), Object::from(0.3),
+        ],
+        "N" => 1,
+    });
+    let sep = Object::from(vec![
+        Object::name("Separation"),
+        Object::name("SpotOrange"),
+        Object::name("DeviceRGB"),
+        tint_5_out,
+    ]);
+    let streams = WithStreams::new(&store, |id, _| {
+        Err(Unreadable::new(id, Why::Damaged, "none"))
+    });
+    let prep_sep =
+        PreparedSpace::prepare(streams, &sep, &EvalOptions::ISO, &Limits::DEFAULT, &mut ())
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        prep_sep.eval_srgb8(&[1.0], &Limits::DEFAULT),
+        Some([255, 128, 0])
+    );
+
+    // 2. ISO 32000-2 §8.6.5.6 `/Default*` substitution:
+    //    - `Lab` is FORBIDDEN as `/DefaultRGB` (falls back to unprofiled `DeviceRGB`).
+    //    - `Separation` IS ALLOWED as `/DefaultGray` (1 component).
+    let lab_space = Object::from(vec![
+        Object::name("Lab"),
+        Object::from(dict! {
+            "WhitePoint" => vec![Object::from(0.9505), Object::from(1.0), Object::from(1.089)],
+        }),
+    ]);
+    let mut opts_lab = EvalOptions::ISO;
+    opts_lab.default_rgb = Some(&lab_space);
+    let prep_rgb = PreparedSpace::prepare(
+        streams,
+        &Object::name("DeviceRGB"),
+        &opts_lab,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    // Unprofiled DeviceRGB `[0.0, 1.0, 0.0]` -> `[0, 255, 0]` (whereas Lab `[0, 1, 0]` would be near black!).
+    assert_eq!(
+        prep_rgb.eval_srgb8(&[0.0, 1.0, 0.0], &Limits::DEFAULT),
+        Some([0, 255, 0])
+    );
+
+    let sep_gray = Object::from(vec![
+        Object::name("Separation"),
+        Object::name("BlackInk"),
+        Object::name("DeviceRGB"),
+        Object::from(dict! {
+            "FunctionType" => 2,
+            "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+            "C0" => vec![Object::from(0.0), Object::from(0.0), Object::from(1.0)],
+            "C1" => vec![Object::from(1.0), Object::from(0.0), Object::from(0.0)],
+            "N" => 1,
+        }),
+    ]);
+    let mut opts_sep = EvalOptions::ISO;
+    opts_sep.default_gray = Some(&sep_gray);
+    let prep_def_gray = PreparedSpace::prepare(
+        streams,
+        &Object::name("DeviceGray"),
+        &opts_sep,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        prep_def_gray.eval_srgb8(&[1.0], &Limits::DEFAULT),
+        Some([255, 0, 0])
+    );
+
+    // 3. Tiny non-zero domain (`[0.0, 1e-8]`) and stitching boundaries (`x == Bounds[i]` and `x == Domain[1]`),
+    //    plus indirect `ObjectId` stream decoding on Type 0 and Type 4 functions.
+    store.insert(
+        ObjectId::new(20, 0),
+        Object::from(Stream::new(
+            dict! {
+                "FunctionType" => 0,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0e-8)],
+                "Range" => vec![Object::from(0.0), Object::from(1.0)],
+                "Size" => vec![Object::from(2)],
+                "BitsPerSample" => 8,
+            },
+            vec![0_u8, 255_u8],
+        )),
+    );
+    store.insert(
+        ObjectId::new(21, 0),
+        Object::from(Stream::new(
+            dict! {
+                "FunctionType" => 4,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "Range" => vec![Object::from(-1.0e38), Object::from(1.0e38)],
+            },
+            // Exercise `idiv` of `i32::MIN` by `-1`? Wait: test both valid int overflow promotion
+            // (`2147483647 1 add`), negative `roll` (`10 20 30 3 -1 roll pop pop`), and `Bounds`!
+            b"{ pop 2147483647 1 add 10 20 30 3 -1 roll pop pop add }".to_vec(),
+        )),
+    );
+    store.insert(
+        ObjectId::new(22, 0),
+        Object::from(Stream::new(
+            dict! {
+                "FunctionType" => 4,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "Range" => vec![Object::from(-1.0e38), Object::from(1.0e38)],
+            },
+            // `i32::MIN` (-2147483648) `idiv` by `-1` never panics!
+            b"{ pop -2147483647 1 sub -1 idiv }".to_vec(),
+        )),
+    );
+    store.insert(
+        ObjectId::new(23, 0),
+        Object::from(Stream::new(
+            dict! {
+                "FunctionType" => 4,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "Range" => vec![Object::from(0.0), Object::from(1.0)],
+            },
+            // Runaway self-recursion through `dup true exch if` is cleanly stopped by caps!
+            b"{ pop { dup true exch if } dup true exch if }".to_vec(),
+        )),
+    );
+    let by_id_streams = WithStreams::new(&store, |id, limit| {
+        let Some(s) = store.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "missing"));
+        };
+        let bytes = s.data.bytes().unwrap();
+        if bytes.len() > limit {
+            return Err(Unreadable::new(id, Why::Limit, "past limit"));
+        }
+        Ok(bytes.to_vec())
+    });
+
+    let tiny_fn = Function::read(
+        by_id_streams,
+        &Object::reference(20),
+        Rules::Iso,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    let mid = tiny_fn.eval_vec(&[0.5e-8], &Limits::DEFAULT).unwrap()[0];
+    assert!(
+        (mid - 0.5).abs() < 0.02,
+        "tiny domain [0, 1e-8] must interpolate to ~0.5 at midpoint, got {mid}"
+    );
+
+    // Stitching at `x == Bounds[0]` (`0.5` selects subfunction 1 per ISO §7.10.4 `[Bounds[0], Domain[1]]`)
+    // and at `x == Domain[1]` (`1.0`).
+    let stitch_bounds = Object::from(dict! {
+        "FunctionType" => 3,
+        "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+        "Functions" => vec![
+            Object::from(dict! {
+                "FunctionType" => 2,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "C0" => vec![Object::from(0.1)],
+                "C1" => vec![Object::from(0.2)],
+                "N" => 1,
+            }),
+            Object::from(dict! {
+                "FunctionType" => 2,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "C0" => vec![Object::from(0.7)],
+                "C1" => vec![Object::from(0.9)],
+                "N" => 1,
+            }),
+        ],
+        "Bounds" => vec![Object::from(0.5)],
+        "Encode" => vec![
+            Object::from(0.0), Object::from(1.0),
+            Object::from(0.0), Object::from(1.0),
+        ],
+    });
+    let st_fn = Function::read(
+        by_id_streams,
+        &stitch_bounds,
+        Rules::Iso,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    assert!((st_fn.eval_vec(&[0.5], &Limits::DEFAULT).unwrap()[0] - 0.7).abs() < 1e-5);
+    assert!((st_fn.eval_vec(&[1.0], &Limits::DEFAULT).unwrap()[0] - 0.9).abs() < 1e-5);
+
+    // PostScript overflow promotion + negative `roll` (`[10, 20, 30] 3 -1 roll` -> `[20, 30, 10]`, top is `10`?
+    // Wait: `-1` roll shifts left by 1 (`k = (-1).rem_euclid(3) = 2` right-rotates `[10, 20, 30]` -> `[20, 30, 10]`,
+    // `pop pop` leaves `20`, `2147483648.0 + 20.0`!).
+    let ps_ok = Function::read(
+        by_id_streams,
+        &Object::reference(21),
+        Rules::Iso,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    let ps_val = ps_ok.eval_vec(&[0.0], &Limits::DEFAULT).unwrap()[0];
+    assert!(ps_val > 2.0e9);
+
+    let ps_min_idiv = Function::read(
+        by_id_streams,
+        &Object::reference(22),
+        Rules::Iso,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    let _ = ps_min_idiv.eval_vec(&[0.0], &Limits::DEFAULT);
+
+    let ps_rec = Function::read(
+        by_id_streams,
+        &Object::reference(23),
+        Rules::Iso,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(ps_rec.eval_vec(&[0.0], &Limits::DEFAULT).is_none());
+}

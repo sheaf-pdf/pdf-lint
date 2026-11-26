@@ -279,6 +279,16 @@ impl PreparedSpace {
         self.components
     }
 
+    /// Underlying base [`PreparedSpace`] when `self.family()` is [`Family::Indexed`], or `None`
+    /// otherwise.
+    #[must_use]
+    pub fn base_space(&self) -> Option<&PreparedSpace> {
+        match &self.kind {
+            PreparedKind::Indexed { base, .. } => Some(base),
+            _ => None,
+        }
+    }
+
     /// Pre-resolved default `/Decode` intervals `(min, max)` for an image of
     /// `bits_per_component` (`1..=32`) in this space (ISO 32000-2, Table 90).
     #[must_use]
@@ -435,10 +445,15 @@ impl PreparedSpace {
                     for (i, &(r0, r1)) in range.iter().enumerate() {
                         let clamped = clamp_pair(c[i], r0, r1);
                         let span = r1 - r0;
-                        src[i] = if span.abs() <= f32::EPSILON {
+                        src[i] = if span == 0.0 {
                             0.0
                         } else {
-                            ((clamped - r0) / span).clamp(0.0, 1.0)
+                            let v = (clamped - r0) / span;
+                            if v.is_finite() {
+                                v.clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            }
                         };
                     }
                 }
@@ -501,19 +516,20 @@ impl PreparedSpace {
                 if *all_none && rules_override.unwrap_or(Rules::Iso) == Rules::Iso {
                     return Some(Paint::None);
                 }
-                let out_n = alternate.components() as usize;
+                let alt_n = alternate.components() as usize;
+                let func_n = (tint.outputs() as usize).max(alt_n);
                 let mut buf = [0.0_f32; 16];
                 let mut heap = Vec::new();
-                let alt_in: &mut [f32] = if out_n <= buf.len() {
-                    &mut buf[..out_n]
+                let func_out: &mut [f32] = if func_n <= buf.len() {
+                    &mut buf[..func_n]
                 } else {
-                    heap.resize(out_n, 0.0);
+                    heap.resize(func_n, 0.0);
                     &mut heap
                 };
-                if !tint.eval(c, alt_in, limits) {
+                if !tint.eval(c, func_out, limits) {
                     return None;
                 }
-                alternate.eval_inner(alt_in, rules_override, limits)
+                alternate.eval_inner(&func_out[..alt_n], rules_override, limits)
             }
         }
     }
@@ -638,11 +654,16 @@ where
     ) -> Result<Option<PreparedSpace>, Unreadable> {
         let decode_ranges = Some(vec![(0.0, 1.0); components as usize]);
 
-        // 1. ISO 32000-2 §8.6.5.6 `/DefaultGray`, `/DefaultRGB`, `/DefaultCMYK` substitution.
+        // 1. ISO 32000-2 §8.6.5.6 `/DefaultGray`, `/DefaultRGB`, `/DefaultCMYK` substitution:
+        //    any color space with matching component count other than `Lab`, `Indexed`, or
+        //    `Pattern` may substitute for an unprofiled device space.
         if self.options.rules == Rules::Iso
             && let Some(def_obj) = default_override
             && let Some(def_space) = Space::read(self.objects, def_obj, self.limits, self.sink)?
-            && def_space.family().is_cie()
+            && !matches!(
+                def_space.family(),
+                Family::Lab | Family::Indexed | Family::Pattern
+            )
             && def_space.components() == Some(components)
             && let Some(target) = self.build(&def_space, depth + 1, false)?
         {

@@ -16,6 +16,7 @@ use crate::samples::SampleData;
 pub(crate) struct JpxDecoded {
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) raw_depth: u8,
     pub(crate) bpc: u8,
     pub(crate) components: u8,
     pub(crate) samples: SampleData,
@@ -32,6 +33,7 @@ pub(crate) fn decode_jpx<S>(
     dict_width: u32,
     dict_height: u32,
     pdf_space: Option<&PreparedSpace>,
+    is_stencil: bool,
     smask_in_data: SMaskInData,
     eval_opts: &EvalOptions<'_>,
     limits: &Limits,
@@ -104,7 +106,7 @@ where
         })?;
 
         let embedded_alpha = match (smask_in_data, alpha_plane) {
-            (SMaskInData::Separate | SMaskInData::Premultiplied, Some(a_comp)) => {
+            (SMaskInData::Separate | SMaskInData::Premultiplied, Some(a_comp)) if !is_stencil => {
                 let a_max = ((1_u32 << a_comp.bit_depth().clamp(1, 24)) - 1) as f32;
                 let a_scale = if a_max > 0.0 { 255.0 / a_max } else { 0.0 };
                 let mut alpha = Vec::with_capacity(pixel_count);
@@ -116,13 +118,16 @@ where
             _ => None,
         };
 
-        let unpremultiply = smask_in_data == SMaskInData::Premultiplied && embedded_alpha.is_some();
+        let unpremultiply = !pdf_is_indexed
+            && smask_in_data == SMaskInData::Premultiplied
+            && embedded_alpha.is_some();
         let samples = pack_jpx_planes(
             color_planes,
             w,
             h,
             num_color,
             target_bpc,
+            !pdf_is_indexed,
             if unpremultiply {
                 embedded_alpha.as_deref()
             } else {
@@ -134,6 +139,7 @@ where
         Ok(RawJpxPlanes {
             width: w,
             height: h,
+            raw_depth,
             bpc: target_bpc,
             components: num_color,
             jpx_cs,
@@ -156,7 +162,9 @@ where
         sink.fault(place, Fault::DimensionMismatch);
     }
 
-    let embedded_space = if let Some(space) = pdf_space {
+    let embedded_space = if is_stencil {
+        None
+    } else if let Some(space) = pdf_space {
         if u32::from(planes.components) != space.components() {
             sink.fault(place, Fault::ComponentMismatch);
         }
@@ -174,6 +182,7 @@ where
     Ok(JpxDecoded {
         width: planes.width,
         height: planes.height,
+        raw_depth: planes.raw_depth,
         bpc: planes.bpc,
         components: planes.components,
         samples: planes.samples,
@@ -185,6 +194,7 @@ where
 struct RawJpxPlanes {
     width: u32,
     height: u32,
+    raw_depth: u8,
     bpc: u8,
     components: u8,
     jpx_cs: JpxColorSpace,
@@ -202,12 +212,14 @@ const fn normalize_pdf_bpc(depth: u8) -> u8 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_jpx_planes(
     planes: &[hayro_jpeg2000::ComponentData],
     width: u32,
     height: u32,
     components: u8,
     target_bpc: u8,
+    rescale_to_target: bool,
     unpremul_alpha: Option<&[u8]>,
     limits: &Limits,
 ) -> Result<SampleData, Error> {
@@ -218,6 +230,9 @@ fn pack_jpx_planes(
     let scales: Vec<f32> = planes
         .iter()
         .map(|p| {
+            if !rescale_to_target {
+                return 1.0;
+            }
             let src_max = ((1_u32 << p.bit_depth().clamp(1, 24)) - 1) as f32;
             if src_max > 0.0 {
                 target_max / src_max

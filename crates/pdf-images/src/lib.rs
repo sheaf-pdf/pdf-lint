@@ -29,9 +29,16 @@
 //!   and embedded JP2 color specifications).
 //! - **Redaction pixel scrubbing & clean re-encoding ([`RawImage::fill_rect_raw`], [`encode_raw_flate`], [`encode_rgba_flate`], [`encode_jpeg`]):**
 //!   Scrubs rectangular regions directly in native sample space and re-encodes
-//!   cleanly via `FlateDecode` + PNG `Sub` prediction or pure-Rust baseline
-//!   `DCTDecode` (`jpeg-encoder`) with no EXIF, XMP, IPTC, comment, or JBIG2
-//!   dictionary leakage.
+//!   cleanly via `FlateDecode` + PNG `Sub` prediction (preserving `/Mask`,
+//!   `/SMask`, and `/OC`) or pure-Rust baseline `DCTDecode` (`jpeg-encoder`)
+//!   with no EXIF, XMP, IPTC, comment, or JBIG2 dictionary leakage.
+//! - **Bounded resources & third-party codec isolation ([`Limits`], [`Fault`]):**
+//!   Dimensions, pixel counts, and byte budgets are checked before allocating
+//!   buffers, and internal panics in third-party decoders (`zune-jpeg`,
+//!   `hayro-jpeg2000`, `hayro-ccitt`, `hayro-jbig2`) are converted into
+//!   [`Error::Codec`] via `std::panic::catch_unwind` under default
+//!   `panic = "unwind"` builds (note that `panic = "abort"` binaries bypass
+//!   unwind guards).
 //!
 //! # Example
 //!
@@ -70,7 +77,7 @@
 //!     &Limits::DEFAULT,
 //! )
 //! .unwrap();
-//! raw.fill_rect_raw(0, 0, 2, 2, &[0, 0, 0]);
+//! raw.fill_rect_raw(0, 0, 2, 2, &[0, 0, 0]).unwrap();
 //! let clean_flate = encode_raw_flate(&raw, None, Level::DEFAULT).unwrap();
 //!
 //! // Tier 2: evaluate the scrubbed Flate Image XObject to straight-alpha RGBA8.
@@ -109,7 +116,7 @@ pub use encode::{
     EncodedImage, JpegColorSpace, encode_jpeg, encode_jpeg_bytes, encode_raw_flate,
     encode_rgba_flate,
 };
-pub use error::{EncodeError, Error};
+pub use error::{EncodeError, Error, ScrubError};
 pub use fault::Fault;
 pub use header::{ImageCodec, ImageMeta, MaskSpec, RenderingIntent, SMaskInData};
 pub use limits::{LimitKind, Limits};
@@ -132,6 +139,7 @@ mod doc_tests {
         check::<LimitKind>();
         check::<Error>();
         check::<EncodeError>();
+        check::<ScrubError>();
         check::<Fault>();
         check::<ImageCodec>();
         check::<ImageMeta>();

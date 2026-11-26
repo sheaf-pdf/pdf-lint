@@ -779,18 +779,30 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
         );
     }
 
-    // Include an overhang tile (`x = 140, w = 100` past `page_width = 200`) to verify
-    // single-buffer pre-fill clearing!
-    for (tx, ty) in [(0, 0), (100, 0), (0, 80), (100, 80), (140, 100)] {
+    // Include an overhang tile (`x = 140, w = 100` past `page_width = 200`) with non-white
+    // background and rotation to verify single-buffer pre-fill clearing across both backends!
+    for (tx, ty, rot, bg) in [
+        (0, 0, Rotation::R0, Some([255, 255, 255, 255])),
+        (100, 0, Rotation::R0, Some([255, 255, 255, 255])),
+        (0, 80, Rotation::R0, Some([255, 255, 255, 255])),
+        (100, 80, Rotation::R0, Some([255, 255, 255, 255])),
+        (140, 100, Rotation::R0, Some([255, 255, 255, 255])),
+        (150, 130, Rotation::R90, Some([25, 35, 45, 255])),
+    ] {
+        let (pw, ph) = match rot {
+            Rotation::R90 | Rotation::R270 => (160, 200),
+            _ => (200, 160),
+        };
         let mut tile_opts = RenderOpts::with_viewport(Viewport::Tile {
-            page_width: 200,
-            page_height: 160,
+            page_width: pw,
+            page_height: ph,
             x: tx,
             y: ty,
             w: 100,
             h: 80,
-            rotation: Rotation::R0,
+            rotation: rot,
         });
+        tile_opts.background = bg;
         tile_opts.anti_alias = AntiAlias::NONE;
         let outcome = compare_backends(
             &rust,
@@ -804,7 +816,7 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
         .unwrap();
         assert!(
             outcome.passed,
-            "tile ({tx}, {ty}) failed ConformingCore rubric: {outcome:?}"
+            "tile ({tx}, {ty}, {rot:?}) failed ConformingCore rubric: {outcome:?}"
         );
     }
 

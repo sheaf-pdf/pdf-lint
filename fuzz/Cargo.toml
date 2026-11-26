@@ -218,7 +218,7 @@ pdf-arlington = { path = "../crates/pdf-arlington" }
 # With `image-ends`, so the content target can read with DCT and CCITTFax
 # data decoded to find where an inline image's ends, as it asks to.
 pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
-pdf-color = { path = "../crates/pdf-color" }
+pdf-color = { path = "../crates/pdf-color", features = ["icc"] }
 # With the test writer, so the crypt target makes new files from the input's
 # draws, and the write target new encryptions.
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["insecure-test-writer"] }

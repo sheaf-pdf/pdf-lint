@@ -573,7 +573,31 @@ fn extract_pdf_page_geom(page: &PdfPage<'_>) -> PageGeom {
     let pdfium_w = page.width().value;
     let pdfium_h = page.height().value;
 
-    let crop_box = page.boundaries().crop().ok().map(|b| {
+    // `FPDF_GetPageBoundingBox` (`boundaries().bounding()`) resolves inherited
+    // `/MediaBox` and `/CropBox` entries up the `/Pages` tree, whereas
+    // `FPDFPage_GetMediaBox` (`boundaries().media()`) inspects the leaf `/Page`
+    // dictionary alone.
+    let effective_box = page
+        .boundaries()
+        .bounding()
+        .ok()
+        .map(|b| {
+            Rect::new(
+                b.bounds.left().value,
+                b.bounds.bottom().value,
+                b.bounds.right().value,
+                b.bounds.top().value,
+            )
+        })
+        .unwrap_or_else(|| {
+            let (unrot_w, unrot_h) = match rotation {
+                Rotation::R90 | Rotation::R270 => (pdfium_h, pdfium_w),
+                Rotation::R0 | Rotation::R180 => (pdfium_w, pdfium_h),
+            };
+            Rect::new(0.0, 0.0, unrot_w, unrot_h)
+        });
+
+    let media_box = page.boundaries().media().ok().map_or(effective_box, |b| {
         Rect::new(
             b.bounds.left().value,
             b.bounds.bottom().value,
@@ -582,28 +606,5 @@ fn extract_pdf_page_geom(page: &PdfPage<'_>) -> PageGeom {
         )
     });
 
-    let media_box = if let Ok(b) = page.boundaries().media() {
-        Rect::new(
-            b.bounds.left().value,
-            b.bounds.bottom().value,
-            b.bounds.right().value,
-            b.bounds.top().value,
-        )
-    } else {
-        let (unrot_w, unrot_h) = match rotation {
-            Rotation::R90 | Rotation::R270 => (pdfium_h, pdfium_w),
-            Rotation::R0 | Rotation::R180 => (pdfium_w, pdfium_h),
-        };
-        Rect::new(0.0, 0.0, unrot_w, unrot_h)
-    };
-
-    let mut geom = PageGeom::new(media_box, crop_box, rotation);
-    let unscaled_w = geom.view_size().width;
-    if unscaled_w > 0.0 && pdfium_w > 0.0 && pdfium_w.is_finite() {
-        let ratio = pdfium_w / unscaled_w;
-        if (ratio - 1.0).abs() > 1e-4 && ratio.is_finite() {
-            geom.user_unit = ratio;
-        }
-    }
-    geom
+    PageGeom::new(media_box, Some(effective_box), rotation)
 }

@@ -39,6 +39,14 @@
 //!     `/Annots` (`pdf-annots`), and interactive `/AcroForm` widgets
 //!     (`pdf-forms`), with stateless [`Appearances::Synthesize`] or
 //!     [`Appearances::WrittenOnly`] modes.
+//! - **Resource Budgets & Unwind Note:**
+//!   Coordinates, dash expansions, layer nesting, and offscreen buffers are
+//!   clamped and budgeted upfront before invoking the software 2D rasterizer.
+//!   As defense-in-depth against bugs in third-party rasterizer or image-codec
+//!   dependencies, internal rasterizer calls are additionally guarded with
+//!   `std::panic::catch_unwind` (converting any unexpected panic into
+//!   [`Error::RasterizerPanic`]); under `panic = "abort"` (including libFuzzer
+//!   harnesses), an upstream dependency panic will abort instead of unwinding.
 //!
 //! # Example
 //!

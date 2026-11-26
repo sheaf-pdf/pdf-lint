@@ -2,7 +2,9 @@
 //!
 //! No `vello_cpu`, `kurbo`, or `peniko` type ever appears in `pdf-raster`'s
 //! public API. Coordinates are sanitized and clamped before reaching `kurbo`
-//! curve flatteners, and final scene rasterization runs inside `catch_unwind`.
+//! curve flatteners, clip/layer stacks are depth-tracked so pops cannot
+//! underflow, and eager strip/flattening calls as well as final scene
+//! rasterization run inside `catch_unwind`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -47,6 +49,9 @@ pub(crate) struct Canvas2d {
     ctx: RenderContext,
     width: u16,
     height: u16,
+    clip_depth: usize,
+    layer_depth: usize,
+    panicked: bool,
 }
 
 impl Canvas2d {
@@ -67,7 +72,22 @@ impl Canvas2d {
             ctx: RenderContext::new_with(w, h, settings),
             width: w,
             height: h,
+            clip_depth: 0,
+            layer_depth: 0,
+            panicked: false,
         })
+    }
+
+    fn run_guarded(&mut self, f: impl FnOnce(&mut RenderContext)) -> bool {
+        if self.panicked {
+            return false;
+        }
+        let ctx = &mut self.ctx;
+        if catch_unwind(AssertUnwindSafe(|| f(ctx))).is_err() {
+            self.panicked = true;
+            return false;
+        }
+        true
     }
 
     pub(crate) const fn width(&self) -> u16 {
@@ -79,43 +99,73 @@ impl Canvas2d {
     }
 
     pub(crate) fn set_anti_alias(&mut self, enabled: bool) {
-        self.ctx
-            .set_aliasing_threshold(if enabled { None } else { Some(128) });
+        if !self.panicked {
+            self.ctx
+                .set_aliasing_threshold(if enabled { None } else { Some(128) });
+        }
     }
 
     pub(crate) fn set_transform(&mut self, m: Matrix) {
-        self.ctx.set_transform(matrix_to_affine(m));
+        if !self.panicked {
+            self.ctx.set_transform(matrix_to_affine(m));
+        }
     }
 
     pub(crate) fn set_fill_rule(&mut self, rule: FillRule) {
-        self.ctx.set_fill_rule(fill_rule_to_peniko(rule));
+        if !self.panicked {
+            self.ctx.set_fill_rule(fill_rule_to_peniko(rule));
+        }
     }
 
     pub(crate) fn set_blend_mode(&mut self, mode: &BlendState) {
-        self.ctx.set_blend_mode(blend_to_peniko(mode));
+        if !self.panicked {
+            self.ctx.set_blend_mode(blend_to_peniko(mode));
+        }
     }
 
     pub(crate) fn set_solid_rgba8(&mut self, [r, g, b, a]: [u8; 4]) {
-        self.ctx.reset_paint_transform();
-        self.ctx.reset_tint();
-        self.ctx
-            .set_paint(AlphaColor::<Srgb>::from_rgba8(r, g, b, a));
+        if !self.panicked {
+            self.ctx.reset_paint_transform();
+            self.ctx.reset_tint();
+            self.ctx
+                .set_paint(AlphaColor::<Srgb>::from_rgba8(r, g, b, a));
+        }
     }
 
     pub(crate) fn set_tiling_paint(&mut self, tile: Arc<VelloPixmap>, paint_transform: Matrix) {
-        self.ctx.reset_tint();
-        let brush = Image {
-            image: ImageSource::Pixmap(tile),
-            sampler: ImageSampler {
-                x_extend: Extend::Repeat,
-                y_extend: Extend::Repeat,
-                quality: ImageQuality::Medium,
-                alpha: 1.0,
-            },
-        };
-        self.ctx.set_paint(brush);
-        self.ctx
-            .set_paint_transform(matrix_to_affine(paint_transform));
+        if !self.panicked {
+            self.ctx.reset_tint();
+            let brush = Image {
+                image: ImageSource::Pixmap(tile),
+                sampler: ImageSampler {
+                    x_extend: Extend::Repeat,
+                    y_extend: Extend::Repeat,
+                    quality: ImageQuality::Medium,
+                    alpha: 1.0,
+                },
+            };
+            self.ctx.set_paint(brush);
+            self.ctx
+                .set_paint_transform(matrix_to_affine(paint_transform));
+        }
+    }
+
+    pub(crate) fn set_shading_paint(&mut self, shading: Arc<VelloPixmap>, paint_transform: Matrix) {
+        if !self.panicked {
+            self.ctx.reset_tint();
+            let brush = Image {
+                image: ImageSource::Pixmap(shading),
+                sampler: ImageSampler {
+                    x_extend: Extend::Pad,
+                    y_extend: Extend::Pad,
+                    quality: ImageQuality::Medium,
+                    alpha: 1.0,
+                },
+            };
+            self.ctx.set_paint(brush);
+            self.ctx
+                .set_paint_transform(matrix_to_affine(paint_transform));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -129,6 +179,9 @@ impl Canvas2d {
         ctm_to_device: Matrix,
         path_extent: f64,
     ) {
+        if self.panicked {
+            return;
+        }
         // ISO 32000-2 §8.4.3.2: a line width of 0 denotes the thinnest line
         // (~1 device pixel) that can be rendered at device resolution.
         let effective_width = if line_width.abs() <= 1e-6 {
@@ -180,30 +233,39 @@ impl Canvas2d {
 
     pub(crate) fn fill_bez_path(&mut self, path: &BezPath) {
         if !path.is_empty() {
-            self.ctx.fill_path(path);
+            self.run_guarded(|ctx| ctx.fill_path(path));
         }
     }
 
     pub(crate) fn stroke_bez_path(&mut self, path: &BezPath) {
         if !path.is_empty() {
-            self.ctx.stroke_path(path);
+            self.run_guarded(|ctx| ctx.stroke_path(path));
         }
     }
 
     pub(crate) fn push_clip(&mut self, path: &BezPath, rule: FillRule, transform: Matrix) {
-        self.ctx.set_transform(matrix_to_affine(transform));
-        self.ctx.set_fill_rule(fill_rule_to_peniko(rule));
-        self.ctx.push_clip_path(path);
+        if self.run_guarded(|ctx| {
+            ctx.set_transform(matrix_to_affine(transform));
+            ctx.set_fill_rule(fill_rule_to_peniko(rule));
+            ctx.push_clip_path(path);
+        }) {
+            self.clip_depth += 1;
+        }
     }
 
     pub(crate) fn pop_clip(&mut self) {
-        self.ctx.pop_clip();
+        if self.clip_depth > 0 {
+            self.clip_depth -= 1;
+            self.run_guarded(RenderContext::pop_clip);
+        }
     }
 
     pub(crate) fn set_mask(&mut self, mask: Option<Mask>) {
-        match mask {
-            Some(m) => self.ctx.set_mask(m),
-            None => self.ctx.reset_mask(),
+        if !self.panicked {
+            match mask {
+                Some(m) => self.ctx.set_mask(m),
+                None => self.ctx.reset_mask(),
+            }
         }
     }
 
@@ -214,25 +276,28 @@ impl Canvas2d {
         opacity: f32,
         mask: Option<Mask>,
     ) {
-        let clip_bez = if let Some((path, rule, transform)) = clip_path {
-            self.ctx.set_transform(matrix_to_affine(transform));
-            self.ctx.set_fill_rule(fill_rule_to_peniko(rule));
-            Some(path)
-        } else {
-            self.ctx.set_transform(Affine::IDENTITY);
-            None
-        };
-        self.ctx.push_layer(
-            clip_bez,
-            Some(blend_to_peniko(blend_mode)),
-            Some(opacity.clamp(0.0, 1.0)),
-            mask,
-            None,
-        );
+        let bm = blend_to_peniko(blend_mode);
+        let op = opacity.clamp(0.0, 1.0);
+        if self.run_guarded(|ctx| {
+            let clip_bez = if let Some((path, rule, transform)) = clip_path {
+                ctx.set_transform(matrix_to_affine(transform));
+                ctx.set_fill_rule(fill_rule_to_peniko(rule));
+                Some(path)
+            } else {
+                ctx.set_transform(Affine::IDENTITY);
+                None
+            };
+            ctx.push_layer(clip_bez, Some(bm), Some(op), mask, None);
+        }) {
+            self.layer_depth += 1;
+        }
     }
 
     pub(crate) fn pop_layer(&mut self) {
-        self.ctx.pop_layer();
+        if self.layer_depth > 0 {
+            self.layer_depth -= 1;
+            self.run_guarded(RenderContext::pop_layer);
+        }
     }
 
     /// Draws an `RGBA8` image (`width × height`) placed onto PDF's `[0, 1] × [0, 1]`
@@ -248,6 +313,9 @@ impl Canvas2d {
         opacity: f32,
         blend: &BlendState,
     ) {
+        if self.panicked {
+            return;
+        }
         let (Ok(w), Ok(h)) = (u16::try_from(img_w), u16::try_from(img_h)) else {
             return;
         };
@@ -287,13 +355,17 @@ impl Canvas2d {
                 alpha: opacity.clamp(0.0, 1.0),
             },
         };
-        self.ctx.set_blend_mode(blend_to_peniko(blend));
-        self.ctx.reset_paint_transform();
-        self.ctx.reset_tint();
-        self.ctx.set_transform(matrix_to_affine(img_to_device));
-        self.ctx.set_paint(brush);
+        let bm = blend_to_peniko(blend);
+        let xf = matrix_to_affine(img_to_device);
         let rect = kurbo::Rect::new(0.0, 0.0, f64::from(w), f64::from(h));
-        self.ctx.fill_rect(&rect);
+        self.run_guarded(move |ctx| {
+            ctx.set_blend_mode(bm);
+            ctx.reset_paint_transform();
+            ctx.reset_tint();
+            ctx.set_transform(xf);
+            ctx.set_paint(brush);
+            ctx.fill_rect(&rect);
+        });
     }
 
     /// Rasterizes into an internal `VelloPixmap` (premultiplied `RGBA8`), used
@@ -302,6 +374,9 @@ impl Canvas2d {
         mut self,
         background: Option<[u8; 4]>,
     ) -> Result<VelloPixmap, Error> {
+        if self.panicked {
+            return Err(Error::RasterizerPanic);
+        }
         let init = match background {
             Some([r, g, b, a]) => TargetInit::Clear(AlphaColor::<Srgb>::from_rgba8(r, g, b, a)),
             None => TargetInit::Clear(AlphaColor::TRANSPARENT),
@@ -342,16 +417,9 @@ impl Canvas2d {
                 }
             }
             PixelFormat::Bgra8 => {
-                let opaque_bg = background.is_some_and(|[_, _, _, a]| a == 255);
-                if opaque_bg {
-                    for &[r, g, b, a] in premul.as_chunks::<4>().0 {
-                        out.extend_from_slice(&[b, g, r, a]);
-                    }
-                } else {
-                    for px in premul.as_chunks::<4>().0 {
-                        let [r, g, b, a] = unpremul_rgba(*px);
-                        out.extend_from_slice(&[b, g, r, a]);
-                    }
+                for px in premul.as_chunks::<4>().0 {
+                    let [r, g, b, a] = unpremul_rgba(*px);
+                    out.extend_from_slice(&[b, g, r, a]);
                 }
             }
         }
@@ -372,12 +440,15 @@ pub(crate) fn build_vello_pixmap_straight(
     if !rgba.capacity().is_multiple_of(4) {
         rgba.shrink_to_fit();
     }
-    Some(VelloPixmap::from_parts(
-        rgba,
-        width,
-        height,
-        vello_cpu::PixelMetadata::new(ImageAlphaType::Alpha, true),
-    ))
+    catch_unwind(AssertUnwindSafe(move || {
+        VelloPixmap::from_parts(
+            rgba,
+            width,
+            height,
+            vello_cpu::PixelMetadata::new(ImageAlphaType::Alpha, true),
+        )
+    }))
+    .ok()
 }
 
 pub(crate) fn matrix_to_affine(m: Matrix) -> Affine {

@@ -294,6 +294,34 @@ pub enum SoftMask {
     },
 }
 
+/// Parameters captured when `gs` sets a soft-mask dictionary (`/ExtGState`
+/// `/SMask`, ISO 32000-2 §11.6.5.1).
+///
+/// Its `Debug` implementation omits raw `/TR` object contents.
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub struct SoftMaskParams {
+    /// Optional backdrop color (`/BC`) on the `/SMask` dictionary, in the
+    /// soft-mask transparency group's color space.
+    pub backdrop: Option<ColorValues>,
+    /// Optional transfer function (`/TR`) on the `/SMask` dictionary (`None`
+    /// when absent, `/Identity`, or `/Default`).
+    pub transfer: Option<Arc<Object>>,
+    /// Current transformation matrix (`State::ctm`) in effect when `gs` set
+    /// this soft mask (ISO 32000-2 §11.6.5.1).
+    pub ctm: Matrix,
+}
+
+impl fmt::Debug for SoftMaskParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SoftMaskParams")
+            .field("backdrop", &self.backdrop)
+            .field("has_transfer", &self.transfer.is_some())
+            .field("ctm", &self.ctm)
+            .finish()
+    }
+}
+
 /// Complete graphics and text state at an [`Event`](crate::Event), saved by `q`
 /// and restored by `Q`.
 #[derive(Clone, PartialEq)]
@@ -341,12 +369,9 @@ pub struct State {
     pub blend_mode: BlendState,
     /// Active soft mask (`/ExtGState` `/SMask`; default [`SoftMask::None`]).
     pub soft_mask: SoftMask,
-    /// Optional backdrop color (`/BC`) on the active `/SMask` dictionary, in
-    /// the soft-mask transparency group's color space.
-    pub soft_mask_backdrop: Option<ColorValues>,
-    /// Optional transfer function (`/TR`) on the active `/SMask` dictionary
-    /// (`None` when absent or `/Identity`).
-    pub soft_mask_transfer: Option<Arc<Object>>,
+    /// Backdrop, transfer function, and CTM captured when `gs` set
+    /// [`State::soft_mask`] (`None` when [`SoftMask::None`]).
+    pub soft_mask_params: Option<SoftMaskParams>,
     /// Stroking overprint flag (`/ExtGState` `/OP`; default `false`).
     pub stroke_overprint: bool,
     /// Nonstroking (fill) overprint flag (`/ExtGState` `/op`, falling back to
@@ -389,8 +414,7 @@ impl fmt::Debug for State {
             .field("text_knockout", &self.text_knockout)
             .field("blend_mode", &self.blend_mode)
             .field("soft_mask", &self.soft_mask)
-            .field("soft_mask_backdrop", &self.soft_mask_backdrop)
-            .field("has_soft_mask_transfer", &self.soft_mask_transfer.is_some())
+            .field("soft_mask_params", &self.soft_mask_params)
             .field("stroke_overprint", &self.stroke_overprint)
             .field("fill_overprint", &self.fill_overprint)
             .field("overprint_mode", &self.overprint_mode)
@@ -484,8 +508,7 @@ impl Default for State {
             text_knockout: true,
             blend_mode: BlendState::default(),
             soft_mask: SoftMask::None,
-            soft_mask_backdrop: None,
-            soft_mask_transfer: None,
+            soft_mask_params: None,
             stroke_overprint: false,
             fill_overprint: false,
             overprint_mode: 0,

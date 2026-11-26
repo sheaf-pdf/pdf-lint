@@ -75,9 +75,32 @@ pub enum EncodeError {
         /// Required byte length.
         expected: usize,
     },
+    /// Image uses a non-device `/ColorSpace` (such as `Indexed`, `ICCBased`, `Separation`,
+    /// `DeviceN`, or CIE spaces) and no PDF `/ColorSpace` object was supplied to [`encode_raw_flate`](crate::encode_raw_flate).
+    #[error("non-device image color space requires an explicit /ColorSpace object")]
+    MissingColorSpace,
     /// Flate/predictor encoding rejected the row layout.
     #[error(transparent)]
     Flate(#[from] pdf_filters::Unencodable),
+}
+
+/// Why an in-place raw sample scrub ([`RawImage::fill_rect_raw`](crate::RawImage::fill_rect_raw))
+/// was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum ScrubError {
+    /// `fill.len()` is shorter than the image's component count.
+    #[error("fill slice length ({actual}) is shorter than image components ({expected})")]
+    InsufficientComponents {
+        /// Provided `fill.len()`.
+        actual: usize,
+        /// Required `self.components()`.
+        expected: u8,
+    },
+    /// `fill` matches the image's `/Mask` color-key range, which would make the scrubbed
+    /// rectangle transparent instead of opaque.
+    #[error("fill sample values fall inside the image's /Mask color-key transparency range")]
+    ColorKeyTransparentFill,
 }
 
 fn lossy(bytes: &[u8]) -> Cow<'_, str> {

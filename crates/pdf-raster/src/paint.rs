@@ -4,26 +4,33 @@
 use std::sync::Arc;
 
 use pdf_color::{EvalOptions, Function, PreparedSpace, Space};
-use pdf_gfx::{ActiveColorSpace, Matrix, Point, Rect};
+use pdf_content_streams::{Concat, FillRule};
+use pdf_gfx::{ActiveColorSpace, Event, Matrix, Point, Rect};
+use pdf_objects::Why;
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams};
 use vello_cpu::Pixmap as VelloPixmap;
 
-use crate::canvas2d::build_vello_pixmap_straight;
+use crate::canvas2d::{Canvas2d, build_vello_pixmap_straight, segs_to_bez_path};
+use crate::engine::stream::{
+    GroupOverrides, effective_fill_alpha, effective_stroke_alpha, render_stream_into,
+};
+use crate::engine::{RenderCtx, RenderState, rect_to_segs};
 use crate::error::Error;
 use crate::fault::Fault;
+use crate::limits::LimitKind;
 use crate::opts::RenderOpts;
 
-/// Evaluated paint ready to configure on [`crate::canvas2d::Canvas2d`].
+/// Evaluated paint ready to configure on [`Canvas2d`].
 pub(crate) enum ResolvedPaint {
     /// Solid straight-alpha `[R, G, B, A]`.
     Solid([u8; 4]),
-    /// Repeated or positioned bitmap (`tile`, `paint_transform` in device space).
+    /// Repeated tiling bitmap (`tile`, `paint_transform` in device space).
     Tiled {
         pixmap: Arc<VelloPixmap>,
         transform: Matrix,
     },
-    /// Clipped bitmap positioned in device space (`x0`, `y0` offset).
+    /// Clamped shading bitmap positioned in device space (`Extend::Pad`).
     Shading {
         pixmap: Arc<VelloPixmap>,
         transform: Matrix,
@@ -78,18 +85,16 @@ pub(crate) fn lookup_resource_entry<'o, R: Resolve<'o> + Copy>(
     None
 }
 
-/// Evaluates `space` + `components` + `alpha` into straight-alpha `[R, G, B, A]`,
-/// returning `None` for `/Separation /None` (transparent no-op paint).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_solid_color<'o, 'r, O, S>(
-    objects: O,
+/// Evaluates `active_space` + `components` + `alpha` into straight-alpha
+/// `[R, G, B, A]`, returning `None` for `/Separation /None` (transparent no-op
+/// paint).
+pub(crate) fn eval_solid_color<'o, 'a, 'r, O, S>(
+    ctx: &RenderCtx<'o, 'a, O>,
     active_space: &ActiveColorSpace,
     components: &[f32],
     alpha: f32,
     resources: Option<&'r Object>,
     page_resources: Option<&'r Object>,
-    output_intent_icc: Option<&[u8]>,
-    opts: &RenderOpts,
     sink: &mut S,
 ) -> Result<Option<[u8; 4]>, Error>
 where
@@ -97,14 +102,12 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    let objects = crate::engine::Narrow::new(objects);
+    let objects = ctx.objects;
     let alpha_u8 = (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     let spaces = pdf_color::Spaces::read(objects, resources.or(page_resources))?;
-    let mut eval_opts = EvalOptions::from_spaces(opts.rules, spaces);
-    eval_opts.output_intent_profile = output_intent_icc;
+    let mut eval_opts = EvalOptions::from_spaces(ctx.opts.rules, spaces);
+    eval_opts.output_intent_profile = ctx.output_intent_icc;
 
-    // Fast path for device spaces when `Rules::Pdfium` is active or no
-    // `/Default*` override applies.
     let device_obj;
     let space_obj: Option<&Object> = match active_space {
         ActiveColorSpace::DeviceGray => {
@@ -130,7 +133,7 @@ where
     };
 
     let mut csink = ColorSink(sink);
-    let Some(space) = Space::read(objects, obj, &opts.limits.color, &mut csink)? else {
+    let Some(space) = Space::read(objects, obj, &ctx.opts.limits.color, &mut csink)? else {
         return Ok(Some([0, 0, 0, alpha_u8]));
     };
 
@@ -145,7 +148,7 @@ where
         objects,
         target_space,
         &eval_opts,
-        &opts.limits.color,
+        &ctx.opts.limits.color,
         &mut csink,
     )?
     else {
@@ -153,16 +156,350 @@ where
     };
 
     Ok(prepared
-        .eval_with_rules(components, opts.rules, &opts.limits.color)
+        .eval_with_rules(components, ctx.opts.rules, &ctx.opts.limits.color)
         .and_then(pdf_color::Paint::srgb8)
         .map(|[r, g, b]| [r, g, b, alpha_u8]))
 }
 
-/// Evaluates a shading dictionary or stream (`sh` or `PatternType 2`) over the
-/// integer device-pixel rectangle `[px0..px1] × [py0..py1]`.
+/// Evaluates the active stroking or nonstroking paint (solid color, tiling
+/// pattern, or shading pattern).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_shading_rect<'o, 'r, O, S>(
-    objects: O,
+pub(crate) fn resolve_active_paint<'o, 'a, 'e, O, S>(
+    ctx: &RenderCtx<'o, 'a, O>,
+    event: &Event<'e>,
+    stroke: bool,
+    device_bbox: Option<(u32, u32, u32, u32)>,
+    stream_base_ctm: Matrix,
+    page_to_device: Matrix,
+    layer_depth: usize,
+    uncolored_override: Option<[u8; 4]>,
+    ov: GroupOverrides,
+    state: &mut RenderState,
+    sink: &mut S,
+) -> Result<ResolvedPaint, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    S: Sink<Fault> + ?Sized,
+{
+    let alpha = if stroke {
+        effective_stroke_alpha(event.state, ov)
+    } else {
+        effective_fill_alpha(event.state, ov)
+    };
+    if let Some([ur, ug, ub, ua]) = uncolored_override {
+        let combined_a = ((f32::from(ua) / 255.0) * alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        return Ok(ResolvedPaint::Solid([ur, ug, ub, combined_a]));
+    }
+
+    let (space, comps, pat_name) = if stroke {
+        (
+            &event.state.stroke_color_space,
+            event.state.stroke_color.as_slice(),
+            event.state.stroke_pattern.as_deref(),
+        )
+    } else {
+        (
+            &event.state.fill_color_space,
+            event.state.fill_color.as_slice(),
+            event.state.fill_pattern.as_deref(),
+        )
+    };
+
+    if let Some(name) = pat_name {
+        return resolve_pattern_paint(
+            ctx,
+            name,
+            space,
+            comps,
+            alpha,
+            device_bbox,
+            event.at.resources(),
+            event.at.page_resources(),
+            stream_base_ctm,
+            page_to_device,
+            layer_depth,
+            state,
+            sink,
+        );
+    }
+
+    match eval_solid_color(
+        ctx,
+        space,
+        comps,
+        alpha,
+        event.at.resources(),
+        event.at.page_resources(),
+        sink,
+    )? {
+        Some(rgba) => Ok(ResolvedPaint::Solid(rgba)),
+        None => Ok(ResolvedPaint::None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_pattern_paint<'o, 'a, 'r, O, S>(
+    ctx: &RenderCtx<'o, 'a, O>,
+    pat_name: &[u8],
+    underlying_space: &ActiveColorSpace,
+    underlying_comps: &[f32],
+    alpha: f32,
+    device_bbox: Option<(u32, u32, u32, u32)>,
+    resources: Option<&'r Object>,
+    page_resources: Option<&'r Object>,
+    stream_base_ctm: Matrix,
+    page_to_device: Matrix,
+    layer_depth: usize,
+    state: &mut RenderState,
+    sink: &mut S,
+) -> Result<ResolvedPaint, Error>
+where
+    'o: 'r,
+    O: Resolve<'o> + Streams + Copy,
+    S: Sink<Fault> + ?Sized,
+{
+    let objects = ctx.objects;
+    if layer_depth + 1 > ctx.opts.limits.max_layer_depth {
+        sink.fault(Place::new(None, None), Fault::LayerDepthExceeded);
+        state.approximated = true;
+        return Ok(ResolvedPaint::None);
+    }
+
+    let Some(pat_entry) =
+        lookup_resource_entry(objects, resources, page_resources, b"Pattern", pat_name)
+    else {
+        sink.fault(Place::new(None, None), Fault::InvalidPattern);
+        return Ok(ResolvedPaint::None);
+    };
+    let pat_id = pat_entry.as_reference();
+    let pat_resolved = match pat_id {
+        Some(id) => objects.try_resolve(id)?,
+        None => Some(pat_entry),
+    };
+    let Some(pat_obj) = pat_resolved else {
+        sink.fault(Place::new(pat_id, None), Fault::InvalidPattern);
+        return Ok(ResolvedPaint::None);
+    };
+    let dict = match pat_obj
+        .as_dict()
+        .or_else(|| pat_obj.as_stream().map(|s| &s.dict))
+    {
+        Some(d) => d,
+        None => {
+            sink.fault(Place::new(pat_id, pat_obj.at()), Fault::InvalidPattern);
+            return Ok(ResolvedPaint::None);
+        }
+    };
+
+    let pat_type = dict_int(objects, dict, b"PatternType").unwrap_or(0);
+    let pat_matrix = dict_matrix(objects, dict, b"Matrix").unwrap_or(Matrix::IDENTITY);
+    // ISO 32000-2 §8.7.2: pattern space maps to the enclosing stream's initial
+    // coordinate space (`stream_base_ctm`), then onto device pixels (`page_to_device`).
+    let pat_to_device = pat_matrix.then(stream_base_ctm).then(page_to_device);
+    if !pat_to_device.is_finite() || pat_to_device.determinant() == 0.0 {
+        return Ok(ResolvedPaint::None);
+    }
+
+    match pat_type {
+        1 => {
+            let Some(sid) = pat_id else {
+                sink.fault(Place::new(None, pat_obj.at()), Fault::InvalidPattern);
+                return Ok(ResolvedPaint::None);
+            };
+            if state.active_streams.contains(&sid) {
+                sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
+                return Ok(ResolvedPaint::None);
+            }
+            let paint_type = dict_int(objects, dict, b"PaintType").unwrap_or(1);
+            let Some([bx0, by0, bx1, by1]) = dict_float4(objects, dict, b"BBox") else {
+                sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
+                return Ok(ResolvedPaint::None);
+            };
+            let bbox = Rect::new(bx0, by0, bx1, by1);
+            let x_step = dict_float(objects, dict, b"XStep").unwrap_or(0.0).abs();
+            let y_step = dict_float(objects, dict, b"YStep").unwrap_or(0.0).abs();
+            if bbox.is_empty() || !(x_step > 1e-4 && y_step > 1e-4) {
+                sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
+                return Ok(ResolvedPaint::None);
+            }
+
+            let sx = pat_to_device.a.hypot(pat_to_device.b);
+            let sy = pat_to_device.c.hypot(pat_to_device.d);
+            let max_side = ctx.opts.limits.max_pattern_cells.clamp(1, 2048);
+            let tile_w = ((x_step * sx).round().max(1.0) as u32).min(max_side);
+            let tile_h = ((y_step * sy).round().max(1.0) as u32).min(max_side);
+            if u64::from(tile_w) * u64::from(tile_h)
+                > u64::from(ctx.opts.limits.max_pattern_cells) * 256
+            {
+                return Err(Error::Limit(LimitKind::PatternCells));
+            }
+
+            let uncolored_rgba = if paint_type == 2 {
+                match eval_solid_color(
+                    ctx,
+                    underlying_space,
+                    underlying_comps,
+                    alpha,
+                    resources,
+                    page_resources,
+                    sink,
+                )? {
+                    Some(c) => Some(c),
+                    None => return Ok(ResolvedPaint::None),
+                }
+            } else {
+                None
+            };
+
+            let pat_to_tile = Matrix::translate(-bbox.x0, -(bbox.y0 + y_step)).then(Matrix::scale(
+                (tile_w as f32) / x_step,
+                -(tile_h as f32) / y_step,
+            ));
+            let Some(tile_to_pat) = pat_to_tile.inverse() else {
+                return Ok(ResolvedPaint::None);
+            };
+            let paint_transform = tile_to_pat.then(pat_to_device);
+
+            let alpha_u8 = if paint_type != 2 && alpha < 1.0 {
+                (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            } else {
+                255
+            };
+            let tile_key = (sid, tile_w, tile_h, alpha_u8, uncolored_rgba);
+            if let Some(cached_tile) = state.tile_cache.get(&tile_key).cloned() {
+                state.patterns_drawn += 1;
+                return Ok(ResolvedPaint::Tiled {
+                    pixmap: cached_tile,
+                    transform: paint_transform,
+                });
+            }
+
+            let data = match objects.decoded(sid, state.decompressed_left) {
+                Ok(b) => {
+                    state.decompressed_left = state.decompressed_left.saturating_sub(b.len());
+                    b
+                }
+                Err(e) if e.why == Why::Limit => {
+                    return Err(Error::Gfx(pdf_gfx::Error::Limit(
+                        pdf_gfx::Cap::Decompressed,
+                    )));
+                }
+                Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => {
+                    sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
+                    return Ok(ResolvedPaint::None);
+                }
+                Err(e) => return Err(Error::Unreadable(e)),
+            };
+
+            state.charge_offscreen_pixels(tile_w, tile_h)?;
+            let mut tile_canvas = Canvas2d::new(tile_w, tile_h)?;
+            let clip_segs = rect_to_segs(bbox);
+            let (clip_bez, _) = segs_to_bez_path(&clip_segs);
+            tile_canvas.push_clip(&clip_bez, FillRule::NonZero, pat_to_tile);
+
+            let slice: &[u8] = &data;
+            let concat = Concat::new(&[slice]);
+            let pat_res = dict.get(b"Resources");
+            state.active_streams.push(sid);
+            let tile_res = render_stream_into(
+                ctx,
+                &concat,
+                pat_res,
+                pat_to_tile,
+                layer_depth + 1,
+                uncolored_rgba,
+                &mut tile_canvas,
+                state,
+                sink,
+            );
+            state.active_streams.pop();
+            tile_canvas.pop_clip();
+            let _ = tile_res?;
+
+            let mut vello_tile = tile_canvas.render_to_vello_pixmap(None)?;
+            if alpha_u8 < 255 {
+                vello_tile.multiply_alpha(alpha_u8);
+            }
+            let arc_tile = Arc::new(vello_tile);
+            state.tile_cache.insert(tile_key, arc_tile.clone());
+            state.patterns_drawn += 1;
+            Ok(ResolvedPaint::Tiled {
+                pixmap: arc_tile,
+                transform: paint_transform,
+            })
+        }
+        2 => {
+            let Some(sh_obj) = dict.get(b"Shading") else {
+                sink.fault(Place::new(pat_id, None), Fault::InvalidPattern);
+                return Ok(ResolvedPaint::None);
+            };
+            let Some(bounds) = device_bbox else {
+                return Ok(ResolvedPaint::None);
+            };
+            match evaluate_shading_rect(
+                ctx,
+                sh_obj,
+                pat_to_device,
+                bounds,
+                true,
+                alpha,
+                resources,
+                page_resources,
+                state,
+                sink,
+            )? {
+                Some((pixmap, transform)) => {
+                    state.shadings_drawn += 1;
+                    Ok(ResolvedPaint::Shading { pixmap, transform })
+                }
+                None => Ok(ResolvedPaint::None),
+            }
+        }
+        _ => {
+            sink.fault(Place::new(pat_id, None), Fault::InvalidPattern);
+            Ok(ResolvedPaint::None)
+        }
+    }
+}
+
+/// Applies `paint` to `canvas` under `scene_transform`, dispatching tiling
+/// patterns to `Extend::Repeat` and shadings to `Extend::Pad`.
+pub(crate) fn configure_paint_on_canvas(
+    canvas: &mut Canvas2d,
+    paint: &ResolvedPaint,
+    scene_transform: Matrix,
+) -> bool {
+    match paint {
+        ResolvedPaint::None => false,
+        ResolvedPaint::Solid(rgba) => {
+            canvas.set_solid_rgba8(*rgba);
+            true
+        }
+        ResolvedPaint::Tiled { pixmap, transform } => {
+            let paint_xf = match scene_transform.inverse() {
+                Some(inv) => (*transform).then(inv),
+                None => *transform,
+            };
+            canvas.set_tiling_paint(pixmap.clone(), paint_xf);
+            true
+        }
+        ResolvedPaint::Shading { pixmap, transform } => {
+            let paint_xf = match scene_transform.inverse() {
+                Some(inv) => (*transform).then(inv),
+                None => *transform,
+            };
+            canvas.set_shading_paint(pixmap.clone(), paint_xf);
+            true
+        }
+    }
+}
+
+/// Evaluates a shading dictionary or stream (`sh` or `PatternType 2`) over the
+/// integer device-pixel rectangle `[x0..x1] × [y0..y1]`, proportionally
+/// downsampling the evaluation grid when `w * h > max_shading_samples`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shading_rect<'o, 'a, 'r, O, S>(
+    ctx: &RenderCtx<'o, 'a, O>,
     shading_obj: &'r Object,
     shading_to_device: Matrix,
     device_bounds: (u32, u32, u32, u32),
@@ -170,8 +507,7 @@ pub(crate) fn evaluate_shading_rect<'o, 'r, O, S>(
     alpha: f32,
     resources: Option<&'r Object>,
     page_resources: Option<&'r Object>,
-    output_intent_icc: Option<&[u8]>,
-    opts: &RenderOpts,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<Option<(Arc<VelloPixmap>, Matrix)>, Error>
 where
@@ -179,19 +515,36 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    let objects = crate::engine::Narrow::new(objects);
+    let objects = ctx.objects;
+    let opts = ctx.opts;
     let (x0, y0, x1, y1) = device_bounds;
     if x1 <= x0 || y1 <= y0 {
         return Ok(None);
     }
     let (w, h) = (x1 - x0, y1 - y0);
-    let (Ok(w16), Ok(h16)) = (u16::try_from(w), u16::try_from(h)) else {
+    let total_px = u64::from(w) * u64::from(h);
+    let max_samples = opts.limits.max_shading_samples.max(1);
+    let (grid_w, grid_h, step_x, step_y) = if total_px > u64::from(max_samples) {
+        state.approximated = true;
+        let scale = (f64::from(max_samples) / (total_px as f64)).sqrt();
+        let mut gw = ((f64::from(w) * scale).floor() as u32).clamp(1, w);
+        let mut gh = ((f64::from(h) * scale).floor() as u32).clamp(1, h);
+        while u64::from(gw) * u64::from(gh) > u64::from(max_samples) {
+            if gw >= gh && gw > 1 {
+                gw -= 1;
+            } else if gh > 1 {
+                gh -= 1;
+            } else {
+                break;
+            }
+        }
+        (gw, gh, (w as f32) / (gw as f32), (h as f32) / (gh as f32))
+    } else {
+        (w, h, 1.0_f32, 1.0_f32)
+    };
+    let (Ok(w16), Ok(h16)) = (u16::try_from(grid_w), u16::try_from(grid_h)) else {
         return Ok(None);
     };
-    let total_px = u64::from(w) * u64::from(h);
-    if total_px > u64::from(opts.limits.max_shading_samples) {
-        return Err(Error::Limit(crate::limits::LimitKind::ShadingSamples));
-    }
 
     let resolved = match shading_obj.as_reference() {
         Some(id) => objects.try_resolve(id)?,
@@ -213,7 +566,13 @@ where
         }
     };
 
-    let Some(device_to_shading) = shading_to_device.inverse() else {
+    let grid_to_device =
+        Matrix::scale(step_x, step_y).then(Matrix::translate(x0 as f32, y0 as f32));
+    let Some(device_to_grid) = grid_to_device.inverse() else {
+        return Ok(None);
+    };
+    let shading_to_grid = shading_to_device.then(device_to_grid);
+    let Some(grid_to_shading) = shading_to_grid.inverse() else {
         return Ok(None);
     };
 
@@ -236,7 +595,7 @@ where
 
     let spaces = pdf_color::Spaces::read(objects, resources.or(page_resources))?;
     let mut eval_opts = EvalOptions::from_spaces(opts.rules, spaces);
-    eval_opts.output_intent_profile = output_intent_icc;
+    eval_opts.output_intent_profile = ctx.output_intent_icc;
 
     let mut csink = ColorSink(sink);
     let Some(space) = Space::read(objects, cs_obj, &opts.limits.color, &mut csink)? else {
@@ -264,7 +623,8 @@ where
     let shading_bbox =
         dict_float4(objects, dict, b"BBox").map(|[a, b, c, d]| Rect::new(a, b, c, d));
 
-    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    state.charge_offscreen_pixels(grid_w, grid_h)?;
+    let mut rgba = vec![0u8; (grid_w as usize) * (grid_h as usize) * 4];
     if let Some(bg) = bg_rgba {
         for px in rgba.as_chunks_mut::<4>().0 {
             *px = bg;
@@ -276,9 +636,9 @@ where
             objects,
             dict,
             &prepared,
-            device_to_shading,
+            grid_to_shading,
             shading_bbox,
-            (x0, y0, w, h),
+            (grid_w, grid_h),
             alpha_u8,
             opts,
             &mut csink,
@@ -288,9 +648,9 @@ where
             objects,
             dict,
             &prepared,
-            device_to_shading,
+            grid_to_shading,
             shading_bbox,
-            (x0, y0, w, h),
+            (grid_w, grid_h),
             alpha_u8,
             opts,
             &mut csink,
@@ -300,9 +660,9 @@ where
             objects,
             dict,
             &prepared,
-            device_to_shading,
+            grid_to_shading,
             shading_bbox,
-            (x0, y0, w, h),
+            (grid_w, grid_h),
             alpha_u8,
             opts,
             &mut csink,
@@ -316,11 +676,12 @@ where
                     dict,
                     shading_type,
                     &prepared,
-                    shading_to_device,
+                    shading_to_grid,
                     shading_bbox,
-                    (x0, y0, w, h),
+                    (grid_w, grid_h),
                     alpha_u8,
                     opts,
+                    state,
                     &mut csink,
                     &mut rgba,
                 )?;
@@ -335,8 +696,7 @@ where
     let Some(pix) = build_vello_pixmap_straight(rgba, w16, h16) else {
         return Ok(None);
     };
-    let transform = Matrix::translate(x0 as f32, y0 as f32);
-    Ok(Some((Arc::new(pix), transform)))
+    Ok(Some((Arc::new(pix), grid_to_device)))
 }
 
 /// Reads `/Function` on a shading dictionary: either a single function (`m -> n`)
@@ -399,9 +759,9 @@ fn eval_type1_shading<'o, O, S>(
     objects: O,
     dict: &'o Dict,
     prepared: &PreparedSpace,
-    device_to_shading: Matrix,
+    grid_to_shading: Matrix,
     shading_bbox: Option<Rect>,
-    (x0, y0, w, h): (u32, u32, u32, u32),
+    (w, h): (u32, u32),
     alpha_u8: u8,
     opts: &RenderOpts,
     sink: &mut ColorSink<'_, S>,
@@ -425,10 +785,10 @@ where
 
     let mut comps = [0.0f32; 16];
     for row in 0..h {
-        let py = (y0 + row) as f32 + 0.5;
+        let py = (row as f32) + 0.5;
         for col in 0..w {
-            let px = (x0 + col) as f32 + 0.5;
-            let p_sh = device_to_shading.apply(Point::new(px, py));
+            let px = (col as f32) + 0.5;
+            let p_sh = grid_to_shading.apply(Point::new(px, py));
             if let Some(bb) = shading_bbox
                 && !bb.contains(p_sh)
             {
@@ -456,9 +816,9 @@ fn eval_type2_axial<'o, O, S>(
     objects: O,
     dict: &'o Dict,
     prepared: &PreparedSpace,
-    device_to_shading: Matrix,
+    grid_to_shading: Matrix,
     shading_bbox: Option<Rect>,
-    (x0, y0, w, h): (u32, u32, u32, u32),
+    (w, h): (u32, u32),
     alpha_u8: u8,
     opts: &RenderOpts,
     sink: &mut ColorSink<'_, S>,
@@ -484,8 +844,6 @@ where
         return Ok(());
     }
 
-    // Precompute a 512-entry 1D LUT over `s in [0, 1]` so per-pixel shading is O(1)
-    // even when `/Function` is a PostScript Type 4 calculator or ICC space!
     const LUT_LEN: usize = 512;
     let mut lut = [[0u8; 4]; LUT_LEN];
     let mut lut_valid = [false; LUT_LEN];
@@ -504,10 +862,10 @@ where
     }
 
     for row in 0..h {
-        let py = (y0 + row) as f32 + 0.5;
+        let py = (row as f32) + 0.5;
         for col in 0..w {
-            let px = (x0 + col) as f32 + 0.5;
-            let p_sh = device_to_shading.apply(Point::new(px, py));
+            let px = (col as f32) + 0.5;
+            let p_sh = grid_to_shading.apply(Point::new(px, py));
             if let Some(bb) = shading_bbox
                 && !bb.contains(p_sh)
             {
@@ -543,9 +901,9 @@ fn eval_type3_radial<'o, O, S>(
     objects: O,
     dict: &'o Dict,
     prepared: &PreparedSpace,
-    device_to_shading: Matrix,
+    grid_to_shading: Matrix,
     shading_bbox: Option<Rect>,
-    (x0, y0, w, h): (u32, u32, u32, u32),
+    (w, h): (u32, u32),
     alpha_u8: u8,
     opts: &RenderOpts,
     sink: &mut ColorSink<'_, S>,
@@ -607,10 +965,10 @@ where
     };
 
     for row in 0..h {
-        let py = (y0 + row) as f32 + 0.5;
+        let py = (row as f32) + 0.5;
         for col in 0..w {
-            let px = (x0 + col) as f32 + 0.5;
-            let p_sh = device_to_shading.apply(Point::new(px, py));
+            let px = (col as f32) + 0.5;
+            let p_sh = grid_to_shading.apply(Point::new(px, py));
             if let Some(bb) = shading_bbox
                 && !bb.contains(p_sh)
             {
@@ -620,8 +978,6 @@ where
             let b_half = vx * dx + vy * dy + r0_d * dr;
             let c_coef = vx * vx + vy * vy - r0_d * r0_d;
 
-            // ISO 32000-2 §8.7.4.5.4: solve `a * s^2 - 2 * b_half * s + c = 0`,
-            // choosing the larger valid root `s` (`s` painted front-to-back).
             let chosen = if a_coef.abs() < 1e-11 {
                 if b_half.abs() < 1e-11 {
                     None
@@ -658,8 +1014,9 @@ where
     Ok(())
 }
 
-/// Evaluates `ShadingType 4` (Free-form Gouraud triangle mesh) and
-/// `ShadingType 5` (Lattice-form Gouraud triangle mesh).
+/// Evaluates `ShadingType 4` (Free-form Gouraud triangle mesh, ISO 32000-2
+/// §8.7.4.5.5) and `ShadingType 5` (Lattice-form Gouraud triangle mesh,
+/// §8.7.4.5.6).
 #[allow(clippy::too_many_arguments)]
 fn eval_mesh_shading<'o, O, S>(
     objects: O,
@@ -667,11 +1024,12 @@ fn eval_mesh_shading<'o, O, S>(
     dict: &'o Dict,
     shading_type: i64,
     prepared: &PreparedSpace,
-    shading_to_device: Matrix,
+    shading_to_grid: Matrix,
     shading_bbox: Option<Rect>,
-    (x0, y0, w, h): (u32, u32, u32, u32),
+    (w, h): (u32, u32),
     alpha_u8: u8,
     opts: &RenderOpts,
+    state: &mut RenderState,
     sink: &mut ColorSink<'_, S>,
     rgba: &mut [u8],
 ) -> Result<(), Error>
@@ -700,40 +1058,18 @@ where
     }
     let data = match objects.decoded(stream_id, opts.limits.color.stream_bytes) {
         Ok(b) => b,
-        Err(e)
-            if matches!(
-                e.why,
-                pdf_objects::Why::Damaged | pdf_objects::Why::Filter | pdf_objects::Why::Limit
-            ) =>
-        {
-            return Ok(());
-        }
+        Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => return Ok(()),
         Err(e) => return Err(Error::Unreadable(e)),
-    };
-
-    let mut reader = BitReader::new(&data);
-    let eval_vertex_rgb = |vals: &[f32]| -> [f32; 3] {
-        let mut comps = [0.0f32; 16];
-        let slice = if let Some(ref fs) = funcs {
-            let n = eval_functions(fs, &vals[..1], &opts.limits.color, &mut comps);
-            &comps[..n]
-        } else {
-            vals
-        };
-        prepared
-            .eval_with_rules(slice, opts.rules, &opts.limits.color)
-            .and_then(pdf_color::Paint::srgb8)
-            .map(|[r, g, b]| [f32::from(r), f32::from(g), f32::from(b)])
-            .unwrap_or([0.0, 0.0, 0.0])
     };
 
     #[derive(Clone, Copy)]
     struct MeshVertex {
-        dev_pt: Point,
-        rgb: [f32; 3],
+        grid_pt: Point,
+        vals: [f32; 16],
     }
 
-    let read_vertex = |r: &mut BitReader<'_>| -> Option<MeshVertex> {
+    let mut reader = BitReader::new(&data);
+    let read_coords_and_vals = |r: &mut BitReader<'_>| -> Option<MeshVertex> {
         let ux = r.read_bits(bpc_coord as u8)?;
         let uy = r.read_bits(bpc_coord as u8)?;
         let x = map_bits(ux, bpc_coord as u8, decode_arr[0], decode_arr[1]);
@@ -748,48 +1084,62 @@ where
                 decode_arr[4 + i * 2 + 1],
             );
         }
-        let sh_pt = Point::new(x, y);
+        // ISO 32000-2 §8.7.4.5.5 & §8.7.4.5.6: each vertex record is padded to a byte boundary.
+        r.align_to_byte();
         Some(MeshVertex {
-            dev_pt: shading_to_device.apply(sh_pt),
-            rgb: eval_vertex_rgb(&vals[..n_vals]),
+            grid_pt: shading_to_grid.apply(Point::new(x, y)),
+            vals,
         })
     };
 
+    let max_tris = (opts.limits.max_shading_samples as usize).clamp(1, 65_536);
     let mut triangles: Vec<[MeshVertex; 3]> = Vec::new();
-    let max_tris = (opts.limits.max_shading_samples as usize).min(65_536);
+    let mut truncated = false;
 
     if shading_type == 4 {
         let bp_flag = dict_int(objects, dict, b"BitsPerFlag").unwrap_or(0);
         if !matches!(bp_flag, 2 | 4 | 8) {
             return Ok(());
         }
+        let read_flagged = |r: &mut BitReader<'_>| -> Option<(u32, MeshVertex)> {
+            let flag = r.read_bits(bp_flag as u8)?;
+            let v = read_coords_and_vals(r)?;
+            Some((flag & 3, v))
+        };
         let mut prev_tri: Option<[MeshVertex; 3]> = None;
-        while triangles.len() < max_tris {
-            let Some(flag) = reader.read_bits(bp_flag as u8) else {
+        loop {
+            if triangles.len() >= max_tris {
+                if reader.has_more_bytes() {
+                    truncated = true;
+                }
+                break;
+            }
+            let Some((flag, v_first)) = read_flagged(&mut reader) else {
                 break;
             };
-            let tri = match flag & 3 {
+            let tri = match flag {
                 0 => {
-                    let (Some(v0), Some(v1), Some(v2)) = (
-                        read_vertex(&mut reader),
-                        read_vertex(&mut reader),
-                        read_vertex(&mut reader),
-                    ) else {
+                    // ISO 32000-2 §8.7.4.5.5: a new triangle begins with a vertex whose edge flag
+                    // is `0`, followed by two more complete vertex records (including their edge
+                    // flags, which are ignored).
+                    let (Some((_, v1)), Some((_, v2))) =
+                        (read_flagged(&mut reader), read_flagged(&mut reader))
+                    else {
                         break;
                     };
-                    [v0, v1, v2]
+                    [v_first, v1, v2]
                 }
                 1 => {
-                    let (Some([_, vb, vc]), Some(vn)) = (prev_tri, read_vertex(&mut reader)) else {
+                    let Some([_, vb, vc]) = prev_tri else {
                         break;
                     };
-                    [vb, vc, vn]
+                    [vb, vc, v_first]
                 }
                 2 => {
-                    let (Some([va, _, vc]), Some(vn)) = (prev_tri, read_vertex(&mut reader)) else {
+                    let Some([va, _, vc]) = prev_tri else {
                         break;
                     };
-                    [va, vc, vn]
+                    [va, vc, v_first]
                 }
                 _ => break,
             };
@@ -803,10 +1153,16 @@ where
         }
         let cols = per_row as usize;
         let mut prev_row: Vec<MeshVertex> = Vec::with_capacity(cols);
-        while triangles.len() < max_tris {
+        loop {
+            if triangles.len() >= max_tris {
+                if reader.has_more_bytes() {
+                    truncated = true;
+                }
+                break;
+            }
             let mut row = Vec::with_capacity(cols);
             for _ in 0..cols {
-                if let Some(v) = read_vertex(&mut reader) {
+                if let Some(v) = read_coords_and_vals(&mut reader) {
                     row.push(v);
                 } else {
                     break;
@@ -818,6 +1174,7 @@ where
             if prev_row.len() == cols {
                 for i in 0..(cols - 1) {
                     if triangles.len() + 2 > max_tris {
+                        truncated = true;
                         break;
                     }
                     triangles.push([prev_row[i], prev_row[i + 1], row[i]]);
@@ -828,73 +1185,130 @@ where
         }
     }
 
-    let device_to_sh = shading_to_device.inverse();
-    for [v0, v1, v2] in triangles {
+    // Precompute a 1D LUT for large parametric meshes when pixel steps exceed 65,536,
+    // while keeping exact per-pixel `/Function` evaluation on normal meshes!
+    const PARAM_LUT_LEN: usize = 1024;
+    type ParamLut = [Option<[u8; 4]>; PARAM_LUT_LEN];
+    let t_min = decode_arr[4].min(decode_arr[5]);
+    let t_max = decode_arr[4].max(decode_arr[5]);
+    let mut param_lut: Option<Box<ParamLut>> = None;
+
+    let grid_to_sh = shading_to_grid.inverse();
+    let mut steps_left = u64::from(opts.limits.max_shading_samples.max(1)).saturating_mul(4);
+    let mut steps_used = 0u64;
+    let mut comps = [0.0f32; 16];
+    let mut interp_vals = [0.0f32; 16];
+
+    'tris: for [v0, v1, v2] in triangles {
         let min_x = v0
-            .dev_pt
+            .grid_pt
             .x
-            .min(v1.dev_pt.x)
-            .min(v2.dev_pt.x)
+            .min(v1.grid_pt.x)
+            .min(v2.grid_pt.x)
             .floor()
-            .max(x0 as f32) as u32;
+            .max(0.0) as u32;
         let max_x = v0
-            .dev_pt
+            .grid_pt
             .x
-            .max(v1.dev_pt.x)
-            .max(v2.dev_pt.x)
+            .max(v1.grid_pt.x)
+            .max(v2.grid_pt.x)
             .ceil()
-            .min((x0 + w) as f32) as u32;
+            .min(w as f32) as u32;
         let min_y = v0
-            .dev_pt
+            .grid_pt
             .y
-            .min(v1.dev_pt.y)
-            .min(v2.dev_pt.y)
+            .min(v1.grid_pt.y)
+            .min(v2.grid_pt.y)
             .floor()
-            .max(y0 as f32) as u32;
+            .max(0.0) as u32;
         let max_y = v0
-            .dev_pt
+            .grid_pt
             .y
-            .max(v1.dev_pt.y)
-            .max(v2.dev_pt.y)
+            .max(v1.grid_pt.y)
+            .max(v2.grid_pt.y)
             .ceil()
-            .min((y0 + h) as f32) as u32;
+            .min(h as f32) as u32;
         if min_x >= max_x || min_y >= max_y {
             continue;
         }
-        let area = edge_fn(v0.dev_pt, v1.dev_pt, v2.dev_pt);
+        let area = edge_fn(v0.grid_pt, v1.grid_pt, v2.grid_pt);
         if area.abs() < 1e-6 {
             continue;
         }
         let inv_area = 1.0 / area;
         for py_u in min_y..max_y {
-            let py = py_u as f32 + 0.5;
+            let py = (py_u as f32) + 0.5;
             for px_u in min_x..max_x {
-                let px = px_u as f32 + 0.5;
+                if steps_left == 0 {
+                    truncated = true;
+                    break 'tris;
+                }
+                steps_left -= 1;
+                let px = (px_u as f32) + 0.5;
                 let p = Point::new(px, py);
-                let w0 = edge_fn(v1.dev_pt, v2.dev_pt, p) * inv_area;
-                let w1 = edge_fn(v2.dev_pt, v0.dev_pt, p) * inv_area;
+                let w0 = edge_fn(v1.grid_pt, v2.grid_pt, p) * inv_area;
+                let w1 = edge_fn(v2.grid_pt, v0.grid_pt, p) * inv_area;
                 let w2 = 1.0 - w0 - w1;
                 if w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4 {
                     continue;
                 }
-                if let (Some(bb), Some(inv)) = (shading_bbox, device_to_sh)
+                if let (Some(bb), Some(inv)) = (shading_bbox, grid_to_sh)
                     && !bb.contains(inv.apply(p))
                 {
                     continue;
                 }
-                let r = (w0 * v0.rgb[0] + w1 * v1.rgb[0] + w2 * v2.rgb[0])
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-                let g = (w0 * v0.rgb[1] + w1 * v1.rgb[1] + w2 * v2.rgb[1])
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-                let b = (w0 * v0.rgb[2] + w1 * v1.rgb[2] + w2 * v2.rgb[2])
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-                let idx = (((py_u - y0) as usize) * (w as usize) + ((px_u - x0) as usize)) * 4;
-                rgba[idx..idx + 4].copy_from_slice(&[r, g, b, alpha_u8]);
+                steps_used += 1;
+
+                let pixel = if let Some(ref fs) = funcs {
+                    let t = w0 * v0.vals[0] + w1 * v1.vals[0] + w2 * v2.vals[0];
+                    if steps_used <= 65_536 || (t_max - t_min).abs() <= 1e-12 {
+                        let n = eval_functions(fs, &[t], &opts.limits.color, &mut comps);
+                        prepared
+                            .eval_with_rules(&comps[..n], opts.rules, &opts.limits.color)
+                            .and_then(pdf_color::Paint::srgb8)
+                            .map(|[r, g, b]| [r, g, b, alpha_u8])
+                    } else {
+                        let lut = param_lut.get_or_insert_with(|| {
+                            let mut tbl = Box::new([None; PARAM_LUT_LEN]);
+                            for (i, slot) in tbl.iter_mut().enumerate() {
+                                let s = (i as f32) / ((PARAM_LUT_LEN - 1) as f32);
+                                let tv = t_min + (t_max - t_min) * s;
+                                let n = eval_functions(fs, &[tv], &opts.limits.color, &mut comps);
+                                if let Some([r, g, b]) = prepared
+                                    .eval_with_rules(&comps[..n], opts.rules, &opts.limits.color)
+                                    .and_then(pdf_color::Paint::srgb8)
+                                {
+                                    *slot = Some([r, g, b, alpha_u8]);
+                                }
+                            }
+                            tbl
+                        });
+                        let norm = ((t - t_min) / (t_max - t_min)).clamp(0.0, 1.0);
+                        let li = ((norm * ((PARAM_LUT_LEN - 1) as f32)) + 0.5) as usize;
+                        lut[li.min(PARAM_LUT_LEN - 1)]
+                    }
+                } else {
+                    for (c, slot) in interp_vals.iter_mut().enumerate().take(n_vals) {
+                        *slot = w0 * v0.vals[c] + w1 * v1.vals[c] + w2 * v2.vals[c];
+                    }
+                    prepared
+                        .eval_with_rules(&interp_vals[..n_vals], opts.rules, &opts.limits.color)
+                        .and_then(pdf_color::Paint::srgb8)
+                        .map(|[r, g, b]| [r, g, b, alpha_u8])
+                };
+
+                if let Some(c) = pixel {
+                    let idx = ((py_u as usize) * (w as usize) + (px_u as usize)) * 4;
+                    rgba[idx..idx + 4].copy_from_slice(&c);
+                }
             }
         }
+    }
+
+    if truncated {
+        state.approximated = true;
+        sink.0
+            .fault(Place::new(Some(stream_id), None), Fault::InvalidShading);
     }
     Ok(())
 }
@@ -936,6 +1350,14 @@ impl<'a> BitReader<'a> {
             self.bit_pos += 1;
         }
         Some(out)
+    }
+
+    fn align_to_byte(&mut self) {
+        self.bit_pos = (self.bit_pos + 7) & !7;
+    }
+
+    fn has_more_bytes(&self) -> bool {
+        (self.bit_pos >> 3) < self.data.len()
     }
 }
 

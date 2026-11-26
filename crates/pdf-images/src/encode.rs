@@ -12,6 +12,7 @@ use pdf_filters::{Backend, Encoder, Layout, Level, Prediction, Row, encode};
 use pdf_objects::{Dict, Object, ObjectId, Stream, dict};
 
 use crate::error::EncodeError;
+use crate::header::MaskSpec;
 use crate::rgba::RgbaImage;
 use crate::samples::RawImage;
 
@@ -31,15 +32,23 @@ impl EncodedImage {
     pub fn attach_smask(&mut self, smask_id: ObjectId) {
         self.stream.dict.set("SMask", smask_id);
     }
+
+    /// Links an allocated explicit stencil `mask_id` onto `self.stream.dict` under `/Mask`.
+    pub fn attach_mask(&mut self, mask_id: ObjectId) {
+        self.stream.dict.set("Mask", mask_id);
+    }
 }
 
 /// Re-encodes a [`RawImage`] losslessly using `FlateDecode` (with PNG `Sub` prediction for 8- and
 /// 16-bit images and `Prediction::None` for 1-, 2-, and 4-bit packed images).
 ///
 /// Any bi-level `CCITTFaxDecode` or `JBIG2Decode` image is cleanly re-encoded as a 1-bit
-/// `FlateDecode` stream—never as JBIG2. If the `RawImage` carried an embedded JPX alpha plane with
-/// any non-opaque pixel, a companion 8-bit `DeviceGray` `/SMask` stream is returned in
-/// [`EncodedImage::smask`].
+/// `FlateDecode` stream—never as JBIG2. Existing `/Mask` (explicit stencil `ObjectId` or color-key
+/// array), `/SMask` (`ObjectId`), and `/OC` (`ObjectId`) entries from [`RawImage::meta`] are
+/// preserved on the output dictionary so masked or optional-content-controlled pixels are never
+/// silently exposed. If the `RawImage` carried an embedded JPX alpha plane with any non-opaque
+/// pixel, a companion 8-bit `DeviceGray` `/SMask` stream is returned in [`EncodedImage::smask`]
+/// (which the caller must store as an indirect object and link via [`EncodedImage::attach_smask`]).
 ///
 /// `color_space` supplies the PDF `/ColorSpace` object to write into the stream dictionary when
 /// the image is not an `/ImageMask` stencil and its space is non-device (such as `Indexed`,
@@ -48,7 +57,9 @@ impl EncodedImage {
 ///
 /// # Errors
 ///
-/// Returns [`EncodeError`] if dimensions are zero or Flate/predictor encoding rejects the layout.
+/// Returns [`EncodeError::Dimensions`] if dimensions are zero, [`EncodeError::MissingColorSpace`]
+/// if `color_space` is `None` for a non-stencil, non-device color space, or [`EncodeError::Flate`]
+/// if Flate/predictor encoding rejects the layout.
 pub fn encode_raw_flate(
     raw: &RawImage,
     color_space: Option<Object>,
@@ -62,6 +73,19 @@ pub fn encode_raw_flate(
             height: h,
         });
     }
+    let cs_obj_opt = if raw.meta().stencil {
+        None
+    } else {
+        match color_space {
+            Some(obj) => Some(obj),
+            None => match raw.meta().color_space {
+                Some(Family::DeviceGray) => Some(Object::name("DeviceGray")),
+                Some(Family::DeviceRGB) => Some(Object::name("DeviceRGB")),
+                Some(Family::DeviceCMYK) => Some(Object::name("DeviceCMYK")),
+                _ => return Err(EncodeError::MissingColorSpace),
+            },
+        }
+    };
     let bpc = raw.bits_per_component();
     let comps = raw.components();
     let raw_bytes = raw.stream_bytes();
@@ -101,26 +125,12 @@ pub fn encode_raw_flate(
     d.set("Width", i64::from(w));
     d.set("Height", i64::from(h));
 
-    if raw.meta().stencil {
-        d.set("ImageMask", true);
-        d.set("BitsPerComponent", 1_i64);
-    } else {
-        let cs_obj = match color_space {
-            Some(obj) => obj,
-            None => match raw.meta().color_space {
-                Some(Family::DeviceGray) => Object::name("DeviceGray"),
-                Some(Family::DeviceRGB) => Object::name("DeviceRGB"),
-                Some(Family::DeviceCMYK) => Object::name("DeviceCMYK"),
-                _ => match comps {
-                    1 => Object::name("DeviceGray"),
-                    3 => Object::name("DeviceRGB"),
-                    4 => Object::name("DeviceCMYK"),
-                    _ => Object::name("DeviceRGB"),
-                },
-            },
-        };
+    if let Some(cs_obj) = cs_obj_opt {
         d.set("ColorSpace", cs_obj);
         d.set("BitsPerComponent", i64::from(bpc));
+    } else {
+        d.set("ImageMask", true);
+        d.set("BitsPerComponent", 1_i64);
     }
 
     if raw.meta().interpolate {
@@ -138,6 +148,24 @@ pub fn encode_raw_flate(
         d.set("Decode", arr);
     }
 
+    match &raw.meta().mask {
+        MaskSpec::None => {}
+        MaskSpec::Stencil(mask_id) => {
+            d.set("Mask", *mask_id);
+        }
+        MaskSpec::ColorKey(ranges) => {
+            let mut arr = Vec::with_capacity(ranges.len() * 2);
+            for &(lo, hi) in ranges {
+                arr.push(Object::from(i64::from(lo)));
+                arr.push(Object::from(i64::from(hi)));
+            }
+            d.set("Mask", arr);
+        }
+    }
+    if let Some(oc_id) = raw.meta().oc {
+        d.set("OC", oc_id);
+    }
+
     d.set("Filter", Object::name("FlateDecode"));
     if let Some(dp) = parms {
         d.set("DecodeParms", dp);
@@ -147,7 +175,12 @@ pub fn encode_raw_flate(
         Some(alpha) if alpha.iter().any(|&a| a < 255) => {
             Some(encode_gray_smask(alpha, w, h, level)?)
         }
-        _ => None,
+        _ => {
+            if let Some(smask_id) = raw.meta().smask {
+                d.set("SMask", smask_id);
+            }
+            None
+        }
     };
 
     Ok(EncodedImage {

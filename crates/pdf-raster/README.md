@@ -16,6 +16,7 @@ Zero-I/O pure-Rust PDF 2D page, Form XObject, annotation, and interactive form r
   - **Transparency, patterns & shadings:** Isolated Form XObject `/Group`s, all 16 PDF blend modes (`/BM`), constant opacities (`/ca`, `/CA`), `/Alpha` and `/Luminosity` soft masks (`/SMask` with `/BC` and `/TR`), colored/uncolored tiling patterns (`PatternType 1`), and shadings (`sh` and `PatternType 2`, `ShadingType 1..=5`).
   - **Optional content, annotations & AcroForms:** Evaluates catalog `/OCProperties` (`/OCG`, `/OCMD`, and `/Usage` `/View` vs. `/Print`), draws written `/AP /N` streams, and optionally synthesizes missing annotation and AcroForm widget appearances (`Appearances::Synthesize` vs. `Appearances::WrittenOnly`) without mutating the document.
 - **Swappable `RenderBackend` & `RenderedDoc` traits:** Layer 2 traits (`BackendError`, `RenderBackend`, `RenderedDoc`) allow applications and differential test harnesses to switch cleanly between `pdfs::RustBackend` and external/FFI engines.
+- **Resource budgets & unwind note:** Coordinates, dash expansions, layer nesting, and offscreen buffers are clamped and budgeted upfront before invoking the software 2D rasterizer. As defense-in-depth against bugs in third-party rasterizer or image-codec dependencies, internal rasterizer calls are additionally guarded with `std::panic::catch_unwind` (converting any unexpected panic into `Error::RasterizerPanic`); under `panic = "abort"` (including libFuzzer harnesses), an upstream dependency panic will abort instead of unwinding.
 
 ## Quickstart
 

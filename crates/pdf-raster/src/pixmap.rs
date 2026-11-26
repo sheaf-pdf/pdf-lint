@@ -13,9 +13,9 @@ pub enum PixelFormat {
     /// encoding, transparent stamp overlays, and perceptual visual comparison.
     #[default]
     Rgba8,
-    /// Native 8-bit `[B, G, R, A]` (straight alpha when `background` is opaque,
-    /// premultiplied when transparent, matching native GPU textures and
-    /// PDFium's `FPDFBitmap_BGRA`).
+    /// Straight (unpremultiplied) 8-bit `sRGB` `[B, G, R, A]` — matching native
+    /// GPU textures and PDFium's `FPDFBitmap_BGRA` after straight-alpha
+    /// normalization.
     Bgra8,
     /// Premultiplied 8-bit `sRGB` `[R, G, B, A]` — zero-copy direct output from
     /// the 2D compositor.
@@ -142,7 +142,7 @@ impl Pixmap {
         let px: [u8; 4] = self.data.get(idx..idx + 4)?.try_into().ok()?;
         Some(match self.format {
             PixelFormat::Rgba8 => px,
-            PixelFormat::Bgra8 => unpremul_rgba([px[2], px[1], px[0], px[3]]),
+            PixelFormat::Bgra8 => [px[2], px[1], px[0], px[3]],
             PixelFormat::Rgba8Premul => unpremul_rgba(px),
         })
     }
@@ -156,7 +156,7 @@ impl Pixmap {
             PixelFormat::Bgra8 => {
                 let mut out = self.data.clone();
                 for px in out.as_chunks_mut::<4>().0 {
-                    *px = unpremul_rgba([px[2], px[1], px[0], px[3]]);
+                    *px = [px[2], px[1], px[0], px[3]];
                 }
                 out
             }
