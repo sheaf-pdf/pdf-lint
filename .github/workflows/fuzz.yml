@@ -40,13 +40,13 @@ jobs:
       matrix:
         include:
           - group: core
-            label: tokenize, filters, crypt, objects
+            label: tokenize, filters, crypt, objects, raster
             t1: tokenize
             t2: filters
             t3: crypt
             t4: objects
-            t5: ""
-            runs: tokenize filters crypt objects
+            t5: raster
+            runs: tokenize filters crypt objects raster
           - group: structure
             label: structure, write, semantics, linearize, forms
             t1: structure
@@ -78,7 +78,7 @@ jobs:
             t3: fonts
             t4: gfx
             t5: annots
-            runs: content:simd images:simd fonts:predefined-cmaps gfx:predefined-cmaps annots:predefined-cmaps
+            runs: content:simd images:simd raster:simd fonts:predefined-cmaps gfx:predefined-cmaps annots:predefined-cmaps
     steps:
       - uses: actions/checkout@v7
         with:
@@ -154,7 +154,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, images, fonts, embed, gfx, annots, forms, linearize, pdfs, arlington, check]
+        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, images, fonts, embed, gfx, annots, forms, raster, linearize, pdfs, arlington, check]
         # The features fuzz/ is built with: none, for each target. A run
         # given features of its own is a combination of its own, as it sets
         # this key, so it doesn't change the target's run without them.
@@ -163,6 +163,8 @@ jobs:
           - target: content
             features: simd
           - target: images
+            features: simd
+          - target: raster
             features: simd
           - target: fonts
             features: predefined-cmaps

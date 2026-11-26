@@ -4,6 +4,7 @@
 //! Images are inspected from their stream dictionary or inline `BI..ID` header
 //! alone—pixel samples are never decoded.
 
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -15,6 +16,69 @@ use crate::error::Error;
 use crate::fault::Fault;
 use crate::geom::{Matrix, Quad, Rect};
 use crate::reader::ObjReader;
+
+/// Transparency group attributes (`/Group << /S /Transparency ... >>`,
+/// ISO 32000-2 §11.4.5–§11.4.7) on a Form XObject or page dictionary.
+///
+/// Its `Debug` implementation reports flags without printing raw `/CS` object
+/// contents.
+#[derive(Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct TransparencyGroup<'a> {
+    /// `/I`: whether the group is isolated (`false` when absent).
+    pub isolated: bool,
+    /// `/K`: whether the group is a knockout group (`false` when absent).
+    pub knockout: bool,
+    /// `/CS`: optional group blending color space object.
+    pub color_space: Option<&'a Object>,
+}
+
+impl fmt::Debug for TransparencyGroup<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransparencyGroup")
+            .field("isolated", &self.isolated)
+            .field("knockout", &self.knockout)
+            .field("has_color_space", &self.color_space.is_some())
+            .finish()
+    }
+}
+
+impl<'o> TransparencyGroup<'o> {
+    /// Parses `/Group` on a page or Form XObject dictionary `dict` when its
+    /// `/S` entry is `/Transparency`.
+    #[must_use]
+    pub fn from_dict<R: Resolve<'o>>(objects: R, dict: &'o Dict) -> Option<TransparencyGroup<'o>> {
+        let group_val = dict.get(b"Group")?;
+        let group_obj = match group_val.as_reference() {
+            Some(id) => objects.resolve(id)?,
+            None => group_val,
+        };
+        let group = group_obj.as_dict()?;
+        let s_val = group.get(b"S")?;
+        let s_obj = match s_val.as_reference() {
+            Some(id) => objects.resolve(id)?,
+            None => s_val,
+        };
+        if s_obj.as_name() != Some(b"Transparency") {
+            return None;
+        }
+        let bool_at = |key: &[u8]| -> bool {
+            group
+                .get(key)
+                .and_then(|v| match v.as_reference() {
+                    Some(id) => objects.resolve(id),
+                    None => Some(v),
+                })
+                .and_then(Object::as_bool)
+                .unwrap_or(false)
+        };
+        Some(TransparencyGroup {
+            isolated: bool_at(b"I"),
+            knockout: bool_at(b"K"),
+            color_space: group.get(b"CS"),
+        })
+    }
+}
 
 /// Stable path of `Do` byte offsets from the page's content stream down to a
 /// specific Form XObject invocation.
@@ -62,6 +126,8 @@ pub struct FormUse<'e> {
     /// Optional content group or membership dictionary (`/OC`) referenced by
     /// the Form XObject dictionary, if any.
     pub oc: Option<ObjectId>,
+    /// Transparency group attributes (`/Group`), when `/S` is `/Transparency`.
+    pub group: Option<TransparencyGroup<'e>>,
 }
 
 /// Reason a Form XObject invocation (`Do`) was not entered
@@ -228,6 +294,7 @@ pub(crate) struct Form<'o> {
     pub(crate) bbox: Option<Rect>,
     pub(crate) resources: Option<&'o Object>,
     pub(crate) oc: Option<ObjectId>,
+    pub(crate) group: Option<TransparencyGroup<'o>>,
 }
 
 pub(crate) enum XObject<'o> {
@@ -291,6 +358,7 @@ impl<'o> XObject<'o> {
             .get(b"Resources")
             .filter(|r| reader.plain_dict_of(r).is_some());
         let oc = dict.get(b"OC").and_then(Object::as_reference);
+        let group = read_transparency_group(reader, dict);
         if let Some(unreadable) = reader.take_failure() {
             return Err(Error::Unreadable(unreadable));
         }
@@ -300,8 +368,24 @@ impl<'o> XObject<'o> {
             bbox,
             resources,
             oc,
+            group,
         }))
     }
+}
+
+fn read_transparency_group<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
+    reader: &ObjReader<'_, O, S>,
+    dict: &'o Dict,
+) -> Option<TransparencyGroup<'o>> {
+    let group = reader.dict_of_value(dict.get(b"Group")?)?;
+    if reader.name_or_bytes_for(group, b"S") != Some(b"Transparency") {
+        return None;
+    }
+    Some(TransparencyGroup {
+        isolated: reader.bool_for(group, b"I").unwrap_or(false),
+        knockout: reader.bool_for(group, b"K").unwrap_or(false),
+        color_space: group.get(b"CS"),
+    })
 }
 
 fn read_image_xobject<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(

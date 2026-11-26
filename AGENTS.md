@@ -16,38 +16,43 @@ This document gives developers and coding agents a fast mental model of the work
         ┌──────────────────┼─────────┬───────────┼──────────────────┐
         │                  ▼         │           │                  │
         │          ┌───────────────┐ │           │                  │
-        │          │   pdf-forms   │ │           │                  │
-        │          └───────┬───────┘ │           │                  │
-        │                  ▼         │           │                  │
-        │          ┌───────────────┐ │           │                  │
-        │          │  pdf-annots   │ │           │                  │
-        │          └───────┬───────┘ │           │                  │
-        │                  ▼         │           │                  │
-        │          ┌───────────────┐ │           │                  │
-        │          │    pdf-gfx    ├─┼───────────┤                  │
-        │          └───────┬───────┘ │           │                  │
-        │                  ├─────────┘           │                  │
-        ▼                  ▼                     ▼                  ▼
-┌───────────────┐  ┌───────────────┐     ┌───────────────┐  ┌───────────────┐
-│ pdf-linearize │  │   pdf-fonts   │     │ pdf-semantics │  │ pdf-arlington │
-└───────┬───────┘  └───────┬───────┘     └───────┬───────┘  └───────┬───────┘
-        │                  ▼                     │                  │
-        │        ┌───────────────────┐           │                  │
-        │        │pdf-content-streams│           │                  │
-        │        └─────────┬─────────┘           │                  │
-        ▼                  ▼                     │                  │
-┌───────────────┐  ┌───────────────┐             │                  │
-│ pdf-structure │  │   pdf-color   │             │                  │
-└──┬────┬────┬──┘  └───────┬───────┘             │                  │
-   │    │    └────────┐    └──────────┬──────────┴──────────────────┘
-   ▼    ▼             ▼               ▼
-┌───────────┐  ┌─────────────┐  ┌───────────┐
-│ pdf-crypt │  │ pdf-filters │  │pdf-objects│
-└───────────┘  └─────────────┘  └─────┬─────┘
-                                      ▼
-                               ┌─────────────┐
-                               │pdf-tokenizer│
-                               └─────────────┘
+        │          │  pdf-raster   │ │           │                  │
+        │          └───┬───────┬───┘ │           │                  │
+        │              │       ▼     │           │                  │
+        │              │ ┌───────────┴───┐       │                  │
+        │              │ │   pdf-forms   │       │                  │
+        │              │ └───────┬───────┘       │                  │
+        │              │         ▼               │                  │
+        │              │ ┌───────────────┐       │                  │
+        │              │ │  pdf-annots   │       │                  │
+        │              │ └───────┬───────┘       │                  │
+        │              │         ▼               │                  │
+        │              │ ┌───────────────┐       │                  │
+        │              │ │    pdf-gfx    ├─┬─────┤                  │
+        │              │ └───────┬───────┘ │     │                  │
+        │              ▼         ├─────────┘     │                  │
+        ▼      ┌───────────────┐ ▼               ▼                  ▼
+┌───────────────┐ │pdf-images│ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│ pdf-linearize │ └────┬─────┘ │   pdf-fonts   │ │ pdf-semantics │ │ pdf-arlington │
+└───────┬───────┘      │       └───────┬───────┘ └───────┬───────┘ └───────┬───────┘
+        │              ├───────────────┤                 │                 │
+        │              │               ▼                 │                 │
+        │              │     ┌───────────────────┐       │                 │
+        │              └────►│pdf-content-streams│       │                 │
+        │                    └─────────┬─────────┘       │                 │
+        ▼                              ▼                 │                 │
+┌───────────────┐              ┌───────────────┐         │                 │
+│ pdf-structure │              │   pdf-color   │         │                 │
+└──┬────┬────┬──┘              └───────┬───────┘         │                 │
+   │    │    └────────┐                └────────┬────────┴─────────────────┘
+   ▼    ▼             ▼                         ▼
+┌───────────┐  ┌─────────────┐            ┌───────────┐
+│ pdf-crypt │  │ pdf-filters │            │pdf-objects│
+└───────────┘  └─────────────┘            └─────┬─────┘
+                                                ▼
+                                         ┌─────────────┐
+                                         │pdf-tokenizer│
+                                         └─────────────┘
 ```
 
 *(Internal workspace-only crates: `crates/pdf-fixtures` provides test PDF and TrueType program builders and `qpdf` oracle helpers; `crates/pdf-pdfium` provides runtime-loaded `libpdfium` rendering and the `0–100` visual/ISO conformance rubric; `crates/pdf-linearize-lopdf` tests `pdf-linearize`'s model-agnostic engine against `lopdf`.)*
@@ -55,7 +60,7 @@ This document gives developers and coding agents a fast mental model of the work
 ## 2. Core Cross-Crate Concepts
 
 ### Zero-I/O Domain Crates (`Resolve` and `Streams`)
-Only `pdf-structure` (and `pdfs` on top of it) reads or writes files. Domain crates—`pdf-color`, `pdf-semantics`, `pdf-content-streams`, `pdf-images`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, `pdf-forms`, and `pdf-arlington`—operate over two traits defined in [`pdf-objects`](crates/pdf-objects):
+Only `pdf-structure` (and `pdfs` on top of it) reads or writes files. Domain crates—`pdf-color`, `pdf-semantics`, `pdf-content-streams`, `pdf-images`, `pdf-fonts`, `pdf-gfx`, `pdf-annots`, `pdf-forms`, `pdf-raster`, and `pdf-arlington`—operate over two traits defined in [`pdf-objects`](crates/pdf-objects):
 - **`Resolve`**: Resolves an indirect `ObjectId` to `Option<&Object>` (or `try_resolve` -> `Result<Option<&Object>, Unreadable>` to distinguish missing objects from locked, capped, damaged, or I/O-failed reads). Implemented for `&pdf_structure::Reading`, `&pdf_structure::Document`, `&pdf_structure::WithReading`, and any `Fn(ObjectId) -> Option<&Object>` closure.
 - **`Streams`**: Extends `Resolve` with `decoded(id, limit)` to return decrypted, filter-decoded stream bytes up to `limit`. Use `pdf_objects::WithStreams` to pair a closure resolver with a stream-decoding function in tests or custom callers.
 
@@ -99,7 +104,7 @@ Several automated tests enforce strict consistency across code and documentation
 1. **Feature-matrix compilation & rustdoc (`just clippy`, `just test`, `just doc`):**
    Crates are tested and documented with `--no-default-features` (e.g., `pdf-semantics` without `clock`, `pdf-linearize` without `family`, `pdf-fonts` without `programs` and with `embed` alone, `pdf-gfx`, `pdf-annots`, and `pdf-forms` without `programs`/`text-layout`, `pdf-gfx` and `pdf-forms` with `embed` alone and with `embed` and `text-layout`, `pdfs` without `programs`/`text-layout`/`clock`/`embed` and with `embed` alone, `pdf-filters` with only `zlib-rs`). Avoid unguarded `[`intra_doc_links`]` or doctests that reference feature-gated items when those features are off.
 2. **README doctests & `lib.rs` first-example parity:**
-   Each library crate compiles its `README.md` via `#[cfg(doctest)] #[doc = include_str!("../README.md")]`. In `pdfs`, `pdf-forms`, `pdf-annots`, `pdf-gfx`, `pdf-fonts`, `pdf-crypt`, `pdf-linearize`, `pdf-semantics`, and `pdf-content-streams`, a unit test asserts that the **first** ` ```rust ` block in `README.md` matches the **first** ` ``` ` block in `src/lib.rs` (`//!`) line-for-line.
+   Each library crate compiles its `README.md` via `#[cfg(doctest)] #[doc = include_str!("../README.md")]`. In `pdfs`, `pdf-raster`, `pdf-forms`, `pdf-annots`, `pdf-gfx`, `pdf-fonts`, `pdf-images`, `pdf-crypt`, `pdf-linearize`, `pdf-semantics`, and `pdf-content-streams`, a unit test asserts that the **first** ` ```rust ` block in `README.md` matches the **first** ` ``` ` block in `src/lib.rs` (`//!`) line-for-line.
 3. **README URLs & license links:**
    Published crates test that `README.md` contains exact GitHub `https://` links to `LICENSE-APACHE` and `LICENSE-MIT` (`LICENSE-APACHE` alone in `pdf-arlington` and `pdf-lint`, which are Apache-2.0 alone; and in `pdf-fonts`, exact links to `` [`FTL.TXT`](...) `` and `` [`assets/afm/MustRead.html`](...) ``), contains no `](../` relative paths, and in several crates uses `https://` for every Markdown link.
 4. **`pdf-lint` CLI `--help` sync:**

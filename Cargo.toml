@@ -30,6 +30,7 @@ members = [
     "crates/pdf-gfx",
     "crates/pdf-annots",
     "crates/pdf-forms",
+    "crates/pdf-raster",
     "crates/pdf-linearize",
     "crates/pdf-linearize-lopdf",
     "crates/pdfs",
@@ -72,6 +73,7 @@ pdf-fonts = { path = "crates/pdf-fonts", version = "=0.1.0-alpha.1", default-fea
 pdf-gfx = { path = "crates/pdf-gfx", version = "=0.1.0-alpha.1", default-features = false }
 pdf-annots = { path = "crates/pdf-annots", version = "=0.1.0-alpha.1", default-features = false }
 pdf-forms = { path = "crates/pdf-forms", version = "=0.1.0-alpha.1", default-features = false }
+pdf-raster = { path = "crates/pdf-raster", version = "=0.1.0-alpha.1", default-features = false }
 pdf-linearize = { path = "crates/pdf-linearize", version = "=0.1.0-alpha.1", default-features = false }
 pdf-arlington = { path = "crates/pdf-arlington", version = "=0.1.0-alpha.1" }
 
@@ -135,6 +137,14 @@ opt-level = 3
 # a second.
 [profile.dev.package.pdf-content-streams]
 opt-level = 1
+
+# Fine-strip 2D rasterization (`vello_cpu`) built optimized in dev/test runs so
+# page and PDFium rubric renders complete in milliseconds.
+[profile.dev.package.vello_cpu]
+opt-level = 2
+
+[profile.dev.package.vello_common]
+opt-level = 2
 
 # The checker's binary is built with thin LTO, across the crates it's made
 # of, which takes back what splitting it into them cost. Said twice: here,

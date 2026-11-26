@@ -160,6 +160,8 @@ jobs:
         run: just annots-msrv annots-cmaps-msrv
       - name: pdf-forms
         run: just forms-msrv forms-cmaps-msrv
+      - name: pdf-raster
+        run: just raster-msrv raster-cmaps-msrv
       - name: pdf-linearize
         run: just linearize-msrv
       - name: pdfs
@@ -208,6 +210,8 @@ jobs:
         run: just annots-package
       - name: pdf-forms
         run: just forms-package
+      - name: pdf-raster
+        run: just raster-package
       - name: pdf-linearize
         run: just linearize-package
       - name: pdfs

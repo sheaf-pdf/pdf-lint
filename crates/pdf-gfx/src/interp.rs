@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::{ControlFlow, Range};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use pdf_content_streams::{
     Concat, ImageStream, InlineImage, Limits as ContentLimits, Operand, Operation, Operator,
@@ -29,8 +30,8 @@ use crate::path::{self, Builder, PathDrawn};
 use crate::phases::phase;
 use crate::reader::ObjReader;
 use crate::state::{
-    self, ActiveColorSpace, BlendState, DashPattern, RenderingIntent, SoftMask, SoftMaskKind,
-    State, nums,
+    self, ActiveColorSpace, BlendState, ColorValues, DashPattern, RenderingIntent, SoftMask,
+    SoftMaskKind, State, nums,
 };
 use crate::text::{self, TextShow};
 use crate::xobject::{
@@ -125,6 +126,8 @@ pub struct At<'e> {
     /// stream.
     pub stream: Option<&'e UseId>,
     pub(crate) res: &'e ResCx,
+    resources: Option<&'e Object>,
+    page_resources: Option<&'e Object>,
     content: &'e [u8],
     operation: Option<Operation<'e>>,
 }
@@ -141,6 +144,21 @@ impl fmt::Debug for At<'_> {
 }
 
 impl<'e> At<'e> {
+    /// Active `/Resources` object for the content stream containing this event
+    /// (the Form XObject's own `/Resources`, or the page's when inherited or at
+    /// top level).
+    #[must_use]
+    pub const fn resources(&self) -> Option<&'e Object> {
+        self.resources
+    }
+
+    /// Top-level page `/Resources` object passed to [`interpret`] /
+    /// [`interpret_with`].
+    #[must_use]
+    pub const fn page_resources(&self) -> Option<&'e Object> {
+        self.page_resources
+    }
+
     /// Raw decoded bytes of the content stream containing this event.
     #[must_use]
     pub const fn content(&self) -> &'e [u8] {
@@ -538,6 +556,8 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         let eof_at = At {
             stream: frame.stream,
             res: frame.res,
+            resources: frame.resources,
+            page_resources: self.page,
             content: frame.content,
             operation: None,
         };
@@ -570,6 +590,8 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         let at = At {
             stream: frame.stream,
             res: frame.res,
+            resources: frame.resources,
+            page_resources: self.page,
             content: frame.content,
             operation: Some(step.clone()),
         };
@@ -895,6 +917,8 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         if let Some(smask_val) = gs.get(b"SMask") {
             if self.reader.seen(smask_val).and_then(Object::as_name) == Some(b"None") {
                 state.soft_mask = SoftMask::None;
+                state.soft_mask_backdrop = None;
+                state.soft_mask_transfer = None;
             } else if let Some(smask_dict) = self.reader.dict_of_value(smask_val) {
                 let kind = match self.reader.name_or_bytes_for(smask_dict, b"S") {
                     Some(b"Alpha") => Some(SoftMaskKind::Alpha),
@@ -905,7 +929,28 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
                     .get(b"G")
                     .and_then(Object::as_reference)
                     .filter(|&id| self.reader.stream(id).is_some());
+                let backdrop = self.reader.array_for(smask_dict, b"BC").and_then(|arr| {
+                    let mut vals = Vec::with_capacity(arr.len().min(16));
+                    for item in arr.iter().take(16) {
+                        let v = self.reader.float_of(item)?;
+                        if !v.is_finite() {
+                            return None;
+                        }
+                        vals.push(v);
+                    }
+                    Some(ColorValues::from_slice(&vals))
+                });
+                let transfer = smask_dict.get(b"TR").and_then(|tr| {
+                    let seen_name = self.reader.seen(tr).and_then(Object::as_name);
+                    if matches!(seen_name, Some(b"Identity" | b"Default")) {
+                        None
+                    } else {
+                        Some(Arc::new(tr.clone()))
+                    }
+                });
                 state.soft_mask = SoftMask::Mask { kind, group };
+                state.soft_mask_backdrop = backdrop;
+                state.soft_mask_transfer = transfer;
             }
         }
         if let Some(font_arr) = self.reader.array_for(gs, b"Font") {
@@ -1077,6 +1122,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         if self.opts.wants.paths {
             let drawn = PathDrawn {
                 segments: ended.segs,
+                user_segments: ended.user_segs,
                 paint: ended.paint,
                 clip: ended.clip,
                 bounds: ended.bounds,
@@ -1185,6 +1231,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
             matrix,
             bbox: form.bbox,
             oc: form.oc,
+            group: form.group,
         };
         let (resources, owner, res_cx) = match form.resources {
             Some(own) => {

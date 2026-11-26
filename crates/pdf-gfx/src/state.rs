@@ -13,7 +13,7 @@ use pdf_content_streams::{
     TextMode,
 };
 use pdf_fonts::FontId;
-use pdf_objects::ObjectId;
+use pdf_objects::{Object, ObjectId};
 
 use crate::clip::Clip;
 use crate::geom::{Matrix, Point, Rect};
@@ -341,6 +341,12 @@ pub struct State {
     pub blend_mode: BlendState,
     /// Active soft mask (`/ExtGState` `/SMask`; default [`SoftMask::None`]).
     pub soft_mask: SoftMask,
+    /// Optional backdrop color (`/BC`) on the active `/SMask` dictionary, in
+    /// the soft-mask transparency group's color space.
+    pub soft_mask_backdrop: Option<ColorValues>,
+    /// Optional transfer function (`/TR`) on the active `/SMask` dictionary
+    /// (`None` when absent or `/Identity`).
+    pub soft_mask_transfer: Option<Arc<Object>>,
     /// Stroking overprint flag (`/ExtGState` `/OP`; default `false`).
     pub stroke_overprint: bool,
     /// Nonstroking (fill) overprint flag (`/ExtGState` `/op`, falling back to
@@ -383,6 +389,8 @@ impl fmt::Debug for State {
             .field("text_knockout", &self.text_knockout)
             .field("blend_mode", &self.blend_mode)
             .field("soft_mask", &self.soft_mask)
+            .field("soft_mask_backdrop", &self.soft_mask_backdrop)
+            .field("has_soft_mask_transfer", &self.soft_mask_transfer.is_some())
             .field("stroke_overprint", &self.stroke_overprint)
             .field("fill_overprint", &self.fill_overprint)
             .field("overprint_mode", &self.overprint_mode)
@@ -476,6 +484,8 @@ impl Default for State {
             text_knockout: true,
             blend_mode: BlendState::default(),
             soft_mask: SoftMask::None,
+            soft_mask_backdrop: None,
+            soft_mask_transfer: None,
             stroke_overprint: false,
             fill_overprint: false,
             overprint_mode: 0,

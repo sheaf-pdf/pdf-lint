@@ -1,0 +1,87 @@
+[package]
+name = "pdf-raster"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-raster"
+description = "Zero-I/O pure-Rust PDF 2D page, Form XObject, annotation, and interactive form rasterizer"
+keywords = ["pdf", "rasterizer", "renderer", "graphics", "iso-32000"]
+categories = ["rendering", "graphics", "parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-annots.workspace = true
+pdf-color.workspace = true
+pdf-content-streams.workspace = true
+pdf-fonts.workspace = true
+pdf-forms.workspace = true
+pdf-gfx.workspace = true
+pdf-images.workspace = true
+pdf-objects.workspace = true
+pdf-semantics.workspace = true
+thiserror = "2"
+vello_cpu = { version = "0.4.0", default-features = false, features = ["std", "u8_pipeline"] }
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = ["programs", "text-layout", "icc"]
+# Forwards `programs` so embedded TrueType, OpenType/CFF, CFF, and Type 1 font
+# programs render exact vector glyph outlines.
+programs = [
+    "pdf-fonts/programs",
+    "pdf-gfx/programs",
+    "pdf-annots/programs",
+    "pdf-forms/programs",
+]
+# Forwards `text-layout` so un-synthesized FreeText annotations and interactive
+# AcroForm text, button, and choice widgets synthesize appearances on demand.
+text-layout = [
+    "pdf-gfx/text-layout",
+    "pdf-annots/text-layout",
+    "pdf-forms/text-layout",
+]
+# Enables pure-Rust ICC profile evaluation (`moxcms`) in `pdf-color` and
+# `pdf-images`.
+icc = ["pdf-color/icc", "pdf-images/icc"]
+# Forwards bundled Adobe CJK CMaps (`hayro-cmap`).
+predefined-cmaps = [
+    "pdf-fonts/predefined-cmaps",
+    "pdf-gfx/predefined-cmaps",
+    "pdf-annots/predefined-cmaps",
+    "pdf-forms/predefined-cmaps",
+]
+# Enables runtime CPU SIMD dispatch in `vello_cpu` and image codecs.
+simd = ["pdf-images/simd", "pdf-content-streams/simd"]
+# Forwards `zlib-rs` to `pdf-images` for standard inline filter chains.
+zlib-rs = ["pdf-images/zlib-rs"]
+# Emits numeric `tracing` spans (dimensions, counts, and byte lengths only;
+# never pixel buffers, stream payloads, or file plaintext).
+tracing = [
+    "dep:tracing",
+    "pdf-images/tracing",
+    "pdf-content-streams/tracing",
+    "pdf-semantics/tracing",
+    "pdf-fonts/tracing",
+    "pdf-gfx/tracing",
+    "pdf-annots/tracing",
+    "pdf-forms/tracing",
+]
+
+[package.metadata.docs.rs]
+features = ["predefined-cmaps", "simd", "zlib-rs", "tracing"]
+
+[lib]
+bench = false
+
+[dev-dependencies]
+pdf-fixtures = { path = "../pdf-fixtures" }
+pdf-pdfium = { path = "../pdf-pdfium" }
+pdf-structure = { path = "../pdf-structure" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

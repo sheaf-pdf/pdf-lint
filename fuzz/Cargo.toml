@@ -248,6 +248,7 @@ pdf-lint = { path = "../crates/pdf-lint", default-features = false }
 # input writes the same bytes each run, and a saved one reruns as it ran.
 pdfs = { path = "../crates/pdfs", features = ["insecure-test-writer"] }
 pdf-objects = { path = "../crates/pdf-objects" }
+pdf-raster = { path = "../crates/pdf-raster" }
 # With its default features, so the semantics target fuzzes the clock's
 # reading of a count of seconds too.
 pdf-semantics = { path = "../crates/pdf-semantics" }
@@ -255,11 +256,11 @@ pdf-structure = { path = "../crates/pdf-structure", features = ["insecure-test-w
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [features]
-# pdf-content-streams' and pdf-images' dependencies on the CPU's SIMD, found as they run.
-simd = ["pdf-content-streams/simd", "pdf-images/simd"]
+# pdf-content-streams', pdf-images' and pdf-raster's dependencies on the CPU's SIMD, found as they run.
+simd = ["pdf-content-streams/simd", "pdf-images/simd", "pdf-raster/simd"]
 # Adobe's predefined CMaps, from pdf-fonts' bundle, so a name that's one
 # reaches it.
-predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps", "pdf-annots/predefined-cmaps", "pdf-forms/predefined-cmaps"]
+predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps", "pdf-annots/predefined-cmaps", "pdf-forms/predefined-cmaps", "pdf-raster/predefined-cmaps"]
 
 [[bin]]
 name = "tokenize"
@@ -362,6 +363,13 @@ bench = false
 [[bin]]
 name = "forms"
 path = "fuzz_targets/forms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raster"
+path = "fuzz_targets/raster.rs"
 test = false
 doc = false
 bench = false

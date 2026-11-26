@@ -40,7 +40,7 @@ use std::sync::{Mutex, PoisonError};
 
 use skrifa::MetadataProvider;
 use skrifa::instance::{LocationRef, Size};
-use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::outline::{DrawSettings, HintingInstance, HintingMode, HintingOptions, OutlinePen};
 use skrifa::raw::model::Error as PsError;
 use skrifa::raw::ps::cff::CffFontRef;
 use skrifa::raw::ps::cff::index::Index;
@@ -52,7 +52,7 @@ use skrifa::raw::tables::glyf::{Anchor, Glyph};
 use skrifa::raw::types::{CFF_SFNT_VERSION, Fixed, GlyphId, Tag};
 use skrifa::raw::{FileRef, FontRead, FontRef, TableProvider};
 
-use crate::font::{Base, OwnText, Simple, SimpleMap};
+use crate::font::{Base, OutlineVerb, OwnText, Simple, SimpleMap};
 use crate::type1::Refusal;
 use crate::{Encoding, GlyphBox, Limits, glyph_text, name_code_point, type1};
 
@@ -68,6 +68,8 @@ pub(crate) struct Face {
     bbox: [i32; 4],
     ascender: i32,
     descender: i32,
+    /// Whether FreeType draws its glyphs hinted regardless of caller flags.
+    tricky: bool,
     /// Whether its glyphs' boxes are PDFium's: not where FreeType draws
     /// them hinted (a tricky TrueType font), where its units per em aren't
     /// FreeType's, or where a Type 1 font's charstrings aren't found as
@@ -154,6 +156,7 @@ impl Face {
             bbox: [0; 4],
             ascender: 0,
             descender: 0,
+            tricky: false,
             exact: true,
             units: true,
             glyphs: 0,
@@ -286,7 +289,8 @@ impl Face {
             (_, _, Some(win)) => win,
             _ => hhea,
         };
-        self.exact &= !tricky(font, named);
+        self.tricky = tricky(font, named);
+        self.exact &= !self.tricky;
         if self.format == Format::Glyf {
             // FreeType takes a `loca` as long for any format but 0, read-fonts only for
             // 1; and with long metrics that don't fit `hmtx`, or none, FreeType reads on
@@ -312,6 +316,10 @@ impl Face {
             Some((font, scanned)) => Some(View::Type1 { font, scanned }),
             None => view(&self.data, self.format, self.upem),
         }
+    }
+
+    pub(crate) fn upem(&self) -> u16 {
+        self.upem
     }
 
     /// Its box's left, bottom, right and top, as it gives them, and its heights, in
@@ -419,6 +427,42 @@ fn view(data: &[u8], format: Format, upem: u16) -> Option<View<'_>> {
         // Read once, as the face is opened.
         Format::Type1 => return None,
     })
+}
+
+/// A simple font's program and code-to-glyph map, retained for contour
+/// extraction ([`crate::Font::outline`]).
+pub(crate) struct SimpleGlyphs {
+    face: Face,
+    gids: Box<[Option<u16>; 256]>,
+}
+
+impl std::fmt::Debug for SimpleGlyphs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimpleGlyphs")
+            .field("format", &self.face.format)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SimpleGlyphs {
+    pub(crate) fn new(face: Face, gids: Box<[Option<u16>; 256]>) -> SimpleGlyphs {
+        SimpleGlyphs { face, gids }
+    }
+
+    pub(crate) fn outline(
+        &self,
+        code: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> bool {
+        let Some(&Some(gid)) = self.gids.get(code as usize) else {
+            return false;
+        };
+        let Some(view) = self.face.view() else {
+            return false;
+        };
+        self.face.outline_gid(&view, u32::from(gid), hint_ppem, out)
+    }
 }
 
 /// A CIDFont's program, its glyphs drawn as they're asked for, each once.
@@ -1259,6 +1303,10 @@ impl Face {
                 }
             }
         }
+        map.gids = Box::new(gids.map(|gid| match gid {
+            Gid::Glyph(g) => Some(g),
+            Gid::None | Gid::Unknown => None,
+        }));
         // Where its boxes aren't PDFium's, none is said, what has no glyph among them.
         if !self.exact {
             return map;
@@ -2356,5 +2404,505 @@ impl<'a> Format2<'a> {
             0 => 0,
             g => (i32::from(g) + i32::from(delta)) as u32 & 0xFFFF,
         }
+    }
+}
+
+impl CidGlyphs {
+    pub(crate) fn outline(
+        &self,
+        cid: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> bool {
+        let cid_u16 = usize::from(cid as u16);
+        let gid = match &self.to_gid {
+            Some(map) => map
+                .get(cid_u16 * 2..cid_u16 * 2 + 2)
+                .map(|g| u32::from(u16::from_be_bytes([g[0], g[1]]))),
+            None => Some(cid_u16 as u32),
+        };
+        let Some(gid) = gid else {
+            return false;
+        };
+        let Some(view) = self.face.view() else {
+            return false;
+        };
+        self.face.outline_gid(&view, gid, hint_ppem, out)
+    }
+}
+
+impl Face {
+    /// Emits contour verbs in glyph units (`1000.0` = 1 em) for `gid`.
+    fn outline_gid(
+        &self,
+        view: &View<'_>,
+        gid: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> bool {
+        if self.upem == 0 {
+            return false;
+        }
+        let start_len = out.len();
+        let ok = match view {
+            View::Glyf(font) => outline_glyf(
+                font,
+                gid,
+                self.upem,
+                self.glyphs,
+                self.composites,
+                self.tricky,
+                hint_ppem,
+                out,
+            ),
+            View::Cff { cff, .. } => {
+                outline_cff(cff, self.cids.as_deref(), gid, self.upem, self.fuel, out)
+            }
+            View::Type1 { font, scanned } => {
+                outline_type1(font, scanned, gid, self.upem, self.fuel, out)
+            }
+        };
+        if !ok {
+            out.truncate(start_len);
+        }
+        ok
+    }
+
+    /// Maps `ch` via this face's charmaps, emits its outline in glyph units, and
+    /// returns its horizontal advance in glyph units (`1000.0` = 1 em).
+    pub(crate) fn outline_char(
+        &self,
+        ch: char,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> Option<f32> {
+        if self.upem == 0 {
+            return None;
+        }
+        let view = self.view()?;
+        let mut charmaps = Charmaps::of(&view, self.glyphs);
+        let gid = if charmaps.select_unicode() {
+            match charmaps.gid(u32::from(ch)) {
+                Gid::Glyph(g) if g != 0 => Some(u32::from(g)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+        .or_else(|| {
+            if u32::from(ch) <= 0xFF && charmaps.select_id(3, 0) {
+                match charmaps.ms_symbol(ch as u8) {
+                    Gid::Glyph(g) if g != 0 => Some(u32::from(g)),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })?;
+
+        if !self.outline_gid(&view, gid, hint_ppem, out) {
+            return None;
+        }
+        let scale = 1000.0 / f32::from(self.upem);
+        let advance = match &view {
+            View::Glyf(font)
+            | View::Cff {
+                sfnt: Some(font), ..
+            } => font
+                .hmtx()
+                .ok()
+                .and_then(|hmtx| hmtx.advance(GlyphId::new(gid)))
+                .map(|adv| f32::from(adv) * scale)
+                .unwrap_or(600.0),
+            _ => 600.0,
+        };
+        Some(advance)
+    }
+}
+
+struct ScaledPen<'a> {
+    scale: f32,
+    out: &'a mut Vec<OutlineVerb>,
+    ok: bool,
+}
+
+impl ScaledPen<'_> {
+    fn map(&self, x: f32, y: f32) -> (f32, f32) {
+        (x * self.scale, y * self.scale)
+    }
+
+    fn check(&mut self, x: f32, y: f32) -> bool {
+        let finite = x.is_finite() && y.is_finite();
+        self.ok &= finite;
+        finite
+    }
+}
+
+impl OutlinePen for ScaledPen<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map(x, y);
+        if self.check(x, y) {
+            self.out.push(OutlineVerb::MoveTo(x, y));
+        }
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map(x, y);
+        if self.check(x, y) {
+            self.out.push(OutlineVerb::LineTo(x, y));
+        }
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        let (cx0, cy0) = self.map(cx0, cy0);
+        let (x, y) = self.map(x, y);
+        if self.check(cx0, cy0) && self.check(x, y) {
+            self.out.push(OutlineVerb::QuadTo(cx0, cy0, x, y));
+        }
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        let (cx0, cy0) = self.map(cx0, cy0);
+        let (cx1, cy1) = self.map(cx1, cy1);
+        let (x, y) = self.map(x, y);
+        if self.check(cx0, cy0) && self.check(cx1, cy1) && self.check(x, y) {
+            self.out
+                .push(OutlineVerb::CurveTo(cx0, cy0, cx1, cy1, x, y));
+        }
+    }
+
+    fn close(&mut self) {
+        self.out.push(OutlineVerb::Close);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn outline_glyf(
+    font: &FontRef<'_>,
+    gid: u32,
+    upem: u16,
+    glyphs: u32,
+    most: (u64, u8),
+    tricky_font: bool,
+    hint_ppem: Option<f32>,
+    out: &mut Vec<OutlineVerb>,
+) -> bool {
+    if gid >= glyphs {
+        return false;
+    }
+    let Some((loca, glyf)) = font.loca(None).ok().zip(font.glyf().ok()) else {
+        return false;
+    };
+    let data = font
+        .table_data(Tag::new(b"glyf"))
+        .map_or(&[][..], |d| d.as_bytes());
+    let (at, len) = glyph_location(&loca, data.len(), gid);
+    let contours = data
+        .get(at..at + 2)
+        .map(|c| i16::from_be_bytes([c[0], c[1]]));
+    match (len, contours) {
+        (0, _) | (_, Some(0)) => return true,
+        (1..10, _) => return false,
+        _ => {}
+    }
+    let mut counted = HashMap::new();
+    let mut read = 0;
+    let Some((nodes, points)) = composite_glyphs(
+        &loca,
+        &glyf,
+        (glyphs, most.1),
+        gid,
+        0,
+        &mut counted,
+        &mut read,
+    ) else {
+        return false;
+    };
+    if nodes > most.0 || points > u64::from(u16::MAX) {
+        return false;
+    }
+    let outlines = font.outline_glyphs();
+    let Some(glyph) = outlines.get(GlyphId::new(gid)) else {
+        return false;
+    };
+
+    let want_ppem = match (hint_ppem, tricky_font) {
+        (Some(p), _) if p.is_finite() && p >= 4.0 => Some(p.min(512.0)),
+        (None, true) => Some(16.0),
+        _ => None,
+    };
+    if let Some(ppem) = want_ppem {
+        let opts = HintingOptions::from(HintingMode::Smooth {
+            lcd_subpixel: None,
+            preserve_linear_metrics: true,
+        });
+        if let Ok(hinter) =
+            HintingInstance::new(&outlines, Size::new(ppem), LocationRef::default(), opts)
+        {
+            let start = out.len();
+            let mut pen = ScaledPen {
+                scale: 1000.0 / ppem,
+                out,
+                ok: true,
+            };
+            if glyph
+                .draw(DrawSettings::hinted(&hinter, false), &mut pen)
+                .is_ok()
+                && pen.ok
+            {
+                return true;
+            }
+            pen.out.truncate(start);
+        }
+    }
+
+    let mut pen = ScaledPen {
+        scale: 1000.0 / f32::from(upem),
+        out,
+        ok: true,
+    };
+    glyph
+        .draw(
+            DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
+            &mut pen,
+        )
+        .is_ok()
+        && pen.ok
+}
+
+struct PsOutlineSink<'a> {
+    matrix: Option<FontMatrix>,
+    scale: Option<i64>,
+    to_glyph: f64,
+    at: (Fixed, Fixed),
+    moved: Option<(Fixed, Fixed)>,
+    masked: bool,
+    open_contour: bool,
+    out: &'a mut Vec<OutlineVerb>,
+    ok: bool,
+}
+
+impl PsOutlineSink<'_> {
+    fn transform(&mut self, x: Fixed, y: Fixed) -> Option<(f32, f32)> {
+        let (mut xf, mut yf) = (x.to_f64(), y.to_f64());
+        if let Some(m) = self.matrix {
+            (xf, yf) = (
+                xf * m.xx.to_f64() + yf * m.xy.to_f64() + m.dx.to_f64(),
+                xf * m.yx.to_f64() + yf * m.yy.to_f64() + m.dy.to_f64(),
+            );
+        }
+        if let Some(s) = self.scale {
+            let sf = s as f64 / 65536.0;
+            xf *= sf;
+            yf *= sf;
+        }
+        let (ox, oy) = ((xf * self.to_glyph) as f32, (yf * self.to_glyph) as f32);
+        if ox.is_finite() && oy.is_finite() {
+            Some((ox, oy))
+        } else {
+            self.ok = false;
+            None
+        }
+    }
+
+    fn flush_move(&mut self) -> bool {
+        if let Some((mx, my)) = self.moved.take() {
+            if self.open_contour {
+                self.out.push(OutlineVerb::Close);
+                self.open_contour = false;
+            }
+            if let Some((ox, oy)) = self.transform(mx, my) {
+                self.out.push(OutlineVerb::MoveTo(ox, oy));
+                self.open_contour = true;
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn finish(&mut self) {
+        if self.open_contour {
+            self.out.push(OutlineVerb::Close);
+            self.open_contour = false;
+        }
+    }
+}
+
+impl CommandSink for PsOutlineSink<'_> {
+    fn move_to(&mut self, x: Fixed, y: Fixed) {
+        if self.open_contour {
+            self.out.push(OutlineVerb::Close);
+            self.open_contour = false;
+        }
+        self.moved = Some((x, y));
+        self.at = (x, y);
+    }
+
+    fn line_to(&mut self, x: Fixed, y: Fixed) {
+        if self.at == (x, y) && !self.masked {
+            return;
+        }
+        self.masked = false;
+        if !self.flush_move() {
+            return;
+        }
+        if let Some((ox, oy)) = self.transform(x, y) {
+            self.out.push(OutlineVerb::LineTo(ox, oy));
+        }
+        self.at = (x, y);
+    }
+
+    fn curve_to(&mut self, cx0: Fixed, cy0: Fixed, cx1: Fixed, cy1: Fixed, x: Fixed, y: Fixed) {
+        self.masked = false;
+        if !self.flush_move() {
+            return;
+        }
+        if let (Some((ox0, oy0)), Some((ox1, oy1)), Some((ox, oy))) = (
+            self.transform(cx0, cy0),
+            self.transform(cx1, cy1),
+            self.transform(x, y),
+        ) {
+            self.out
+                .push(OutlineVerb::CurveTo(ox0, oy0, ox1, oy1, ox, oy));
+        }
+        self.at = (x, y);
+    }
+
+    fn close(&mut self) {
+        if self.open_contour {
+            self.out.push(OutlineVerb::Close);
+            self.open_contour = false;
+        }
+        self.moved = None;
+    }
+
+    fn hint_mask(&mut self, _: &[u8]) {
+        self.masked = true;
+    }
+}
+
+fn outline_cff(
+    cff: &CffFontRef<'_>,
+    cids: Option<&[Option<u16>]>,
+    gid: u32,
+    upem: u16,
+    fuel: usize,
+    out: &mut Vec<OutlineVerb>,
+) -> bool {
+    let gid = match cids {
+        Some(cids) if gid != 0 => match cids.get(gid as usize).copied().flatten() {
+            Some(g) => u32::from(g),
+            None => return false,
+        },
+        _ if gid >= cff.num_glyphs() => return false,
+        _ => gid,
+    };
+    let glyph = GlyphId::new(gid);
+    let Some(subfont) = cff
+        .subfont_index(glyph)
+        .and_then(|i| cff.subfont(i, &[]).ok())
+    else {
+        return false;
+    };
+    let top = cff.matrix().copied();
+    let top_units = top.map_or(i32::from(upem), |m| m.scale);
+    let (matrix, scale) = match (cff.is_cid(), subfont.matrix()) {
+        (true, Some(&sub)) => {
+            let sub = match top {
+                Some(top) => top.combine(&sub),
+                None => sub.normalize(),
+            };
+            let scale = (sub.scale != top_units)
+                .then(|| mul_div(0x10000, i64::from(top_units), i64::from(sub.scale)));
+            (Some(sub.matrix), scale)
+        }
+        _ => (top.map(|m| m.matrix), None),
+    };
+    let subrs = match subfont.subrs_offset() {
+        0 => Index::Empty,
+        at => match cff
+            .data()
+            .get(at as usize..)
+            .and_then(|d| Index::new(d, false).ok())
+        {
+            Some(index) => index,
+            None => return false,
+        },
+    };
+    let Some(charstring) = cff.charstrings().get(gid as usize) else {
+        return false;
+    };
+    let context = Type2 {
+        cff,
+        subrs: &subrs,
+        fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
+    };
+    if context.fuel.0.get() == 0 {
+        return false;
+    }
+    let mut sink = PsOutlineSink {
+        matrix: matrix.filter(|&m| m != FontMatrix::IDENTITY),
+        scale,
+        to_glyph: 1000.0 / f64::from(upem),
+        at: (Fixed::ZERO, Fixed::ZERO),
+        moved: None,
+        masked: false,
+        open_contour: false,
+        out,
+        ok: true,
+    };
+    if charstring::evaluate(&context, None, charstring, &mut sink).is_ok() && sink.ok {
+        sink.finish();
+        true
+    } else {
+        false
+    }
+}
+
+fn outline_type1(
+    font: &Type1Font,
+    scanned: &type1::Scanned,
+    gid: u32,
+    upem: u16,
+    fuel: usize,
+    out: &mut Vec<OutlineVerb>,
+) -> bool {
+    if gid >= font.num_glyphs() {
+        return false;
+    }
+    let found = font
+        .glyph_name(GlyphId::new(gid))
+        .and_then(|n| scanned.charstrings.get(n.as_bytes()));
+    let Some(Some(charstring)) = found else {
+        return false;
+    };
+    let context = Type1 {
+        font,
+        build_char_len: scanned.build_char_len,
+        fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
+    };
+    if context.fuel.0.get() == 0 {
+        return false;
+    }
+    let mut sink = PsOutlineSink {
+        matrix: font
+            .subfont(0)
+            .map(Subfont::matrix)
+            .filter(|&m| m != FontMatrix::IDENTITY),
+        scale: None,
+        to_glyph: 1000.0 / f64::from(upem),
+        at: (Fixed::ZERO, Fixed::ZERO),
+        moved: None,
+        masked: false,
+        open_contour: false,
+        out,
+        ok: true,
+    };
+    if charstring::evaluate(&context, None, charstring, &mut sink).is_ok() && sink.ok {
+        sink.finish();
+        true
+    } else {
+        false
     }
 }

@@ -197,7 +197,7 @@ pub use wrap::{
     TextBoxError, TextBoxStyle, UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for,
     layout_text,
 };
-pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, UseId};
+pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, TransparencyGroup, UseId};
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]
