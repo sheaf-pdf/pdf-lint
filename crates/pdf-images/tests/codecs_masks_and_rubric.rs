@@ -1104,11 +1104,9 @@ fn composite_over_white(img: &pdf_images::RgbaImage) -> PdfiumImage {
 }
 
 #[test]
+#[ignore = "requires libpdfium in PDF_RASTER_PDFIUM (run via `just test-pdfium`)"]
 fn pdfium_oracle_rubric_verifies_all_codecs_and_masks_against_chromium_8152() {
-    let Ok(pdfium) = Pdfium::try_global() else {
-        assert!(std::env::var_os("PDF_LINT_PDFIUM").is_none());
-        return;
-    };
+    let pdfium = Pdfium::try_global().expect("PDF_RASTER_PDFIUM must load libpdfium");
 
     // Prepare 7 live PDF cases spanning DCT (RGB & CMYK), CCITT Group 4, JBIG2 + Globals,
     // JPX 16-bit, `/ImageMask` stencil, and `/SMask` + `/Matte`!
@@ -1310,4 +1308,94 @@ fn pdfium_oracle_rubric_verifies_all_codecs_and_masks_against_chromium_8152() {
         .unwrap();
         assert!(outcome.passed, "case `{name}` failed rubric: {outcome:?}");
     }
+}
+
+#[test]
+fn raw_image_with_more_than_32_components_decodes_without_panicking() {
+    // 33-component `DeviceN` raw image with a Type 4 PostScript tint transform
+    // that discards 32 inputs and maps the first component onto `[c0, 0.5, 1.0 - c0]`.
+    let mut ps_body = String::from("{ ");
+    for _ in 0..32 {
+        ps_body.push_str("pop ");
+    }
+    ps_body.push_str("dup 0.5 exch 1.0 exch sub }");
+    let ps_bytes = ps_body.into_bytes();
+
+    let mut domain = Vec::with_capacity(66);
+    for _ in 0..33 {
+        domain.push(Object::from(0.0));
+        domain.push(Object::from(1.0));
+    }
+    let names: Vec<Object> = (0..33).map(|i| Object::name(format!("Spot{i}"))).collect();
+
+    let mut objects = BTreeMap::new();
+    let tint_id = ObjectId::new(10, 0);
+    objects.insert(
+        tint_id,
+        Object::from(Stream::new(
+            dict! {
+                "FunctionType" => 4,
+                "Domain" => domain,
+                "Range" => vec![
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                ],
+            },
+            ps_bytes,
+        )),
+    );
+
+    let xobj_id = ObjectId::new(11, 0);
+    // 2x1 image, 8 bpc, 33 components = 66 sample bytes:
+    // pixel (0, 0) has Spot0 = 255 (`1.0` -> `[255, 128, 0]`),
+    // pixel (1, 0) has Spot0 = 0 (`0.0` -> `[0, 128, 255]`).
+    let mut img_samples = vec![0_u8; 66];
+    img_samples[0] = 255;
+    objects.insert(
+        xobj_id,
+        Object::from(Stream::new(
+            dict! {
+                "Type" => Object::name("XObject"),
+                "Subtype" => Object::name("Image"),
+                "Width" => 2,
+                "Height" => 1,
+                "BitsPerComponent" => 8,
+                "ColorSpace" => vec![
+                    Object::name("DeviceN"),
+                    Object::from(names),
+                    Object::name("DeviceRGB"),
+                    Object::from(tint_id),
+                ],
+            },
+            img_samples,
+        )),
+    );
+
+    let provider = empty_provider(&objects);
+    let raw = decode_stream_raw(
+        provider,
+        objects.get(&xobj_id).unwrap().as_stream().unwrap(),
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(raw.components(), 33);
+
+    let mut dec_px = [0.0_f32; 33];
+    assert!(raw.pixel_decoded(0, 0, &mut dec_px));
+    assert!((dec_px[0] - 1.0).abs() < 1e-5);
+    assert!((dec_px[32] - 0.0).abs() < 1e-5);
+
+    let rgba = decode_xobject(
+        provider,
+        xobj_id,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(rgba.pixel(0, 0), Some([255, 128, 0, 255]));
+    assert_eq!(rgba.pixel(1, 0), Some([0, 128, 255, 255]));
 }

@@ -471,20 +471,16 @@ mod tests {
 
     #[cfg(feature = "pdfium")]
     #[test]
+    #[ignore = "requires libpdfium in PDF_RASTER_PDFIUM (run via `just test-pdfium`)"]
     fn rust_and_pdfium_backends_agree_across_pages_tiles_formats_rotations_and_encryption() {
         use std::sync::Arc;
 
-        use crate::pdf_raster::pdfium::Error as PdfiumError;
         use crate::pdf_raster::rubric::{RubricProfile, compare_backends};
         use crate::pdf_raster::{AntiAlias, BackendError, RenderBackend};
         use crate::prelude::*;
 
         let rust = RustBackend::new();
-        let pdfium = match PdfiumBackend::from_env() {
-            Ok(b) => b,
-            Err(PdfiumError::LibraryNotFound { .. }) => return,
-            Err(other) => panic!("unexpected libpdfium load error: {other}"),
-        };
+        let pdfium = PdfiumBackend::from_env().expect("PDF_RASTER_PDFIUM must load libpdfium");
 
         let mut doc = Document::new();
         {

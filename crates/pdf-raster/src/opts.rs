@@ -23,7 +23,7 @@ pub struct ResolvedViewport {
 }
 
 /// Target region and scale to rasterize — shaped directly around viewer full-page
-/// and tile jobs (`sheaf`) as well as DPI and custom affine views.
+/// and tile rendering as well as DPI and custom affine views.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Viewport {

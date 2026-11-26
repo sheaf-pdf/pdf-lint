@@ -314,6 +314,7 @@ test-pdfium:
             "$lib" {{ pdfium_sets }} --build {{ pdfium_build }}
     fi
     env -u GH_TOKEN -u GITHUB_TOKEN PDF_RASTER_PDFIUM="$lib" cargo nextest run --locked \
+        --run-ignored only -E 'test(pdfium)' \
         -p pdf-color -p pdf-images -p pdf-raster -p pdfs \
         --features pdf-color/icc,pdf-raster/pdfium,pdfs/pdfium
 

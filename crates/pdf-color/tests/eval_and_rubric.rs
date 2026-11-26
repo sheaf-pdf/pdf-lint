@@ -638,11 +638,9 @@ where
 }
 
 #[test]
+#[ignore = "requires libpdfium in PDF_RASTER_PDFIUM (run via `just test-pdfium`)"]
 fn pdfium_oracle_rubric_conforming_wild_and_iso_normative_suites() {
-    let Ok(pdfium) = Pdfium::try_global() else {
-        assert!(std::env::var_os("PDF_LINT_PDFIUM").is_none());
-        return;
-    };
+    let pdfium = Pdfium::try_global().expect("PDF_RASTER_PDFIUM must load libpdfium");
 
     // --- Suite 1: ConformingCore (ISO == PDFium, 0 faults, >= 98.0 Imperceptible/Exact vs PDFium) ---
     // Exercises DeviceGray, DeviceRGB, CalRGB (D50), Lab (D65), Indexed (palette), Separation (Type 2),
@@ -946,11 +944,9 @@ fn pdfium_oracle_rubric_conforming_wild_and_iso_normative_suites() {
 
 #[cfg(feature = "icc")]
 #[test]
+#[ignore = "requires libpdfium in PDF_RASTER_PDFIUM (run via `just test-pdfium`)"]
 fn pdfium_oracle_icc_swatch_strip_matches_chromium_8152() {
-    let Ok(pdfium) = Pdfium::try_global() else {
-        assert!(std::env::var_os("PDF_LINT_PDFIUM").is_none());
-        return;
-    };
+    let pdfium = Pdfium::try_global().expect("PDF_RASTER_PDFIUM must load libpdfium");
 
     let adobe_rgb = moxcms::ColorProfile::new_adobe_rgb().encode().unwrap();
     let gray_18 = moxcms::ColorProfile::new_gray_with_gamma(1.8)
@@ -1031,4 +1027,185 @@ fn pdfium_oracle_icc_swatch_strip_matches_chromium_8152() {
     )
     .unwrap();
     assert!(outcome.passed, "{outcome:?}");
+}
+
+#[test]
+fn icc_based_at_space_depth_limit_never_panics_and_stitching_shares_sample_budget() {
+    use std::collections::BTreeMap;
+
+    // 1. `ICCBased` with `limits.space_depth = 0` must gracefully return `Ok(None)`,
+    //    and an `ICCBased` space at `depth == limits.space_depth` (e.g. via `/DefaultRGB`
+    //    or a 70-deep `/Alternate` chain) must fall back to the unprofiled device space
+    //    without panicking!
+    let mut store: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    store.insert(
+        ObjectId::new(1, 0),
+        Object::from(Stream::new(
+            dict! { "N" => 3, "Alternate" => Object::name("DeviceRGB") },
+            b"not-a-valid-icc-profile".to_vec(),
+        )),
+    );
+    let icc_root = Object::from(vec![Object::name("ICCBased"), Object::reference(1)]);
+
+    let mut zero_depth = Limits::DEFAULT;
+    zero_depth.space_depth = 0;
+    let store_streams = WithStreams::new(&store, |id, limit| {
+        let Some(s) = store.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "missing"));
+        };
+        let bytes = s.data.bytes().unwrap();
+        if bytes.len() > limit {
+            return Err(Unreadable::new(id, Why::Limit, "past limit"));
+        }
+        Ok(bytes.to_vec())
+    });
+    let prep_zero = PreparedSpace::prepare(
+        store_streams,
+        &icc_root,
+        &EvalOptions::ISO,
+        &zero_depth,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        prep_zero.eval_srgb8(&[1.0, 0.0, 0.0], &zero_depth),
+        Some([255, 0, 0])
+    );
+
+    // `/DefaultRGB` pointing to `ICCBased` with `space_depth = 1` reaches `prepare_icc`
+    // at `depth == 1 == limits.space_depth`, where `depth + 1 > space_depth`: must not panic!
+    let mut depth_one = Limits::DEFAULT;
+    depth_one.space_depth = 1;
+    let mut def_opts = EvalOptions::ISO;
+    def_opts.default_rgb = Some(&icc_root);
+    let prep_def = PreparedSpace::prepare(
+        store_streams,
+        &Object::name("DeviceRGB"),
+        &def_opts,
+        &depth_one,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        prep_def.eval_srgb8(&[1.0, 0.0, 0.0], &depth_one),
+        Some([255, 0, 0])
+    );
+
+    // Build a 70-deep chain of `ICCBased` `/Alternate`s exceeding `Limits::DEFAULT.space_depth` (64).
+    let mut chain_store: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    chain_store.insert(
+        ObjectId::new(100, 0),
+        Object::from(Stream::new(
+            dict! { "N" => 3, "Alternate" => Object::name("DeviceRGB") },
+            b"bad-icc".to_vec(),
+        )),
+    );
+    for idx in (1..70_u32).rev() {
+        let next_ref = Object::from(vec![
+            Object::name("ICCBased"),
+            Object::from(ObjectId::new(idx + 1 + 99, 0)),
+        ]);
+        chain_store.insert(
+            ObjectId::new(idx + 99, 0),
+            Object::from(Stream::new(
+                dict! { "N" => 3, "Alternate" => next_ref },
+                b"bad-icc".to_vec(),
+            )),
+        );
+    }
+    let chain_head = Object::from(vec![
+        Object::name("ICCBased"),
+        Object::from(ObjectId::new(100, 0)),
+    ]);
+    let chain_streams = WithStreams::new(&chain_store, |id, limit| {
+        let Some(s) = chain_store.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "missing"));
+        };
+        let bytes = s.data.bytes().unwrap();
+        if bytes.len() > limit {
+            return Err(Unreadable::new(id, Why::Limit, "past limit"));
+        }
+        Ok(bytes.to_vec())
+    });
+    let prep_chain = PreparedSpace::prepare(
+        chain_streams,
+        &chain_head,
+        &EvalOptions::ISO,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    // `Space::read` or `PreparedSpace::prepare` caps the deep chain cleanly without panicking;
+    // if prepared, evaluating must also succeed without panicking.
+    if let Some(p) = prep_chain {
+        assert_eq!(
+            p.eval_srgb8(&[0.0, 1.0, 0.0], &Limits::DEFAULT),
+            Some([0, 255, 0])
+        );
+    }
+
+    // 2. Stitching (Type 3) function referencing a sampled (Type 0) stream 100 times
+    //    shares a single reader-wide `sample_values` budget instead of multiplying 100x.
+    let mut fn_store: BTreeMap<ObjectId, Object> = BTreeMap::new();
+    let sub_samples = 1_024_usize;
+    fn_store.insert(
+        ObjectId::new(10, 0),
+        Object::from(Stream::new(
+            dict! {
+                "FunctionType" => 0,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "Range" => vec![Object::from(0.0), Object::from(1.0)],
+                "Size" => vec![Object::from(sub_samples as i64)],
+                "BitsPerSample" => 8,
+            },
+            vec![128_u8; sub_samples],
+        )),
+    );
+    let count = 100_usize;
+    let funcs: Vec<Object> = (0..count).map(|_| Object::reference(10)).collect();
+    let bounds: Vec<Object> = (1..count)
+        .map(|i| Object::from((i as f64) / (count as f64)))
+        .collect();
+    let mut encode = Vec::with_capacity(count * 2);
+    for _ in 0..count {
+        encode.push(Object::from(0.0));
+        encode.push(Object::from(1.0));
+    }
+    let stitch_dict = Object::from(dict! {
+        "FunctionType" => 3,
+        "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+        "Functions" => funcs,
+        "Bounds" => bounds,
+        "Encode" => encode,
+    });
+    let fn_streams = WithStreams::new(&fn_store, |id, limit| {
+        let Some(s) = fn_store.get(&id).and_then(Object::as_stream) else {
+            return Err(Unreadable::new(id, Why::Damaged, "missing"));
+        };
+        let bytes = s.data.bytes().unwrap();
+        if bytes.len() > limit {
+            return Err(Unreadable::new(id, Why::Limit, "past limit"));
+        }
+        Ok(bytes.to_vec())
+    });
+
+    let mut capped_fn_limits = Limits::DEFAULT;
+    // Allow 10 copies (`10_240` samples), far below 100 copies (`102_400` samples).
+    capped_fn_limits.sample_values = 10_240;
+    let mut fn_faults = Vec::new();
+    let read_res = Function::read(
+        fn_streams,
+        &stitch_dict,
+        Rules::Iso,
+        &capped_fn_limits,
+        &mut fn_faults,
+    )
+    .unwrap();
+    assert!(read_res.is_none());
+    assert!(
+        fn_faults.iter().any(|&(_, f)| f == Fault::TooManySamples),
+        "expected TooManySamples fault on Type 3 sample amplification: {fn_faults:?}"
+    );
 }

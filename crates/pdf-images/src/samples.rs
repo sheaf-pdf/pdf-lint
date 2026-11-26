@@ -274,8 +274,15 @@ impl RawImage {
         if out.len() < comps {
             return false;
         }
-        let mut raw = [0_u16; 32];
-        if comps > raw.len() || !self.pixel_raw(x, y, &mut raw[..comps]) {
+        let mut raw_stack = [0_u16; 32];
+        let mut raw_heap = Vec::new();
+        let raw: &mut [u16] = if comps <= raw_stack.len() {
+            &mut raw_stack[..comps]
+        } else {
+            raw_heap.resize(comps, 0);
+            &mut raw_heap
+        };
+        if !self.pixel_raw(x, y, raw) {
             return false;
         }
         let denom = ((1_u32 << self.meta.bits_per_component) - 1) as f64;

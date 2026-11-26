@@ -474,7 +474,6 @@ fn eval_stitching(
     data.functions[idx].eval(&[mapped], out, limits)
 }
 
-// Let's wire `SampledData` with `domain` cleanly so `eval_sampled` maps `domain[i] -> encode[i]`:
 struct FuncReader<'l, O, S: ?Sized> {
     objects: O,
     rules: Rules,
@@ -482,6 +481,7 @@ struct FuncReader<'l, O, S: ?Sized> {
     sink: &'l mut S,
     visits: usize,
     visits_told: bool,
+    samples_used: usize,
     path: Vec<ObjectId>,
 }
 
@@ -504,6 +504,7 @@ where
             sink,
             visits: 0,
             visits_told: false,
+            samples_used: 0,
             path: Vec::new(),
         }
     }
@@ -918,6 +919,14 @@ where
             };
             total_samples = prod;
         }
+        let Some(new_samples_used) = self
+            .samples_used
+            .checked_add(total_samples)
+            .filter(|&u| u <= self.limits.sample_values)
+        else {
+            self.say(at, Fault::TooManySamples);
+            return Ok(None);
+        };
         let Some(total_bits) = total_samples.checked_mul(bps as usize) else {
             self.say(at, Fault::TooManySamples);
             return Ok(None);
@@ -963,6 +972,7 @@ where
             return Ok(None);
         }
 
+        self.samples_used = new_samples_used;
         let samples = unpack_samples(&raw, total_samples, bps, n, &decode);
         Ok(Some(SampledData {
             sizes,

@@ -691,6 +691,26 @@ where
         }))
     }
 
+    fn unprofiled_device_fallback(&self, n: u32) -> PreparedSpace {
+        let (family, components, kind) = match n {
+            1 => (Family::DeviceGray, 1, PreparedKind::DeviceGray),
+            3 => (Family::DeviceRGB, 3, PreparedKind::DeviceRGB),
+            _ => (
+                Family::DeviceCMYK,
+                4,
+                PreparedKind::DeviceCMYK {
+                    rules: self.options.rules,
+                },
+            ),
+        };
+        PreparedSpace {
+            family,
+            components,
+            decode_ranges: Some(vec![(0.0, 1.0); components as usize]),
+            kind,
+        }
+    }
+
     fn prepare_cal_gray(&self, cie: &Cie<'o>) -> Result<PreparedSpace, Unreadable> {
         let white = valid_white(cie.white_point);
         let gamma = read_cal_gray_gamma(&self.objects, cie.dict, self.limits)?.unwrap_or(1.0);
@@ -760,13 +780,7 @@ where
         {
             prep
         } else {
-            let dev = match n {
-                1 => Space::DeviceGray,
-                3 => Space::DeviceRGB,
-                _ => Space::DeviceCMYK,
-            };
-            self.build(&dev, depth + 1, false)?
-                .expect("device space always builds")
+            self.unprofiled_device_fallback(n)
         };
 
         #[cfg(feature = "icc")]

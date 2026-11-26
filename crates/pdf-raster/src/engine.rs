@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Deref, DerefMut};
 use std::sync::Arc;
 
 #[cfg(feature = "text-layout")]
@@ -258,6 +258,68 @@ impl<S: Sink<Fault> + ?Sized> Sink<pdf_forms::Fault> for FormSinkAdapter<'_, S> 
     }
 }
 
+type TileCacheKey = (ObjectId, u32, u32, u8, Option<[u8; 4]>);
+
+struct RenderState {
+    summary: RenderSummary,
+    ops_left: usize,
+    glyphs_left: usize,
+    interpreted_left: usize,
+    decompressed_left: usize,
+    subrenders_left: usize,
+    offscreen_pixels_left: u64,
+    active_streams: Vec<ObjectId>,
+    tile_cache: HashMap<TileCacheKey, Arc<vello_cpu::Pixmap>>,
+}
+
+impl RenderState {
+    fn new(opts: &RenderOpts) -> Self {
+        Self {
+            summary: RenderSummary::default(),
+            ops_left: opts.limits.gfx.operators,
+            glyphs_left: opts.limits.gfx.glyphs,
+            interpreted_left: opts.limits.gfx.interpreted,
+            decompressed_left: opts.limits.gfx.decompressed,
+            subrenders_left: opts.limits.gfx.operators.max(1),
+            offscreen_pixels_left: opts.limits.max_pixels.saturating_mul(4),
+            active_streams: Vec::new(),
+            tile_cache: HashMap::new(),
+        }
+    }
+
+    fn snapshot_gfx_limits(&self, base: &pdf_gfx::Limits) -> pdf_gfx::Limits {
+        let mut lim = *base;
+        lim.operators = self.ops_left;
+        lim.glyphs = self.glyphs_left;
+        lim.interpreted = self.interpreted_left;
+        lim.decompressed = self.decompressed_left;
+        lim
+    }
+
+    fn charge_offscreen_pixels(&mut self, width: u32, height: u32) -> Result<(), Error> {
+        let px = u64::from(width) * u64::from(height);
+        if px > self.offscreen_pixels_left {
+            return Err(Error::Limit(LimitKind::Pixels));
+        }
+        self.offscreen_pixels_left -= px;
+        Ok(())
+    }
+}
+
+impl Deref for RenderState {
+    type Target = RenderSummary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.summary
+    }
+}
+
+impl DerefMut for RenderState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.summary
+    }
+}
+
 /// Rasterizes `page` without collecting non-fatal [`Fault`]s.
 ///
 /// # Errors
@@ -317,7 +379,7 @@ where
     let output_intent_icc = load_output_intent_icc(objects, catalog, opts)?;
 
     let mut canvas = Canvas2d::new(resolved_vp.width, resolved_vp.height)?;
-    let mut summary = RenderSummary::default();
+    let mut state = RenderState::new(opts);
 
     // Clip to the visible `/CropBox` in PageSpace (essential for `Viewport::Tile`
     // and custom matrices, and matches PDFium's page clip).
@@ -338,7 +400,7 @@ where
     };
 
     // 1. Decode and draw the page's `/Contents` stream(s).
-    let contents_slices = decode_page_contents(objects, page.dict, opts)?;
+    let contents_slices = decode_page_contents(objects, page.dict, &mut state.decompressed_left)?;
     if !contents_slices.is_empty() {
         let refs: Vec<&[u8]> = contents_slices.iter().map(Vec::as_slice).collect();
         let concat = Concat::new(&refs);
@@ -357,7 +419,7 @@ where
             fallback,
             opts,
             &mut canvas,
-            &mut summary,
+            &mut state,
             sink,
         );
         if let Err(err) = stream_summary {
@@ -366,7 +428,7 @@ where
             }
             return Err(err);
         }
-        summary.gfx = stream_summary?;
+        state.gfx = stream_summary?;
     }
 
     if pushed_page_group {
@@ -389,14 +451,14 @@ where
             fallback,
             opts,
             &mut canvas,
-            &mut summary,
+            &mut state,
             sink,
         )?;
     }
 
     canvas.pop_clip();
     let pixmap = canvas.finish(opts.background, opts.format, &opts.limits)?;
-    Ok((pixmap, summary))
+    Ok((pixmap, state.summary))
 }
 
 /// Rasterizes a standalone decoded [`Concat`] content stream (such as a Form
@@ -454,14 +516,14 @@ where
 {
     let resolved_vp = opts.viewport.resolve(geom, &opts.limits)?;
     let mut canvas = Canvas2d::new(resolved_vp.width, resolved_vp.height)?;
-    let mut summary = RenderSummary::default();
+    let mut state = RenderState::new(opts);
 
     let crop_segs = rect_to_segs(geom.crop_box);
     let (crop_bez, _) = segs_to_bez_path(&crop_segs);
     canvas.set_anti_alias(opts.anti_alias.paths);
     canvas.push_clip(&crop_bez, FillRule::NonZero, resolved_vp.page_to_device);
 
-    summary.gfx = render_stream_into(
+    state.gfx = render_stream_into(
         Narrow::new(objects),
         content,
         resources,
@@ -475,13 +537,13 @@ where
         fallback,
         opts,
         &mut canvas,
-        &mut summary,
+        &mut state,
         sink,
     )?;
 
     canvas.pop_clip();
     let pixmap = canvas.finish(opts.background, opts.format, &opts.limits)?;
-    Ok((pixmap, summary))
+    Ok((pixmap, state.summary))
 }
 
 #[derive(Clone)]
@@ -528,7 +590,7 @@ fn render_stream_into<'o, 'r, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<Summary, Error>
 where
@@ -539,6 +601,13 @@ where
     if layer_depth > opts.limits.max_layer_depth {
         return Err(Error::Limit(LimitKind::LayerDepth));
     }
+    if layer_depth > 0 {
+        if state.subrenders_left == 0 {
+            return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Operators)));
+        }
+        state.subrenders_left -= 1;
+    }
+    let local_gfx_limits = state.snapshot_gfx_limits(&opts.limits.gfx);
 
     let mut erased = EraseSink(sink);
     let shared_sink = SharedSink::new(&mut erased);
@@ -564,7 +633,7 @@ where
         objects,
         content,
         resources,
-        &opts.limits.gfx,
+        &local_gfx_limits,
         cache.fonts(),
         GfxOpts {
             forms: Forms::Descend,
@@ -588,7 +657,7 @@ where
                 fallback,
                 opts,
                 canvas,
-                summary,
+                state,
                 &mut local_sink,
                 &mut q_stack,
                 &mut form_stack,
@@ -646,7 +715,14 @@ where
     if let Some(err) = hard_error {
         return Err(err);
     }
-    Ok(gfx_res?)
+    let sub_summary = gfx_res?;
+    state.interpreted_left = state
+        .interpreted_left
+        .saturating_sub(sub_summary.interpreted);
+    state.decompressed_left = state
+        .decompressed_left
+        .saturating_sub(sub_summary.decompressed);
+    Ok(sub_summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -662,7 +738,7 @@ fn handle_event<'o, 'e, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
     q_stack: &mut Vec<SavedStateEntry>,
     form_stack: &mut Vec<FormStackEntry>,
@@ -685,6 +761,10 @@ where
 
     match &event.kind {
         Kind::Op => {
+            if state.ops_left == 0 {
+                return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Operators)));
+            }
+            state.ops_left -= 1;
             match event.at.operator() {
                 Operator::Save => {
                     q_stack.push(SavedStateEntry {
@@ -810,7 +890,7 @@ where
                 fallback,
                 opts,
                 canvas,
-                summary,
+                state,
                 sink,
                 current_mask,
                 current_smask_spec,
@@ -934,7 +1014,7 @@ where
         fallback,
         opts,
         canvas,
-        summary,
+        state,
         sink,
         current_mask,
         current_smask_spec,
@@ -958,7 +1038,7 @@ where
                 fallback,
                 opts,
                 canvas,
-                summary,
+                state,
                 sink,
             )?;
             if let Some(rule) = drawn.clip {
@@ -984,7 +1064,7 @@ where
                 fallback,
                 opts,
                 canvas,
-                summary,
+                state,
                 sink,
                 bt_clip_bez,
             )?;
@@ -1001,7 +1081,7 @@ where
                 output_intent_icc,
                 opts,
                 canvas,
-                summary,
+                state,
                 sink,
             )?;
         }
@@ -1015,7 +1095,7 @@ where
                 output_intent_icc,
                 opts,
                 canvas,
-                summary,
+                state,
                 sink,
             )?;
         }
@@ -1060,7 +1140,7 @@ fn effective_smask(state: &State, ov: GroupOverrides) -> SoftMask {
 #[allow(clippy::too_many_arguments)]
 fn sync_soft_mask<'o, O, S>(
     objects: Narrow<'o, O>,
-    state: &State,
+    gstate: &State,
     ov: GroupOverrides,
     page_to_device: Matrix,
     layer_depth: usize,
@@ -1070,7 +1150,7 @@ fn sync_soft_mask<'o, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
     current_mask: &mut Option<Mask>,
     current_smask_spec: &mut SoftMask,
@@ -1080,7 +1160,7 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    let desired = effective_smask(state, ov);
+    let desired = effective_smask(gstate, ov);
     if desired == *current_smask_spec {
         return Ok(());
     }
@@ -1099,14 +1179,14 @@ where
             };
             if layer_depth + 1 > opts.limits.max_layer_depth {
                 sink.fault(Place::new(Some(group_id), None), Fault::LayerDepthExceeded);
-                summary.approximated = true;
+                state.approximated = true;
                 *current_mask = None;
                 canvas.set_mask(None);
                 return Ok(());
             }
             let kind_tag = u8::from(kind == SoftMaskKind::Luminosity);
             let cache_usable =
-                state.soft_mask_backdrop.is_none() && state.soft_mask_transfer.is_none();
+                gstate.soft_mask_backdrop.is_none() && gstate.soft_mask_transfer.is_none();
             if cache_usable && let Some(cached) = smask_cache.get(&(group_id, kind_tag)) {
                 *current_mask = cached.clone();
                 canvas.set_mask(current_mask.clone());
@@ -1117,8 +1197,8 @@ where
                 objects,
                 group_id,
                 kind,
-                state.soft_mask_backdrop.as_ref().map(|c| c.as_slice()),
-                state.soft_mask_transfer.as_deref(),
+                gstate.soft_mask_backdrop.as_ref().map(|c| c.as_slice()),
+                gstate.soft_mask_transfer.as_deref(),
                 (u32::from(canvas.width()), u32::from(canvas.height())),
                 page_to_device,
                 layer_depth + 1,
@@ -1127,7 +1207,7 @@ where
                 cache,
                 fallback,
                 opts,
-                summary,
+                state,
                 sink,
             )?;
             if cache_usable {
@@ -1159,13 +1239,17 @@ fn build_soft_mask<'o, O, S>(
     cache: &RenderCache,
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<Option<Mask>, Error>
 where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
+    if state.active_streams.contains(&group_id) {
+        sink.fault(Place::new(Some(group_id), None), Fault::InvalidSoftMask);
+        return Ok(None);
+    }
     let Some(group_obj) = objects.try_resolve(group_id)? else {
         sink.fault(Place::new(Some(group_id), None), Fault::InvalidSoftMask);
         return Ok(None);
@@ -1178,9 +1262,17 @@ where
         return Ok(None);
     };
     let dict = &stream.dict;
-    let data = match objects.decoded(group_id, opts.limits.gfx.decompressed) {
-        Ok(b) => b,
-        Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => {
+    let data = match objects.decoded(group_id, state.decompressed_left) {
+        Ok(b) => {
+            state.decompressed_left = state.decompressed_left.saturating_sub(b.len());
+            b
+        }
+        Err(e) if e.why == Why::Limit => {
+            return Err(Error::Gfx(pdf_gfx::Error::Limit(
+                pdf_gfx::Cap::Decompressed,
+            )));
+        }
+        Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => {
             sink.fault(Place::new(Some(group_id), None), Fault::InvalidSoftMask);
             return Ok(None);
         }
@@ -1244,6 +1336,7 @@ where
         _ => None,
     };
 
+    state.charge_offscreen_pixels(vp_w, vp_h)?;
     let mut mask_canvas = Canvas2d::new(vp_w, vp_h)?;
     let mask_transform = form_matrix.then(page_to_device);
     if let Some(bbox) = form_bbox {
@@ -1254,7 +1347,8 @@ where
 
     let slice: &[u8] = &data;
     let concat = Concat::new(&[slice]);
-    let _ = render_stream_into(
+    state.active_streams.push(group_id);
+    let mask_res = render_stream_into(
         objects,
         &concat,
         form_res,
@@ -1268,13 +1362,15 @@ where
         fallback,
         opts,
         &mut mask_canvas,
-        summary,
+        state,
         sink,
-    )?;
+    );
+    state.active_streams.pop();
 
     if form_bbox.is_some() {
         mask_canvas.pop_clip();
     }
+    let _ = mask_res?;
 
     let vello_pix = mask_canvas.render_to_vello_pixmap(bg)?;
     let (w16, h16) = (vello_pix.width(), vello_pix.height());
@@ -1335,7 +1431,7 @@ fn resolve_active_paint<'o, 'e, O, S>(
     cache: &RenderCache,
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<ResolvedPaint, Error>
 where
@@ -1384,7 +1480,7 @@ where
             cache,
             fallback,
             opts,
-            summary,
+            state,
             sink,
         );
     }
@@ -1423,7 +1519,7 @@ fn resolve_pattern_paint<'o, 'a, O, S>(
     cache: &RenderCache,
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<ResolvedPaint, Error>
 where
@@ -1433,7 +1529,7 @@ where
 {
     if layer_depth + 1 > opts.limits.max_layer_depth {
         sink.fault(Place::new(None, None), Fault::LayerDepthExceeded);
-        summary.approximated = true;
+        state.approximated = true;
         return Ok(ResolvedPaint::None);
     }
 
@@ -1478,6 +1574,10 @@ where
                 sink.fault(Place::new(None, pat_obj.at()), Fault::InvalidPattern);
                 return Ok(ResolvedPaint::None);
             };
+            if state.active_streams.contains(&sid) {
+                sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
+                return Ok(ResolvedPaint::None);
+            }
             let paint_type = dict_int(objects, dict, b"PaintType").unwrap_or(1);
             let Some([bx0, by0, bx1, by1]) = dict_float4(objects, dict, b"BBox") else {
                 sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
@@ -1521,15 +1621,6 @@ where
                 None
             };
 
-            let data = match objects.decoded(sid, opts.limits.gfx.decompressed) {
-                Ok(b) => b,
-                Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => {
-                    sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
-                    return Ok(ResolvedPaint::None);
-                }
-                Err(e) => return Err(Error::Unreadable(e)),
-            };
-
             // Map pattern cell `[bbox.x0 .. bbox.x0 + x_step] × [bbox.y0 .. bbox.y0 + y_step]`
             // onto `[0..tile_w] × [0..tile_h]` (`y` flipped so upright pattern content stays upright).
             let pat_to_tile = Matrix::translate(-bbox.x0, -(bbox.y0 + y_step)).then(Matrix::scale(
@@ -1541,6 +1632,38 @@ where
             };
             let paint_transform = tile_to_pat.then(pat_to_device);
 
+            let alpha_u8 = if paint_type != 2 && alpha < 1.0 {
+                (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            } else {
+                255
+            };
+            let tile_key = (sid, tile_w, tile_h, alpha_u8, uncolored_rgba);
+            if let Some(cached_tile) = state.tile_cache.get(&tile_key).cloned() {
+                state.patterns_drawn += 1;
+                return Ok(ResolvedPaint::Tiled {
+                    pixmap: cached_tile,
+                    transform: paint_transform,
+                });
+            }
+
+            let data = match objects.decoded(sid, state.decompressed_left) {
+                Ok(b) => {
+                    state.decompressed_left = state.decompressed_left.saturating_sub(b.len());
+                    b
+                }
+                Err(e) if e.why == Why::Limit => {
+                    return Err(Error::Gfx(pdf_gfx::Error::Limit(
+                        pdf_gfx::Cap::Decompressed,
+                    )));
+                }
+                Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => {
+                    sink.fault(Place::new(Some(sid), None), Fault::InvalidPattern);
+                    return Ok(ResolvedPaint::None);
+                }
+                Err(e) => return Err(Error::Unreadable(e)),
+            };
+
+            state.charge_offscreen_pixels(tile_w, tile_h)?;
             let mut tile_canvas = Canvas2d::new(tile_w, tile_h)?;
             let clip_segs = rect_to_segs(bbox);
             let (clip_bez, _) = segs_to_bez_path(&clip_segs);
@@ -1549,7 +1672,8 @@ where
             let slice: &[u8] = &data;
             let concat = Concat::new(&[slice]);
             let pat_res = dict.get(b"Resources");
-            let _ = render_stream_into(
+            state.active_streams.push(sid);
+            let tile_res = render_stream_into(
                 objects,
                 &concat,
                 pat_res,
@@ -1563,18 +1687,22 @@ where
                 fallback,
                 opts,
                 &mut tile_canvas,
-                summary,
+                state,
                 sink,
-            )?;
+            );
+            state.active_streams.pop();
             tile_canvas.pop_clip();
+            let _ = tile_res?;
 
             let mut vello_tile = tile_canvas.render_to_vello_pixmap(None)?;
-            if paint_type != 2 && alpha < 1.0 {
-                vello_tile.multiply_alpha((alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            if alpha_u8 < 255 {
+                vello_tile.multiply_alpha(alpha_u8);
             }
-            summary.patterns_drawn += 1;
+            let arc_tile = Arc::new(vello_tile);
+            state.tile_cache.insert(tile_key, arc_tile.clone());
+            state.patterns_drawn += 1;
             Ok(ResolvedPaint::Tiled {
-                pixmap: Arc::new(vello_tile),
+                pixmap: arc_tile,
                 transform: paint_transform,
             })
         }
@@ -1600,7 +1728,7 @@ where
                 sink,
             )? {
                 Some((pixmap, transform)) => {
-                    summary.shadings_drawn += 1;
+                    state.shadings_drawn += 1;
                     Ok(ResolvedPaint::Shading { pixmap, transform })
                 }
                 None => Ok(ResolvedPaint::None),
@@ -1657,7 +1785,7 @@ fn paint_path<'o, 'e, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<(), Error>
 where
@@ -1702,7 +1830,7 @@ where
             cache,
             fallback,
             opts,
-            summary,
+            state,
             sink,
         )?;
         // Fill directly in device space (`IDENTITY` transform) so pattern/shading
@@ -1732,7 +1860,7 @@ where
             cache,
             fallback,
             opts,
-            summary,
+            state,
             sink,
         )?;
         // Stroke `user_segments` under `user_to_device` (`ctm * page_to_device`)
@@ -1772,7 +1900,7 @@ fn paint_text<'o, 'e, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
     bt_clip_bez: &mut BezPath,
 ) -> Result<(), Error>
@@ -1794,11 +1922,16 @@ where
     );
     let clips = mode.clips() && font.kind() != FontKind::Type3;
     if !fills && !strokes && !clips {
+        let n = show.glyphs().count();
+        if n > state.glyphs_left {
+            return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Glyphs)));
+        }
+        state.glyphs_left -= n;
         return Ok(());
     }
 
     if font.approx().any() {
-        summary.approximated = true;
+        state.approximated = true;
     }
 
     // Type 3 fonts execute per-glyph content streams (`d0` colored vs `d1`
@@ -1820,7 +1953,7 @@ where
             fallback,
             opts,
             canvas,
-            summary,
+            state,
             sink,
         );
     }
@@ -1842,11 +1975,15 @@ where
     let mut run_bounds: Option<Rect> = None;
 
     for glyph in show.glyphs() {
+        if state.glyphs_left == 0 {
+            return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Glyphs)));
+        }
+        state.glyphs_left -= 1;
         verbs.clear();
         let mut h_stretch = 1.0f32;
         if !font.outline(glyph.code, hint_ppem, &mut verbs) {
-            summary.substituted_glyphs += 1;
-            summary.approximated = true;
+            state.substituted_glyphs += 1;
+            state.approximated = true;
             let decoded_char = glyph.text().and_then(|s| s.chars().next());
             let target_w = font.width(glyph.code);
             let used_external = if let (Some(fb), Some(ch)) = (fallback, decoded_char) {
@@ -1950,7 +2087,7 @@ where
             cache,
             fallback,
             opts,
-            summary,
+            state,
             sink,
         )?;
         canvas.set_transform(page_to_device);
@@ -1977,7 +2114,7 @@ where
             cache,
             fallback,
             opts,
-            summary,
+            state,
             sink,
         )?;
         canvas.set_transform(user_to_device);
@@ -2015,7 +2152,7 @@ fn paint_type3_text<'o, 'e, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<(), Error>
 where
@@ -2024,7 +2161,7 @@ where
 {
     if layer_depth + 1 > opts.limits.max_layer_depth {
         sink.fault(Place::new(font.id(), None), Fault::LayerDepthExceeded);
-        summary.approximated = true;
+        state.approximated = true;
         return Ok(());
     }
     let Some(fm_arr) = font.type3_matrix() else {
@@ -2052,12 +2189,27 @@ where
     };
 
     for glyph in show.glyphs() {
+        if state.glyphs_left == 0 {
+            return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Glyphs)));
+        }
+        state.glyphs_left -= 1;
         let Some(t3) = font.type3_glyph(glyph.code) else {
             continue;
         };
-        let data = match objects.decoded(t3.stream, opts.limits.gfx.decompressed) {
-            Ok(b) => b,
-            Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => continue,
+        if state.active_streams.contains(&t3.stream) {
+            continue;
+        }
+        let data = match objects.decoded(t3.stream, state.decompressed_left) {
+            Ok(b) => {
+                state.decompressed_left = state.decompressed_left.saturating_sub(b.len());
+                b
+            }
+            Err(e) if e.why == Why::Limit => {
+                return Err(Error::Gfx(pdf_gfx::Error::Limit(
+                    pdf_gfx::Cap::Decompressed,
+                )));
+            }
+            Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => continue,
             Err(e) => return Err(Error::Unreadable(e)),
         };
         let glyph_to_page = font_matrix
@@ -2079,7 +2231,8 @@ where
         };
         let slice: &[u8] = &data;
         let concat = Concat::new(&[slice]);
-        let _ = render_stream_into(
+        state.active_streams.push(t3.stream);
+        let glyph_res = render_stream_into(
             objects,
             &concat,
             type3_res,
@@ -2093,9 +2246,11 @@ where
             fallback,
             opts,
             canvas,
-            summary,
+            state,
             sink,
-        )?;
+        );
+        state.active_streams.pop();
+        let _ = glyph_res?;
     }
     Ok(())
 }
@@ -2112,7 +2267,7 @@ fn paint_image<'o, 'e, O, S>(
     output_intent_icc: Option<&[u8]>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<(), Error>
 where
@@ -2204,7 +2359,7 @@ where
                 _ => None,
             };
             sink.fault(Place::new(obj_id, None), Fault::SkippedImage);
-            summary.approximated = true;
+            state.approximated = true;
             return Ok(());
         }
     };
@@ -2239,7 +2394,7 @@ where
         opacity,
         &eff_blend,
     );
-    summary.images_drawn += 1;
+    state.images_drawn += 1;
     Ok(())
 }
 
@@ -2253,7 +2408,7 @@ fn paint_shading_operator<'o, 'e, O, S>(
     output_intent_icc: Option<&[u8]>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<(), Error>
 where
@@ -2314,7 +2469,7 @@ where
     let (bez, _) = segs_to_bez_path(&rect_segs);
     canvas.set_fill_rule(FillRule::NonZero);
     canvas.fill_bez_path(&bez);
-    summary.shadings_drawn += 1;
+    state.shadings_drawn += 1;
     Ok(())
 }
 
@@ -2331,7 +2486,7 @@ fn draw_page_annotations<'o, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<(), Error>
 where
@@ -2408,13 +2563,13 @@ where
                 fallback,
                 opts,
                 canvas,
-                summary,
+                state,
                 sink,
             )? {
                 if is_widget {
-                    summary.forms_drawn += 1;
+                    state.forms_drawn += 1;
                 } else {
-                    summary.annots_drawn += 1;
+                    state.annots_drawn += 1;
                 }
             }
             continue;
@@ -2461,11 +2616,11 @@ where
                         fallback,
                         opts,
                         canvas,
-                        summary,
+                        state,
                         sink,
                     )?
                 {
-                    summary.forms_drawn += 1;
+                    state.forms_drawn += 1;
                 }
             }
         } else if let Some(synth) = synth_annot(annot)
@@ -2483,11 +2638,11 @@ where
                 fallback,
                 opts,
                 canvas,
-                summary,
+                state,
                 sink,
             )?
         {
-            summary.annots_drawn += 1;
+            state.annots_drawn += 1;
         }
     }
 
@@ -2506,13 +2661,16 @@ fn draw_written_appearance_stream<'o, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<bool, Error>
 where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
+    if state.active_streams.contains(&stream_id) {
+        return Ok(false);
+    }
     let Some((bbox, form_matrix, place)) =
         stream_placement_matrix(objects, stream_id, annot_rect, &opts.limits.annots)?
     else {
@@ -2524,9 +2682,17 @@ where
     let Some(stream) = stream_obj.as_stream() else {
         return Ok(false);
     };
-    let data = match objects.decoded(stream_id, opts.limits.gfx.decompressed) {
-        Ok(b) => b,
-        Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => return Ok(false),
+    let data = match objects.decoded(stream_id, state.decompressed_left) {
+        Ok(b) => {
+            state.decompressed_left = state.decompressed_left.saturating_sub(b.len());
+            b
+        }
+        Err(e) if e.why == Why::Limit => {
+            return Err(Error::Gfx(pdf_gfx::Error::Limit(
+                pdf_gfx::Cap::Decompressed,
+            )));
+        }
+        Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => return Ok(false),
         Err(e) => return Err(Error::Unreadable(e)),
     };
 
@@ -2548,6 +2714,7 @@ where
     let slice: &[u8] = &data;
     let concat = Concat::new(&[slice]);
     let res = stream.dict.get(b"Resources");
+    state.active_streams.push(stream_id);
     let res_run = render_stream_into(
         Narrow::new(objects),
         &concat,
@@ -2562,9 +2729,10 @@ where
         fallback,
         opts,
         canvas,
-        summary,
+        state,
         sink,
     );
+    state.active_streams.pop();
 
     if group.is_some() {
         canvas.pop_layer();
@@ -2587,7 +2755,7 @@ fn draw_synthesized_widget<'o, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<bool, Error>
 where
@@ -2730,7 +2898,7 @@ where
         fallback,
         opts,
         canvas,
-        summary,
+        state,
         sink,
     )
 }
@@ -2750,7 +2918,7 @@ fn draw_ephemeral_appearance<'o, O, S>(
     fallback: Option<&dyn FontFallback>,
     opts: &RenderOpts,
     canvas: &mut Canvas2d,
-    summary: &mut RenderSummary,
+    state: &mut RenderState,
     sink: &mut S,
 ) -> Result<bool, Error>
 where
@@ -2829,7 +2997,7 @@ where
         fallback,
         opts,
         canvas,
-        summary,
+        state,
         sink,
     );
 
@@ -2841,7 +3009,7 @@ where
 fn decode_page_contents<'o, O: Resolve<'o> + Streams + Copy>(
     objects: O,
     page_dict: Option<&'o Dict>,
-    opts: &RenderOpts,
+    decompressed_budget: &mut usize,
 ) -> Result<Vec<Vec<u8>>, Error> {
     let Some(dict) = page_dict else {
         return Ok(Vec::new());
@@ -2872,12 +3040,11 @@ fn decode_page_contents<'o, O: Resolve<'o> + Streams + Copy>(
         }
     }
 
-    let mut budget = opts.limits.gfx.decompressed;
     let mut slices = Vec::with_capacity(stream_ids.len());
     for (idx, sid) in stream_ids.into_iter().enumerate() {
-        match objects.decoded(sid, budget) {
+        match objects.decoded(sid, *decompressed_budget) {
             Ok(bytes) => {
-                budget = budget.saturating_sub(bytes.len());
+                *decompressed_budget = decompressed_budget.saturating_sub(bytes.len());
                 let mut owned = bytes.into_owned();
                 if idx + 1 < slices.capacity() && !owned.ends_with(b"\n") && !owned.ends_with(b" ")
                 {

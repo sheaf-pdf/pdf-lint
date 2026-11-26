@@ -1,5 +1,6 @@
 //! Safe [`RenderBackend`] and oracle helpers backed by [`pdfium_render`].
 
+use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::io::Cursor;
@@ -97,62 +98,38 @@ fn try_init_global(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn bind_from_env_or_system() -> Result<Box<dyn PdfiumLibraryBindings>, Error> {
-    for var in ["PDF_RASTER_PDFIUM", "PDF_LINT_PDFIUM"] {
-        if let Some(explicit) = env::var_os(var)
-            && !explicit.is_empty()
-        {
-            let p = PathBuf::from(explicit);
-            if !p.is_file() {
-                return Err(Error::LibraryLoad {
-                    path: p,
-                    reason: format!("{var} does not point to an existing file"),
-                });
-            }
-            return RawPdfium::bind_to_library(&p).map_err(|e| map_bind_err(p, e));
+    if let Some(explicit) = env::var_os("PDF_RASTER_PDFIUM")
+        && !explicit.is_empty()
+    {
+        let p = PathBuf::from(explicit);
+        if !p.is_file() {
+            return Err(Error::LibraryLoad {
+                path: p,
+                reason: "PDF_RASTER_PDFIUM does not point to an existing file".to_string(),
+            });
         }
+        return RawPdfium::bind_to_library(&p).map_err(|e| map_bind_err(p, e));
     }
-
-    let mut searched = Vec::new();
 
     if let Some(dir) = env::var_os("PDFIUM_LIB_DIR")
         && !dir.is_empty()
     {
         let candidate = RawPdfium::pdfium_platform_library_name_at_path(&PathBuf::from(dir));
-        if candidate.is_file() {
-            return RawPdfium::bind_to_library(&candidate).map_err(|e| map_bind_err(candidate, e));
+        if !candidate.is_file() {
+            return Err(Error::LibraryLoad {
+                path: candidate,
+                reason: "PDFIUM_LIB_DIR does not contain a libpdfium binary".to_string(),
+            });
         }
-        searched.push(candidate.display().to_string());
-    }
-
-    let cwd_dir = Path::new("target/pdfium-8152/lib");
-    let cwd_candidate = RawPdfium::pdfium_platform_library_name_at_path(cwd_dir);
-    if cwd_candidate.is_file() {
-        return RawPdfium::bind_to_library(&cwd_candidate)
-            .map_err(|e| map_bind_err(cwd_candidate, e));
-    }
-
-    if let Some(manifest_dir) = env::var_os("CARGO_MANIFEST_DIR") {
-        let ws_dir = Path::new(&manifest_dir).join("../../target/pdfium-8152/lib");
-        let ws_candidate = RawPdfium::pdfium_platform_library_name_at_path(&ws_dir);
-        if ws_candidate.is_file() {
-            return RawPdfium::bind_to_library(&ws_candidate)
-                .map_err(|e| map_bind_err(ws_candidate, e));
-        }
-        searched.push(ws_candidate.display().to_string());
+        return RawPdfium::bind_to_library(&candidate).map_err(|e| map_bind_err(candidate, e));
     }
 
     let sys_name = RawPdfium::pdfium_platform_library_name();
     match RawPdfium::bind_to_system_library() {
         Ok(b) => Ok(b),
-        Err(PdfiumError::LoadLibraryError(_)) => {
-            searched.push(format!(
-                "system dynamic loader ({})",
-                sys_name.to_string_lossy()
-            ));
-            Err(Error::LibraryNotFound {
-                searched: searched.join(", "),
-            })
-        }
+        Err(PdfiumError::LoadLibraryError(_)) => Err(Error::LibraryNotFound {
+            searched: format!("system dynamic loader ({})", sys_name.to_string_lossy()),
+        }),
         Err(other) => Err(map_bind_err(PathBuf::from(sys_name), other)),
     }
 }
@@ -191,10 +168,9 @@ fn map_doc_err(err: PdfiumError) -> Error {
 /// Thin [`RenderBackend`] adapter over [`pdfium_render::prelude::Pdfium`].
 ///
 /// Can be constructed directly from an existing [`pdfium_render::prelude::Pdfium`]
-/// or `Arc<Pdfium>` (so applications like `sheaf` share a single global
-/// `pdfium-render` binding and lock), or bound from a library path / environment
-/// variables via [`PdfiumBackend::bind_to_library`] and
-/// [`PdfiumBackend::from_env`].
+/// or `Arc<Pdfium>` (so host applications share a single global `pdfium-render`
+/// binding and lock), or bound from a library path / environment variables via
+/// [`PdfiumBackend::bind_to_library`] and [`PdfiumBackend::from_env`].
 #[derive(Clone, Copy)]
 pub struct PdfiumBackend {
     pdfium: &'static RawPdfium,
@@ -266,8 +242,7 @@ impl PdfiumBackend {
     }
 
     /// Locates and binds to `libpdfium` from `$PDF_RASTER_PDFIUM`,
-    /// `$PDF_LINT_PDFIUM`, `$PDFIUM_LIB_DIR`, workspace `target/pdfium-8152`,
-    /// or the OS dynamic library search path.
+    /// `$PDFIUM_LIB_DIR`, or the OS dynamic library search path.
     ///
     /// # Errors
     ///
@@ -296,7 +271,7 @@ impl PdfiumBackend {
 struct PdfiumRenderedDoc {
     doc: PdfDocument<'static>,
     page_count: usize,
-    geoms: Vec<OnceLock<PageGeom>>,
+    geoms: Mutex<HashMap<usize, PageGeom>>,
 }
 
 impl RenderedDoc for PdfiumRenderedDoc {
@@ -305,14 +280,20 @@ impl RenderedDoc for PdfiumRenderedDoc {
     }
 
     fn page_geom(&self, page_index: usize) -> Result<PageGeom, BackendError> {
-        let Some(slot) = self.geoms.get(page_index) else {
+        if page_index >= self.page_count {
             return Err(BackendError::PageOutOfBounds {
                 page_index,
                 page_count: self.page_count,
             });
-        };
-        if let Some(&geom) = slot.get() {
-            return Ok(geom);
+        }
+        {
+            let guard = self
+                .geoms
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(&geom) = guard.get(&page_index) {
+                return Ok(geom);
+            }
         }
         let idx =
             PdfPageIndex::try_from(page_index).map_err(|_| BackendError::PageOutOfBounds {
@@ -326,7 +307,11 @@ impl RenderedDoc for PdfiumRenderedDoc {
             })
         })?;
         let geom = extract_pdf_page_geom(&page);
-        let _ = slot.set(geom);
+        let mut guard = self
+            .geoms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(page_index, geom);
         Ok(geom)
     }
 
@@ -484,12 +469,10 @@ impl RenderBackend for PdfiumBackend {
                 other => BackendError::custom(other),
             })?;
         let page_count = usize::try_from(doc.pages().len()).unwrap_or(0);
-        let mut geoms = Vec::with_capacity(page_count);
-        geoms.resize_with(page_count, OnceLock::new);
         Ok(Box::new(PdfiumRenderedDoc {
             doc,
             page_count,
-            geoms,
+            geoms: Mutex::new(HashMap::new()),
         }))
     }
 }
@@ -737,8 +720,8 @@ impl fmt::Debug for Pdfium {
 }
 
 impl Pdfium {
-    /// Loads (or reuses) `libpdfium` from `$PDF_RASTER_PDFIUM`, `$PDF_LINT_PDFIUM`,
-    /// `$PDFIUM_LIB_DIR`, workspace `target/pdfium-8152`, or the OS library path.
+    /// Loads (or reuses) `libpdfium` from `$PDF_RASTER_PDFIUM`,
+    /// `$PDFIUM_LIB_DIR`, or the OS dynamic library search path.
     ///
     /// # Errors
     ///
@@ -1049,12 +1032,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires libpdfium in PDF_RASTER_PDFIUM (run via `just test-pdfium`)"]
     fn renders_minimal_pdf_across_threads_when_pdfium_present() {
-        let Ok(pdfium) = Pdfium::from_env() else {
-            assert!(env::var_os("PDF_RASTER_PDFIUM").is_none());
-            assert!(env::var_os("PDF_LINT_PDFIUM").is_none());
-            return;
-        };
+        let pdfium = Pdfium::from_env().expect("PDF_RASTER_PDFIUM must load libpdfium");
         let pdf = minimal_red_pdf();
         assert_eq!(pdfium.page_count(&pdf, None).unwrap(), 1);
         assert_eq!(pdfium.page_size(&pdf, 0, None).unwrap(), (16.0, 16.0));

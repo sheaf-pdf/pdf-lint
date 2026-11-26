@@ -14,7 +14,7 @@ pub enum PixelFormat {
     #[default]
     Rgba8,
     /// Native 8-bit `[B, G, R, A]` (straight alpha when `background` is opaque,
-    /// premultiplied when transparent, matching `sheaf` GPUI textures and
+    /// premultiplied when transparent, matching native GPU textures and
     /// PDFium's `FPDFBitmap_BGRA`).
     Bgra8,
     /// Premultiplied 8-bit `sRGB` `[R, G, B, A]` — zero-copy direct output from

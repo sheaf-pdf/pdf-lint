@@ -22,9 +22,7 @@ use pdf_raster::pdf_objects::{Object, ObjectId, Resolve, Stream, Value, dict};
 use pdf_raster::pdf_semantics::Limits as SemLimits;
 use pdf_raster::pdf_semantics::pages::pages;
 #[cfg(feature = "pdfium")]
-use pdf_raster::pdfium::{
-    Error as PdfiumError, Pdfium, RenderFlags, RenderOptions as PdfiumRenderOptions,
-};
+use pdf_raster::pdfium::{Pdfium, RenderFlags, RenderOptions as PdfiumRenderOptions};
 #[cfg(feature = "pdfium")]
 use pdf_raster::rubric::{
     CaseEvaluation, RgbaImage as PdfiumRgba, RubricProfile, evaluate_case, score_images,
@@ -93,12 +91,8 @@ fn render_pdf_bytes(
 }
 
 #[cfg(feature = "pdfium")]
-fn try_pdfium() -> Option<Pdfium> {
-    match Pdfium::try_global() {
-        Ok(p) => Some(p),
-        Err(PdfiumError::LibraryNotFound { .. }) => None,
-        Err(other) => panic!("unexpected libpdfium load error: {other}"),
-    }
+fn require_pdfium() -> Pdfium {
+    Pdfium::try_global().expect("PDF_RASTER_PDFIUM must load libpdfium")
 }
 
 #[cfg(feature = "pdfium")]
@@ -681,11 +675,9 @@ fn ocg_visibility_annotations_and_acroform_widgets_respect_draw_and_appearances(
 
 #[cfg(feature = "pdfium")]
 #[test]
+#[ignore = "requires libpdfium in PDF_RASTER_PDFIUM (run via `just test-pdfium`)"]
 fn pdfium_8152_rubric_conformance_across_paths_text_images_groups_patterns_and_shadings() {
-    let Some(pdfium) = try_pdfium() else {
-        eprintln!("skipping live PDFium rubric test (libpdfium not present)");
-        return;
-    };
+    let pdfium = require_pdfium();
 
     // Case A: Vector paths, clips, strokes, dashes, & EvenOdd winding
     {
@@ -1258,4 +1250,355 @@ fn assert_rubric_case(
         "case {name} failed ConformingCore rubric (min {min_score}): failures={:?}, visual={direct:?}",
         eval.failures
     );
+}
+
+#[test]
+fn nested_pattern_and_type3_cycles_and_exponential_dags_are_bounded_and_cached() {
+    // 1. Self-recursive tiling pattern (`P1` paints a rect using `/P1` itself)
+    //    must refuse the cycle cleanly and emit `Fault::InvalidPattern`.
+    {
+        let page_content = b"/Pattern cs /P1 scn 0 0 64 64 re f\n";
+        let pat_content = b"1 0 0 rg 0 0 8 8 re f /Pattern cs /P1 scn 8 0 8 8 re f\n";
+        let pdf = build_pdf_bytes(vec![
+            (
+                1,
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+                ),
+            ),
+            (
+                2,
+                Object::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                    "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(64), Object::from(64)],
+                }),
+            ),
+            (
+                3,
+                Object::from(dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => Object::reference(2),
+                    "Resources" => dict! {
+                        "Pattern" => dict! { "P1" => Object::reference(5) },
+                    },
+                    "Contents" => Object::reference(4),
+                }),
+            ),
+            (
+                4,
+                Object::from(Stream::new(dict! {}, page_content.to_vec())),
+            ),
+            (
+                5,
+                Object::from(Stream::new(
+                    dict! {
+                        "Type" => Object::name("Pattern"),
+                        "PatternType" => 1,
+                        "PaintType" => 1,
+                        "TilingType" => 1,
+                        "BBox" => vec![Object::from(0), Object::from(0), Object::from(16), Object::from(16)],
+                        "XStep" => 16,
+                        "YStep" => 16,
+                        "Resources" => dict! {
+                            "Pattern" => dict! { "P1" => Object::reference(5) },
+                        },
+                    },
+                    pat_content.to_vec(),
+                )),
+            ),
+        ]);
+        let opts = RenderOpts::with_viewport(Viewport::Page {
+            width: 64,
+            rotation: Rotation::R0,
+        });
+        let (pix, _sum, faults) = render_pdf_bytes(&pdf, &opts);
+        assert!(
+            faults.contains(&pdf_raster::Fault::InvalidPattern),
+            "expected cycle fault on self-recursive tiling pattern: {faults:?}"
+        );
+        // The non-recursive left half of the pattern cell (`x = 2, y = 58`) still painted red!
+        assert_eq!(pix.pixel_rgba8(2, 58), Some([255, 0, 0, 255]));
+    }
+
+    // 2. Self-recursive Type 3 `CharProc` (`'A'` invokes `BT /F3 1 Tf (AA) Tj ET`)
+    //    must refuse the cycle immediately without recursing to `max_layer_depth`.
+    {
+        let page_content = b"0 0 1 rg BT /F3 32 Tf 8 8 Td (A) Tj ET\n";
+        let cp_a = b"1 0 d0 0 0.6 0 rg 0 0 0.5 0.5 re f BT /F3 1 Tf (AA) Tj ET";
+        let pdf = build_pdf_bytes(vec![
+            (
+                1,
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+                ),
+            ),
+            (
+                2,
+                Object::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                    "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(64), Object::from(64)],
+                }),
+            ),
+            (
+                3,
+                Object::from(dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => Object::reference(2),
+                    "Resources" => dict! {
+                        "Font" => dict! { "F3" => Object::reference(5) },
+                    },
+                    "Contents" => Object::reference(4),
+                }),
+            ),
+            (
+                4,
+                Object::from(Stream::new(dict! {}, page_content.to_vec())),
+            ),
+            (
+                5,
+                Object::from(dict! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("Type3"),
+                    "FontBBox" => vec![Object::from(0), Object::from(0), Object::from(1), Object::from(1)],
+                    "FontMatrix" => vec![
+                        Object::from(1), Object::from(0), Object::from(0),
+                        Object::from(1), Object::from(0), Object::from(0),
+                    ],
+                    "CharProcs" => dict! { "a" => Object::reference(6) },
+                    "Encoding" => dict! {
+                        "Type" => Object::name("Encoding"),
+                        "Differences" => vec![Object::from(65), Object::name("a")],
+                    },
+                    "FirstChar" => 65,
+                    "LastChar" => 65,
+                    "Widths" => vec![Object::from(1)],
+                    "Resources" => dict! {
+                        "Font" => dict! { "F3" => Object::reference(5) },
+                    },
+                }),
+            ),
+            (6, Object::from(Stream::new(dict! {}, cp_a.to_vec()))),
+        ]);
+        let opts = RenderOpts::with_viewport(Viewport::Page {
+            width: 64,
+            rotation: Rotation::R0,
+        });
+        let (pix, _sum, _faults) = render_pdf_bytes(&pdf, &opts);
+        assert_eq!(pix.pixel_rgba8(12, 52), Some([0, 153, 0, 255]));
+    }
+
+    // 3. 20-level `4^20` (`~1.1e12` leaf uses) acyclic tiling-pattern DAG
+    //    finishes instantaneously via `tile_cache`!
+    {
+        let mut objects = vec![
+            (
+                1,
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+                ),
+            ),
+            (
+                2,
+                Object::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                    "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(64), Object::from(64)],
+                }),
+            ),
+            (
+                3,
+                Object::from(dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => Object::reference(2),
+                    "Resources" => dict! {
+                        "Pattern" => dict! { "P0" => Object::reference(10) },
+                    },
+                    "Contents" => Object::reference(4),
+                }),
+            ),
+            (
+                4,
+                Object::from(Stream::new(
+                    dict! {},
+                    b"/Pattern cs /P0 scn 0 0 64 64 re f\n".to_vec(),
+                )),
+            ),
+        ];
+        for level in 0..20_u32 {
+            let id = 10 + level;
+            let (body, res) = if level == 19 {
+                (b"0 0.4 0.8 rg 0 0 16 16 re f\n".to_vec(), dict! {})
+            } else {
+                let next_id = id + 1;
+                let s = b"/Pattern cs /Pn scn \
+                    0 0 8 8 re f \
+                    8 0 8 8 re f \
+                    0 8 8 8 re f \
+                    8 8 8 8 re f\n"
+                    .to_vec();
+                (
+                    s,
+                    dict! { "Pattern" => dict! { "Pn" => Object::reference(next_id) } },
+                )
+            };
+            objects.push((
+                id,
+                Object::from(Stream::new(
+                    dict! {
+                        "Type" => Object::name("Pattern"),
+                        "PatternType" => 1,
+                        "PaintType" => 1,
+                        "TilingType" => 1,
+                        "BBox" => vec![Object::from(0), Object::from(0), Object::from(16), Object::from(16)],
+                        "XStep" => 16,
+                        "YStep" => 16,
+                        "Resources" => res,
+                    },
+                    body,
+                )),
+            ));
+        }
+        let pdf = build_pdf_bytes(objects);
+        let opts = RenderOpts::with_viewport(Viewport::Page {
+            width: 64,
+            rotation: Rotation::R0,
+        });
+        let (pix, sum, _faults) = render_pdf_bytes(&pdf, &opts);
+        assert_eq!(pix.pixel_rgba8(32, 32), Some([0, 102, 204, 255]));
+        // 1 page fill + 19 levels * 4 fills = 77 pattern draws, rendered in O(20) via tile_cache!
+        assert_eq!(sum.patterns_drawn, 77);
+    }
+
+    // 4. 20-level `4^20` acyclic Type 3 `CharProc` fan-out (`'A'` draws `(BBBB)`,
+    //    `'B'` draws `(CCCC)`, ..., `'T'` draws a rect) must hit the shared page-wide
+    //    `gfx.operators` budget immediately instead of hanging!
+    {
+        let mut char_procs = pdf_raster::pdf_objects::Dict::new();
+        let mut diffs: Vec<Object> = vec![Object::from(65)];
+        let mut widths: Vec<Object> = Vec::new();
+        let mut extra_streams = Vec::new();
+        for i in 0..20_u32 {
+            let name = format!("g{i}");
+            let stream_id = 20 + i;
+            char_procs.set(name.clone(), Object::reference(stream_id));
+            diffs.push(Object::name(name));
+            widths.push(Object::from(1));
+            let body = if i == 19 {
+                b"1 0 d0 1 0 0 rg 0 0 1 1 re f".to_vec()
+            } else {
+                let next_ch = char::from(b'A' + (i as u8) + 1);
+                format!("1 0 d0 BT /F3 1 Tf ({next_ch}{next_ch}{next_ch}{next_ch}) Tj ET")
+                    .into_bytes()
+            };
+            extra_streams.push((stream_id, Object::from(Stream::new(dict! {}, body))));
+        }
+        let mut objs = vec![
+            (
+                1,
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+                ),
+            ),
+            (
+                2,
+                Object::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                    "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(64), Object::from(64)],
+                }),
+            ),
+            (
+                3,
+                Object::from(dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => Object::reference(2),
+                    "Resources" => dict! {
+                        "Font" => dict! { "F3" => Object::reference(5) },
+                    },
+                    "Contents" => Object::reference(4),
+                }),
+            ),
+            (
+                4,
+                Object::from(Stream::new(
+                    dict! {},
+                    b"BT /F3 16 Tf 4 4 Td (A) Tj ET\n".to_vec(),
+                )),
+            ),
+            (
+                5,
+                Object::from(dict! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("Type3"),
+                    "FontBBox" => vec![Object::from(0), Object::from(0), Object::from(1), Object::from(1)],
+                    "FontMatrix" => vec![
+                        Object::from(1), Object::from(0), Object::from(0),
+                        Object::from(1), Object::from(0), Object::from(0),
+                    ],
+                    "CharProcs" => char_procs,
+                    "Encoding" => dict! {
+                        "Type" => Object::name("Encoding"),
+                        "Differences" => diffs,
+                    },
+                    "FirstChar" => 65,
+                    "LastChar" => 84,
+                    "Widths" => widths,
+                    "Resources" => dict! {
+                        "Font" => dict! { "F3" => Object::reference(5) },
+                    },
+                }),
+            ),
+        ];
+        objs.extend(extra_streams);
+        let pdf = build_pdf_bytes(objs);
+
+        let reading = Reading::open(&pdf, &OpenOptions::DEFAULT).unwrap();
+        let catalog_id = reading
+            .trailer()
+            .dict()
+            .get(b"Root")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let catalog = (&reading).resolve(catalog_id).unwrap().as_dict().unwrap();
+        let tbl = pages(
+            &reading,
+            catalog,
+            Rules::Pdfium,
+            &SemLimits::DEFAULT,
+            &mut (),
+        )
+        .unwrap();
+        let page = tbl.get(0).unwrap();
+
+        let mut opts = RenderOpts::with_viewport(Viewport::Page {
+            width: 64,
+            rotation: Rotation::R0,
+        });
+        opts.limits.gfx.operators = 500;
+        let err = render_page(
+            &reading,
+            Some(catalog),
+            page,
+            &RenderCache::new(),
+            None,
+            &opts,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Gfx(pdf_raster::pdf_gfx::Error::Limit(
+                    pdf_raster::pdf_gfx::Cap::Operators
+                ))
+            ),
+            "expected shared Cap::Operators on Type 3 DAG fan-out, got: {err:?}"
+        );
+    }
 }

@@ -1,7 +1,7 @@
 //! Clean, metadata-free PDF image stream re-encoders (`FlateDecode` + PNG predictor and pure-Rust
 //! baseline `DCTDecode`).
 //!
-//! Designed for redaction pixel scrubbing (`FEAT-148`, `sheaf-image`) and document sanitization:
+//! Designed for redaction pixel scrubbing and document sanitization:
 //! re-encoded Image XObject streams contain freshly constructed PDF dictionaries and compressed
 //! pixel samples only—never EXIF, XMP, IPTC, `APPn` segments, or JBIG2 symbol dictionaries.
 

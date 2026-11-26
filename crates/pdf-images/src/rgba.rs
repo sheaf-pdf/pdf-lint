@@ -740,8 +740,8 @@ impl RawImage {
 
         let comps = usize::from(self.meta.components);
         let mut out = vec![0_u8; rgba_len];
-        let mut raw_buf = [0_u16; 32];
-        let mut dec_buf = [0.0_f32; 32];
+        let mut raw_buf = vec![0_u16; comps];
+        let mut dec_buf = vec![0.0_f32; comps];
         let denom = ((1_u32 << self.meta.bits_per_component) - 1) as f64;
 
         for y in 0..height {
