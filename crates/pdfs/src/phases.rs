@@ -212,7 +212,8 @@ mod tests {
         #[cfg(feature = "images")]
         {
             let made = spans(|| {
-                let page = pdf.pages().unwrap().get(0).unwrap();
+                let pages = pdf.pages().unwrap();
+                let page = pages.get(0).unwrap();
                 let _ = page.decode_image(ObjectId::new(99, 0));
             });
             assert_eq!(named(&made), [("decode_image", DEBUG, vec![])]);
@@ -220,7 +221,8 @@ mod tests {
         #[cfg(feature = "raster")]
         {
             let made = spans(|| {
-                let page = pdf.pages().unwrap().get(0).unwrap();
+                let pages = pdf.pages().unwrap();
+                let page = pages.get(0).unwrap();
                 page.render_pixmap(&pdf_raster::RenderOpts::page_width(16))
                     .unwrap();
             });

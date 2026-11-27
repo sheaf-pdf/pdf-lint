@@ -1240,7 +1240,8 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// *doc.add_page(Rect::new(0.0, 0.0, 100.0, 100.0)) = canvas.into_writer();
     ///
     /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
-    /// let page = pdf.pages().unwrap().get(0).unwrap();
+    /// let pages = pdf.pages().unwrap();
+    /// let page = pages.get(0).unwrap();
     /// let drawn = page.images().unwrap();
     /// let ImageOf::XObject(id) = drawn[0].of else { unreachable!() };
     /// let rgba = page.decode_image(id).unwrap();
@@ -1361,7 +1362,8 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// p.paint(Paint::Fill);
     ///
     /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
-    /// let page = pdf.pages().unwrap().get(0).unwrap();
+    /// let pages = pdf.pages().unwrap();
+    /// let page = pages.get(0).unwrap();
     /// let (pixmap, summary) = page.render(&RenderOpts::dpi(72.0)).unwrap();
     /// assert_eq!((pixmap.width(), pixmap.height()), (72, 72));
     /// assert_eq!(pixmap.pixel_rgba8(36, 36), Some([220, 40, 30, 255]));

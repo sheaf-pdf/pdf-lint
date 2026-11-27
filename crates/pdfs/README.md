@@ -160,28 +160,32 @@ assert_eq!(texts, ["First", "Second"]);
 With the default `raster` and `images` features, `Page::render_pixmap` (or `Page::render` when you also want `RenderSummary`) rasterizes pages or tiles into a `Pixmap` and encodes PNG bytes via `Pixmap::to_png()`, `Page::images` lists drawn Image XObjects and inline images, `Page::decode_image` decodes any Image XObject into `RgbaImage`, and `RenderBackend` lets applications swap at runtime between pure-Rust `RustBackend` and dynamic-library `PdfiumBackend` (`pdfium` feature):
 
 ```rust
-use std::sync::Arc;
-use pdfs::prelude::*;
+#[cfg(feature = "raster")]
+{
+    use std::sync::Arc;
+    use pdfs::prelude::*;
 
-let mut doc = Document::new();
-let p = doc.add_page(Rect::new(0.0, 0.0, 144.0, 72.0));
-p.fill_color(Color::rgb8([24, 112, 200]));
-p.rect(0.0, 0.0, 144.0, 72.0);
-p.paint(Paint::Fill);
-let bytes = doc.to_bytes().unwrap();
+    let mut doc = Document::new();
+    let p = doc.add_page(Rect::new(0.0, 0.0, 144.0, 72.0));
+    p.fill_color(Color::rgb8([24, 112, 200]));
+    p.rect(0.0, 0.0, 144.0, 72.0);
+    p.paint(Paint::Fill);
+    let bytes = doc.to_bytes().unwrap();
 
-let pdf = pdfs::from_bytes(&bytes[..]).unwrap();
-let page = pdf.pages().unwrap().get(0).unwrap();
-let pixmap = page.render_pixmap(&RenderOpts::dpi(72.0)).unwrap();
-assert_eq!((pixmap.width(), pixmap.height()), (144, 72));
-assert_eq!(pixmap.pixel_rgba8(72, 36), Some([24, 112, 200, 255]));
-let png_bytes = pixmap.to_png().unwrap();
-assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let pdf = pdfs::from_bytes(&bytes[..]).unwrap();
+    let pages = pdf.pages().unwrap();
+    let page = pages.get(0).unwrap();
+    let pixmap = page.render_pixmap(&RenderOpts::dpi(72.0)).unwrap();
+    assert_eq!((pixmap.width(), pixmap.height()), (144, 72));
+    assert_eq!(pixmap.pixel_rgba8(72, 36), Some([24, 112, 200, 255]));
+    let png_bytes = pixmap.to_png().unwrap();
+    assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
 
-// Or drive rendering through the object-safe `RenderBackend` trait:
-let backend: &dyn RenderBackend = &RustBackend::new();
-let rendered = backend.open_bytes(Arc::from(bytes), None).unwrap();
-assert_eq!(rendered.page_count(), 1);
+    // Or drive rendering through the object-safe `RenderBackend` trait:
+    let backend: &dyn RenderBackend = &RustBackend::new();
+    let rendered = backend.open_bytes(Arc::from(bytes), None).unwrap();
+    assert_eq!(rendered.page_count(), 1);
+}
 ```
 
 ## Architecture & Re-exported Crates
