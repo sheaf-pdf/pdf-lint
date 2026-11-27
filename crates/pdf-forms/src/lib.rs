@@ -143,6 +143,7 @@ mod form;
 #[doc(hidden)]
 pub mod fuzz;
 pub mod group;
+mod kind;
 mod limits;
 mod phases;
 mod read;
@@ -160,5 +161,6 @@ pub use field::{
     selected_options,
 };
 pub use form::Form;
+pub use kind::FormKind;
 pub use limits::{Cap, Limits};
 pub use pdf_annots::Quadding;

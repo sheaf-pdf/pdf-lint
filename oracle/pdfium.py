@@ -867,6 +867,7 @@ class Pdfium:
             ("FPDF_VIEWERREF_GetPrintPageRangeElement", I, [P, S]),
             ("FPDF_VIEWERREF_GetName", U, [P, ctypes.c_char_p, ctypes.c_char_p, U]),
             ("FPDFCatalog_GetLanguage", U, [P, P, U]),
+            ("FPDF_GetFormType", I, [P]),
         ]:
             f = getattr(lib, name)
             f.restype, f.argtypes = res, args
@@ -1284,6 +1285,17 @@ class Pdfium:
         lib.FPDFDOC_ExitFormFillEnvironment(form)
         lib.FPDF_CloseDocument(doc)
         return out
+
+    def forms_kind(self, data):
+        """The kind of form the document holds, as `FPDF_GetFormType` numbers
+        it (fpdfview.h's FORMTYPE_*: 0 none, 1 an AcroForm, 2 XFA that is the
+        whole form, 3 XFA beside an AcroForm); None where it doesn't load."""
+        buf, doc = self._doc(data)
+        if not doc:
+            return None
+        kind = self.lib.FPDF_GetFormType(doc)
+        self.lib.FPDF_CloseDocument(doc)
+        return kind
 
     def forms_ap(self, data):
         """The normal appearance PDFium makes for each of page 0's widgets
@@ -2039,6 +2051,9 @@ def answer(pdfium, kind, files):
         return content_answer(pdfium.annots(files["pdf"]))
     if kind == "forms":
         return content_answer(pdfium.forms(files["pdf"]))
+    if kind == "forms-kind":
+        found = pdfium.forms_kind(files["pdf"])
+        return "no-document" if found is None else "kind %d" % found
     if kind == "forms-ap":
         return content_answer(pdfium.forms_ap(files["pdf"]))
     if kind == "forms-ap-all":

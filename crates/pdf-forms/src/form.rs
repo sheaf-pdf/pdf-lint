@@ -227,7 +227,11 @@ impl<'o> Form<'o> {
         self.sig_flags
     }
 
-    /// Whether the form holds an XFA form too (`/XFA`).
+    /// Whether the form holds an XFA form too: an `/XFA` entry is written,
+    /// whatever it holds, as PDFium counts it. [`FormKind::read`] reads it by
+    /// the rules it's given, and says whether the XFA is the whole form.
+    ///
+    /// [`FormKind::read`]: crate::FormKind::read
     #[must_use]
     pub fn has_xfa(&self) -> bool {
         self.dict.get("XFA").is_some()

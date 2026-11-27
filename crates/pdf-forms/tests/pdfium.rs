@@ -16,6 +16,9 @@
 //! compares fails `every_case_is_compared`. The presses are made here by
 //! `pdf_forms::group`'s rules over what the read layer reads of the group,
 //! and held to PDFium's states and values.
+//!
+//! The `forms-kind` cases record `FPDF_GetFormType`'s number for a document,
+//! held to `FormKind::read`'s by PDFium's rules.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -25,7 +28,7 @@ use pdf_forms::group::FieldGroup;
 use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
 use pdf_forms::pdf_objects::{Object, Resolve, Str, Value};
 use pdf_forms::pdf_semantics::pages;
-use pdf_forms::{Field, FieldKind, FieldValue, Form, Limits};
+use pdf_forms::{Field, FieldKind, FieldValue, Form, FormKind, Limits};
 use pdf_structure::read::Recovery;
 use pdf_structure::{Reading, read};
 
@@ -201,6 +204,7 @@ fn pdfium_recorded_cases_agree() {
     for [name, kind, _files] in &cases {
         assert!(
             kind == "forms"
+                || kind == "forms-kind"
                 || RULE_KINDS.contains(&kind.as_str())
                 || (kind == "fonts" && name.starts_with("back-")),
             "{name}: unexpected case kind {kind}"
@@ -231,6 +235,87 @@ fn pdfium_recorded_cases_agree() {
         wrong.len(),
         wrong.join("\n")
     );
+}
+
+/// The kind of form a case's document holds, as a `forms-kind` record gives
+/// it: `FPDF_GetFormType`'s number for what `FormKind::read` reads by `rules`.
+fn kind_answer(bytes: &[u8], rules: Rules) -> String {
+    let mut opts = read::Options::DEFAULT;
+    opts.recovery = Recovery::Pdfium;
+    let Ok(reading) = Reading::open(bytes, &opts) else {
+        return "no-document".to_string();
+    };
+    let trailer = reading.trailer().dict();
+    let Ok(Some(catalog)) = pdf_forms::pdf_semantics::catalog(&reading, trailer) else {
+        return "no-document".to_string();
+    };
+    let number = match FormKind::read(&reading, catalog, rules, &Limits::DEFAULT).unwrap() {
+        FormKind::None => 0,
+        FormKind::AcroForm => 1,
+        FormKind::XfaFull => 2,
+        FormKind::XfaForeground => 3,
+        other => unreachable!("{other:?}: a kind PDFium has no number for"),
+    };
+    format!("kind {number}")
+}
+
+/// Every `forms-kind` case reads, by PDFium's rules, as the kind PDFium says;
+/// and by ISO 32000-2's the same, but the cases named here, where a `null`
+/// `/XFA` is no entry and `/NeedsRendering` is read through a reference.
+#[test]
+fn pdfium_recorded_form_kinds_agree() {
+    const ISO_DIFFERS: &[(&str, &str)] = &[
+        ("kind-xfa-null", "kind 1"),
+        ("kind-xfa-null-needs-rendering", "kind 1"),
+        ("kind-xfa-missing", "kind 1"),
+        ("kind-xfa-missing-needs-rendering", "kind 1"),
+        ("kind-xfa-by-reference-to-null", "kind 1"),
+        ("kind-xfa-needs-rendering-by-reference", "kind 2"),
+    ];
+    let recorded: HashMap<String, String> = read_tsv::<2>("chromium-8152.txt")
+        .into_iter()
+        .map(|[k, v]| (k, v))
+        .collect();
+    let mut wrong = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut differed = 0;
+    for [name, kind, _] in &read_tsv::<3>("cases.tsv") {
+        if kind != "forms-kind" {
+            continue;
+        }
+        let bytes = fs::read(set().join("cases").join(format!("{name}.pdf"))).unwrap();
+        let pdfium = recorded
+            .get(name)
+            .unwrap_or_else(|| panic!("{name}: no recorded answer"));
+        seen.insert(pdfium.clone());
+        let ours = kind_answer(&bytes, Rules::Pdfium);
+        if ours != *pdfium {
+            wrong.push(format!("{name}:\n  pdfium: {pdfium}\n  ours:   {ours}"));
+        }
+        let iso = kind_answer(&bytes, Rules::Iso);
+        match ISO_DIFFERS.iter().find(|(case, _)| case == name) {
+            Some((_, expected)) => {
+                differed += 1;
+                if iso != *expected || iso == *pdfium {
+                    wrong.push(format!("{name} by ISO's rules: {iso}, not {expected}"));
+                }
+            }
+            None if iso != *pdfium => {
+                wrong.push(format!("{name} by ISO's rules: {iso}, PDFium's {pdfium}"));
+            }
+            None => {}
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} case(s) disagreed with chromium/8152:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+    // Each kind PDFium names is among the cases, and each listed difference a case.
+    let kinds: Vec<&str> = seen.iter().map(String::as_str).collect();
+    assert_eq!(kinds, ["kind 0", "kind 1", "kind 2", "kind 3"]);
+    assert_eq!(differed, ISO_DIFFERS.len());
 }
 
 /// A color as a `forms-ap` record gives it: the operator that set it (`g`,
@@ -1122,7 +1207,12 @@ fn every_case_is_compared() {
     let cases = read_tsv::<3>("cases.tsv");
     let mut compared = vec![0; COMPARED.len()];
     for [name, kind, _] in &cases {
-        if kind == "forms" || kind == "forms-ap" || kind == "forms-press" || kind == "fonts" {
+        if kind == "forms"
+            || kind == "forms-kind"
+            || kind == "forms-ap"
+            || kind == "forms-press"
+            || kind == "fonts"
+        {
             continue;
         }
         let line = COMPARED
