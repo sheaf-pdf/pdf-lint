@@ -111,12 +111,13 @@ mod limits;
 mod phases;
 mod rgba;
 mod samples;
+mod wrap;
 
 pub use encode::{
     EncodedImage, JpegColorSpace, encode_jpeg, encode_jpeg_bytes, encode_png_rgba8,
     encode_raw_flate, encode_rgba_flate,
 };
-pub use error::{EncodeError, Error, ScrubError};
+pub use error::{EncodeError, Error, JpegRefused, ScrubError};
 pub use fault::Fault;
 pub use header::{ImageCodec, ImageMeta, MaskSpec, RenderingIntent, SMaskInData};
 pub use limits::{LimitKind, Limits};
@@ -127,6 +128,7 @@ pub use rgba::{
     decode_xobject_with,
 };
 pub use samples::{RawImage, SampleData};
+pub use wrap::wrap_jpeg;
 
 #[cfg(test)]
 mod doc_tests {

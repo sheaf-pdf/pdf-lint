@@ -82,6 +82,43 @@ pub enum EncodeError {
     /// Flate/predictor encoding rejected the row layout.
     #[error(transparent)]
     Flate(#[from] pdf_filters::Unencodable),
+    /// A JPEG file's bytes can't be an Image XObject as they are
+    /// ([`wrap_jpeg`](crate::wrap_jpeg)).
+    #[error("the JPEG can't be an image XObject as it is: {0}")]
+    Jpeg(#[from] JpegRefused),
+}
+
+/// Why [`wrap_jpeg`](crate::wrap_jpeg) refused a file's bytes: they aren't a
+/// JPEG, or not one a `/DCTDecode` reader decodes as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum JpegRefused {
+    /// The bytes don't start with a JPEG's start-of-image marker (`FF D8`).
+    #[error("it doesn't start with a JPEG's start-of-image marker")]
+    NoStart,
+    /// A header segment before the first scan is cut short, has a length
+    /// that can't be, or isn't where a marker should be.
+    #[error("its headers don't read")]
+    Malformed,
+    /// The first scan comes before any frame header.
+    #[error("it has no frame header before its first scan")]
+    NoFrame,
+    /// The image ends before any scan.
+    #[error("it has no scan")]
+    NoScan,
+    /// A process other than baseline, extended sequential or progressive DCT
+    /// with Huffman coding: lossless, differential (hierarchical) or
+    /// arithmetic-coded, the reserved `JPG` extension, or a second frame.
+    /// The marker's code is given (`0xC3` for lossless, `0xC9` for
+    /// arithmetic-coded sequential, `0xDE` for a hierarchy).
+    #[error("its process (marker 0x{0:02X}) isn't one a /DCTDecode reader decodes")]
+    Process(u8),
+    /// Samples of a precision other than 8 bits.
+    #[error("its samples are {0}-bit, not 8-bit")]
+    Precision(u8),
+    /// A number of components other than one, three or four.
+    #[error("it has {0} components, not 1, 3 or 4")]
+    Components(u8),
 }
 
 /// Why an in-place raw sample scrub ([`RawImage::fill_rect_raw`](crate::RawImage::fill_rect_raw))

@@ -14,7 +14,7 @@ use crate::inline_chain::decode_inline_standard;
 use crate::{
     DecodeOptions, Fault, JpegColorSpace, Limits, decode_inline_with, decode_stream_with,
     decode_xobject_raw, decode_xobject_raw_with, decode_xobject_with, encode_jpeg,
-    encode_raw_flate, encode_rgba_flate,
+    encode_raw_flate, encode_rgba_flate, wrap_jpeg,
 };
 
 struct FuzzStore {
@@ -373,6 +373,42 @@ pub fn images(data: &[u8]) {
                 .unwrap();
         assert_eq!(decoded.width(), jw);
         assert_eq!(decoded.height(), jh);
+
+        // What the encoder wrote wraps unchanged, and decodes to the same
+        // size as its own dictionary's does.
+        let bytes = stream.data.bytes().unwrap().to_vec();
+        let wrapped = wrap_jpeg(bytes.clone()).unwrap();
+        assert_eq!(wrapped.data.bytes(), Some(&bytes[..]));
+        let rewrapped = decode_stream_with(
+            &empty,
+            &wrapped,
+            None,
+            &DecodeOptions::PDFIUM,
+            &lim,
+            &mut (),
+        )
+        .unwrap();
+        assert_eq!((rewrapped.width(), rewrapped.height()), (jw, jh));
+    }
+
+    // Arbitrary bytes as a JPEG to wrap: taken or refused, never a panic; and
+    // what's taken is the bytes given, with a frame's size and components.
+    if let Ok(wrapped) = wrap_jpeg(payload.to_vec()) {
+        assert_eq!(wrapped.data.bytes(), Some(payload));
+        let size = |key: &str| wrapped.dict.get(key).and_then(Object::as_integer);
+        assert!(matches!(size("Width"), Some(1..=65_535)));
+        assert!(matches!(size("Height"), Some(1..=65_535)));
+        let empty = FuzzStore {
+            objects: BTreeMap::new(),
+        };
+        let _ = decode_stream_with(
+            &empty,
+            &wrapped,
+            None,
+            &DecodeOptions::PDFIUM,
+            &lim,
+            &mut (),
+        );
     }
 }
 
