@@ -486,7 +486,7 @@ fn write_png_chunk(out: &mut Vec<u8>, chunk_type: [u8; 4], payload: &[u8]) {
 ///
 /// Returns [`EncodeError::Dimensions`] if `width == 0`, `height == 0`, or the
 /// byte count overflows, [`EncodeError::BufferLength`] if `pixels.len()` does
-/// not equal `width * height * 4`, or [`EncodeError::Filter`] on Flate failure.
+/// not equal `width * height * 4`, or [`EncodeError::Flate`] on Flate failure.
 pub fn encode_png_rgba8(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, EncodeError> {
     if width == 0 || height == 0 {
         return Err(EncodeError::Dimensions { width, height });

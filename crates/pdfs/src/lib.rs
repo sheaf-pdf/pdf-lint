@@ -99,7 +99,7 @@
 //!   inline DCT/CCITTFax images to find their end, bundle Adobe predefined CJK
 //!   CMaps, enable runtime CPU SIMD in `pdf-content-streams`, `pdf-images`, and
 //!   `pdf-raster`, and enable `PdfiumBackend` (a thin `RenderBackend` adapter
-//!   over `pdfium-render` `0.9.6`).
+//!   over `pdfium-render` `=0.9.6`).
 //! - **`tracing`**: emit `debug`-level `tracing` spans (numeric counts and
 //!   lengths only, never file content).
 //! - **`insecure-test-writer`**: deterministic seeded encryption keys and IVs

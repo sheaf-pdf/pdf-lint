@@ -1194,8 +1194,8 @@ impl<'a, S: ByteSource> Page<'a, S> {
     /// inside Form XObjects) in content-stream drawing order, without decoding
     /// pixel samples ([`page::images`](fn@page::images)).
     ///
-    /// Pass any `ImageOf::XObject(id)` entry to [`Page::decode_image`] or
-    /// [`Page::decode_image_raw`] (`images` feature) to decode its pixels.
+    /// Pass any `ImageOf::XObject(id)` entry to `Page::decode_image` or
+    /// `Page::decode_image_raw` (`images` feature) to decode its pixels.
     ///
     /// # Errors
     ///

@@ -1966,7 +1966,8 @@ fn approximated_summary_faults_font_query_dedup_and_scene_limits() {
     use std::sync::Mutex;
 
     // 1. ShadingType 6 (Coons patch mesh) emits `UnsupportedShading { shading_type: 6 }`,
-    //    sets `approximated = true`, and paints `/Background`!
+    //    sets `approximated = true`, skips `/Background` on direct `sh` per ISO 32000-2
+    //    §8.7.4.3 Table 76, and paints `/Background` when used via `PatternType 2`!
     let sh6_pdf = build_pdf_bytes(vec![
         (
             1,
@@ -1988,11 +1989,25 @@ fn approximated_summary_faults_font_query_dedup_and_scene_limits() {
             Object::from(dict! {
                 "Type" => Object::name("Page"),
                 "Parent" => Object::reference(2),
-                "Resources" => dict! { "Shading" => dict! { "S6" => Object::reference(5) } },
+                "Resources" => dict! {
+                    "Shading" => dict! { "S6" => Object::reference(5) },
+                    "Pattern" => dict! {
+                        "P6" => dict! {
+                            "PatternType" => 2,
+                            "Shading" => Object::reference(5),
+                        },
+                    },
+                },
                 "Contents" => Object::reference(4),
             }),
         ),
-        (4, Object::from(Stream::new(dict! {}, b"/S6 sh\n".to_vec()))),
+        (
+            4,
+            Object::from(Stream::new(
+                dict! {},
+                b"q 16 0 16 32 re W n /S6 sh Q /Pattern cs /P6 scn 0 0 16 32 re f\n".to_vec(),
+            )),
+        ),
         (
             5,
             Object::from(Stream::new(
@@ -2018,8 +2033,10 @@ fn approximated_summary_faults_font_query_dedup_and_scene_limits() {
     let (sh_pix, sh_sum, sh_faults) = render_pdf_bytes(&sh6_pdf, &RenderOpts::page_width(32));
     assert!(sh_sum.approximated);
     assert!(sh_faults.contains(&Fault::UnsupportedShading { shading_type: 6 }));
-    let bg_px = sh_pix.pixel_rgba8(16, 16).unwrap();
-    assert!(bg_px[0] > 180 && bg_px[1] < 50);
+    let sh_direct_px = sh_pix.pixel_rgba8(24, 16).unwrap();
+    assert_eq!(sh_direct_px, [255, 255, 255, 255]);
+    let bg_px = sh_pix.pixel_rgba8(8, 16).unwrap();
+    assert!(bg_px[0] > 180 && bg_px[1] < 50, "bg_px={bg_px:?}");
 
     // 2. Dense dash + non-isolated transparency group + damaged `/Contents` stream + unembedded Std14:
     let approx_pdf = build_pdf_bytes(vec![
@@ -2145,15 +2162,27 @@ fn approximated_summary_faults_font_query_dedup_and_scene_limits() {
         .with_fallback(&spy)
         .render_page(&reading, Some(catalog), tbl.get(0).unwrap())
         .unwrap();
+    // Re-rendering with the same `&cache` and `&spy` hits the memo without re-querying:
+    let _ = Renderer::new(&RenderOpts::page_width(64))
+        .with_cache(&cache)
+        .with_fallback(&spy)
+        .render_page(&reading, Some(catalog), tbl.get(0).unwrap())
+        .unwrap();
     let seen = spy.seen.lock().unwrap();
     assert_eq!(
         seen.len(),
-        1,
-        "RenderCache memoizes fallback query per provider: {seen:?}"
+        2,
+        "RenderCache memoizes (provider, FontQuery) across renders: {seen:?}"
     );
     assert_eq!(seen[0].0.as_deref(), Some("ABCDEF+CustomSans"));
     assert_eq!(seen[0].1.as_deref(), Some("CustomSans"));
     assert_eq!(seen[0].2, Some('A'));
+    assert_eq!(seen[1].2, Some('B'));
+    let cache_dbg = format!("{cache:?}");
+    assert!(
+        cache_dbg.contains("programs: 1"),
+        "shared Arc<[u8]> font buffer is parsed once: {cache_dbg}"
+    );
 
     // 4. `max_tile_pixels` and `max_scene_bytes` caps:
     let tile_and_img_pdf = build_pdf_bytes(vec![

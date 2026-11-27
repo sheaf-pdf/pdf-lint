@@ -106,7 +106,7 @@ predefined-cmaps = [
 # `pdf-raster`.
 simd = ["pdf-content-streams/simd", "pdf-images?/simd", "pdf-raster?/simd"]
 # Optional thin dynamic-library `RenderBackend` adapter (`pdfs::PdfiumBackend`)
-# over `pdfium-render` (`0.9.6`, `thread_safe`).
+# over `pdfium-render` (`=0.9.6`, `thread_safe`).
 pdfium = ["raster", "pdf-raster/pdfium"]
 # The spans of every crate of the family that has them, through `tracing`.
 # Off by default; without it, none is compiled.
