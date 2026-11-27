@@ -112,6 +112,11 @@
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a file,
 # as the target does but under the default options;
+# `images` calls `pdf_images::fuzz::check`, arbitrary bytes decoded as indirect
+# Image XObjects (with `/SMask`, `/Mask`, `/Matte`, `/Decode`, and standard or
+# image-codec filters) and inline images under both rules, checking fault-sink
+# invariance, scrubbing, clean Flate/JPEG re-encoding, and `Debug` redaction,
+# and `pdf_images::fuzz::over` on opened PDF files;
 # `fonts` calls `pdf_fonts::fuzz::type1`, any bytes scanned as a Type 1 program,
 # holding no more than it was given, and under other caps the same or refused;
 # `pdf_fonts::fuzz::names`, an input's words read as glyphs' and fonts' names,
@@ -133,6 +138,15 @@
 # read and its glyphs' boxes the same cut as whole; which two stable unit
 # tests (`the_embed_seeds_come_to_what_they_hold` and
 # `mutated_programs_keep_every_promise`) run, with `embed`;
+# `gfx` calls `pdf_gfx::fuzz::check` and `pdf_gfx::fuzz::over`, interpreting and
+# re-encoding content streams and nested Form XObjects under tight caps;
+# `annots` calls `pdf_annots::fuzz::check` and `pdf_annots::fuzz::over`, reading
+# annotations, reply threads, appearance synthesis, and page flattening plans;
+# `forms` calls `pdf_forms::fuzz::check` and `pdf_forms::fuzz::over`, walking
+# `/AcroForm` field trees, button group transitions, and widget appearances;
+# `raster` calls `pdf_raster::fuzz::check` and `pdf_raster::fuzz::over`,
+# rasterizing multi-object scenes (forms, images, patterns, shadings, soft
+# masks, Type 3 fonts, annotations) across viewports and pixel formats;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
 # of it, and `tables`, the same bytes as a hint stream, which a stable unit test

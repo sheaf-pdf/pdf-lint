@@ -2,6 +2,9 @@
 //! options ([`Viewport`], [`Draw`], [`Appearances`], [`RenderOpts`],
 //! [`RenderSummary`]).
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
 use pdf_gfx::{Matrix, PageGeom, Rotation};
 use pdf_objects::pdf_tokenizer::Rules;
 
@@ -246,6 +249,7 @@ impl Viewport {
 
 /// Which overlays above the page's `/Contents` stream are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Draw {
     /// Non-widget `/Annots` (`FPDF_ANNOT`).
     pub annots: bool,
@@ -271,10 +275,32 @@ impl Draw {
         annots: false,
         forms: false,
     };
+
+    /// Constructs a [`Draw`] configuration selecting non-widget `annots` and
+    /// interactive `forms`.
+    #[must_use]
+    pub const fn new(annots: bool, forms: bool) -> Self {
+        Self { annots, forms }
+    }
+
+    /// Returns a copy with `annots` set.
+    #[must_use]
+    pub const fn with_annots(mut self, annots: bool) -> Self {
+        self.annots = annots;
+        self
+    }
+
+    /// Returns a copy with `forms` set.
+    #[must_use]
+    pub const fn with_forms(mut self, forms: bool) -> Self {
+        self.forms = forms;
+        self
+    }
 }
 
 /// How annotations and widgets lacking a written `/AP /N` stream are handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum Appearances {
     /// Synthesize missing `/AP /N` streams on the fly via `pdf-annots` and
     /// `pdf-forms` without mutating the document (viewer default).
@@ -288,6 +314,7 @@ pub enum Appearances {
 /// Target output medium controlling annotation flags (`Print` vs `NoView`) and
 /// optional-content (`/OCProperties`) intent/usage evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum RenderMedium {
     /// Screen viewing (`Annot::is_visible_on_screen`).
     #[default]
@@ -298,12 +325,14 @@ pub enum RenderMedium {
 
 /// Per-category anti-aliasing / smoothing switches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct AntiAlias {
     /// Analytic area coverage on filled and stroked vector paths.
     pub paths: bool,
     /// Analytic area coverage on glyph outlines.
     pub text: bool,
-    /// Bilinear interpolation on images whose `/Interpolate` flag is `true`.
+    /// Area-averaged downsampling on downscaled images and bilinear
+    /// interpolation on images whose `/Interpolate` flag is `true`.
     pub images: bool,
 }
 
@@ -314,7 +343,8 @@ impl Default for AntiAlias {
 }
 
 impl AntiAlias {
-    /// Smooth paths, text, and `/Interpolate true` images (viewer default).
+    /// Smooth paths, text, and downscaled / `/Interpolate true` images (viewer
+    /// default).
     pub const ALL: Self = Self {
         paths: true,
         text: true,
@@ -327,6 +357,37 @@ impl AntiAlias {
         text: false,
         images: false,
     };
+
+    /// Constructs an [`AntiAlias`] configuration from per-category flags.
+    #[must_use]
+    pub const fn new(paths: bool, text: bool, images: bool) -> Self {
+        Self {
+            paths,
+            text,
+            images,
+        }
+    }
+
+    /// Returns a copy with `paths` set.
+    #[must_use]
+    pub const fn with_paths(mut self, paths: bool) -> Self {
+        self.paths = paths;
+        self
+    }
+
+    /// Returns a copy with `text` set.
+    #[must_use]
+    pub const fn with_text(mut self, text: bool) -> Self {
+        self.text = text;
+        self
+    }
+
+    /// Returns a copy with `images` set.
+    #[must_use]
+    pub const fn with_images(mut self, images: bool) -> Self {
+        self.images = images;
+        self
+    }
 }
 
 /// Complete configuration for rasterizing a PDF page or content stream.
@@ -356,6 +417,10 @@ pub struct RenderOpts {
     /// Resource limits enforced across interpretation, image decoding, color
     /// evaluation, and layer allocation.
     pub limits: Limits,
+    /// Optional cooperative cancellation flag: when set to `true` from another
+    /// thread (e.g. when a viewer user scrolls past a queued tile), rendering
+    /// aborts promptly with [`Error::Cancelled`].
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 impl Default for RenderOpts {
@@ -371,6 +436,7 @@ impl Default for RenderOpts {
             hint_fonts: true,
             rules: Rules::Pdfium,
             limits: Limits::DEFAULT,
+            stop: None,
         }
     }
 }
@@ -384,6 +450,34 @@ impl RenderOpts {
             viewport,
             ..Self::default()
         }
+    }
+
+    /// Creates [`RenderOpts`] at `dpi` dots per inch (`72.0` = 1 px/pt) with no
+    /// extra rotation and viewer defaults.
+    #[must_use]
+    pub fn dpi(dpi: f32) -> Self {
+        Self::with_viewport(Viewport::Dpi {
+            dpi,
+            rotation: Rotation::R0,
+        })
+    }
+
+    /// Creates [`RenderOpts`] scaling the visible page to `width` pixels with no
+    /// extra rotation and viewer defaults.
+    #[must_use]
+    pub fn page_width(width: u32) -> Self {
+        Self::with_viewport(Viewport::Page {
+            width,
+            rotation: Rotation::R0,
+        })
+    }
+
+    /// Attaches a cooperative cancellation flag (`stop`). Setting `stop` to
+    /// `true` causes in-flight rendering to abort with [`Error::Cancelled`].
+    #[must_use]
+    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
     }
 }
 
@@ -414,8 +508,12 @@ pub struct RenderSummary {
     /// Glyphs rendered using a fallback or built-in substitute font because the
     /// PDF font omitted an embedded font program.
     pub substituted_glyphs: usize,
-    /// `true` if any font metric/program was approximated or substituted, or if
-    /// a damaged image/pattern/soft-mask was skipped.
+    /// `true` if any visual element was approximated or skipped: font metric or
+    /// glyph substitution, non-isolated/knockout/custom-space transparency
+    /// group, unrecognized blend mode, unimplemented `ShadingType 6`/`7` patch
+    /// mesh, downsampled large shading grid or clamped tiling cell, dense dash
+    /// drawn solid, oversized `> 65,535` px image, exceeded layer depth, or
+    /// skipped damaged stream/image/pattern/soft-mask.
     pub approximated: bool,
 }
 

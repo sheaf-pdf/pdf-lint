@@ -390,7 +390,7 @@ where
             for (dst, &src) in ins.iter_mut().zip(&sample_inputs) {
                 *dst = src;
             }
-            let _ = func.eval_vec(&ins, &small);
+            let _ = func.eval_vec(&ins);
         }
 
         let opts = match rules {
@@ -421,7 +421,9 @@ where
             for (dst, &src) in comps.iter_mut().zip(&sample_inputs) {
                 *dst = src;
             }
-            let _ = prep.eval(&comps, &small);
+            let _ = prep.eval(&comps);
+            let _ = prep.eval_with_rules(&comps, Rules::Iso);
+            let _ = prep.eval_with_rules(&comps, Rules::Pdfium);
         }
     }
 }
@@ -459,7 +461,7 @@ pub fn counts(data: &[u8]) {
             if let Ok(Some(prep)) =
                 PreparedSpace::from_space(with_streams, &dev, &oi_opts, &Limits::DEFAULT, &mut ())
             {
-                let _ = prep.eval(&[0.2, 0.4, 0.6, 0.1], &Limits::DEFAULT);
+                let _ = prep.eval(&[0.2, 0.4, 0.6, 0.1]);
             }
         }
     }

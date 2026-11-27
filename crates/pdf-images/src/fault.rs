@@ -9,7 +9,7 @@
 #[non_exhaustive]
 pub enum Fault {
     /// Uncompressed or standard-filtered sample stream ended before `row_bytes * height` and was
-    /// zero/white-padded.
+    /// zero-padded.
     #[error("image sample stream ended short of expected row bytes")]
     ShortStream,
     /// Uncompressed or standard-filtered sample stream contained trailing bytes past
@@ -30,12 +30,11 @@ pub enum Fault {
     /// `/ImageMask true` dictionary also specified `/ColorSpace` (ignored per §8.9.6.2).
     #[error("/ImageMask dictionary specifies /ColorSpace")]
     StencilHasColorSpace,
-    /// `/Mask` stream or color-key array was malformed, unreadable, or exceeded `mask_depth` and
-    /// was ignored (leaving pixels opaque).
+    /// `/Mask` stream or color-key array was malformed or unreadable and was ignored (leaving
+    /// pixels opaque).
     #[error("invalid or unreadable /Mask; ignored")]
     InvalidMask,
-    /// `/SMask` stream was malformed, unreadable, or exceeded `mask_depth` and was ignored
-    /// (leaving pixels opaque).
+    /// `/SMask` stream was malformed or unreadable and was ignored (leaving pixels opaque).
     #[error("invalid or unreadable /SMask; ignored")]
     InvalidSMask,
     /// `/Matte` array on `/SMask` was not `N` finite numbers for the parent color space and was

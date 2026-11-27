@@ -5768,3 +5768,144 @@ mod fallback {
         assert!(!printed.contains("101"), "{printed}");
     }
 }
+
+#[test]
+fn transparency_group_resets_entry_state_and_user_segments_match_ctm() {
+    let mut store = Store::default();
+    let smask_group = store.put_stream(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+        },
+        b"0 0 10 10 re f".to_vec(),
+    );
+    let tr_fn = store.put(Object::from(dict! { "FunctionType" => 2, "N" => 1.0 }));
+    let group_form = store.put_stream(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(50), Object::from(50)],
+            "Group" => dict! {
+                "S" => Object::name("Transparency"),
+                "I" => true,
+                "K" => true,
+                "CS" => Object::name("DeviceRGB"),
+            },
+        },
+        b"1 2 3 4 re B".to_vec(),
+    );
+    let plain_form = store.put_stream(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Form"),
+            "BBox" => vec![Object::from(0), Object::from(0), Object::from(50), Object::from(50)],
+        },
+        b"1 2 3 4 re f".to_vec(),
+    );
+
+    let bc_20: Vec<Object> = (0..20).map(|i| Object::from(f64::from(i) * 0.05)).collect();
+    let resources = Object::from(dict! {
+        "ExtGState" => dict! {
+            "GS1" => dict! {
+                "CA" => 0.3,
+                "ca" => 0.6,
+                "BM" => Object::name("Multiply"),
+                "SMask" => dict! {
+                    "S" => Object::name("Luminosity"),
+                    "G" => smask_group,
+                    "BC" => bc_20,
+                    "TR" => tr_fn,
+                },
+            },
+        },
+        "XObject" => dict! {
+            "Grp" => group_form,
+            "Pln" => plain_form,
+        },
+    });
+
+    let fonts = Fonts::default();
+    let content = Concat::new(&[b"2 0 0 3 5 7 cm /GS1 gs /Grp Do /Pln Do 10 20 m 30 40 l S"]);
+
+    let mut form_begin_alpha = None;
+    let mut inside_group_state = None;
+    let mut inside_plain_state = None;
+    let mut outer_after_forms_state = None;
+    let mut user_and_dev_matches = false;
+
+    interpret(
+        store.as_streams(),
+        &content,
+        Some(&resources),
+        &Limits::DEFAULT,
+        &fonts,
+        Opts::default(),
+        |ev| {
+            match &ev.kind {
+                Kind::FormBegin(f) if f.form == group_form => {
+                    assert!(f.group.unwrap().isolated && f.group.unwrap().knockout);
+                    form_begin_alpha = Some((ev.state.stroke_alpha, ev.state.fill_alpha));
+                }
+                Kind::Path(p) => match ev.at.stream.map(|u| u.depth()) {
+                    Some(1) if inside_group_state.is_none() => {
+                        inside_group_state = Some(ev.state.clone());
+                    }
+                    Some(1) => {
+                        inside_plain_state = Some(ev.state.clone());
+                    }
+                    None => {
+                        outer_after_forms_state = Some(ev.state.clone());
+                        let mapped: Vec<Seg> = p
+                            .user_segments
+                            .iter()
+                            .map(|s| match *s {
+                                Seg::Move(pt) => Seg::Move(ev.state.ctm.apply(pt)),
+                                Seg::Line(pt) => Seg::Line(ev.state.ctm.apply(pt)),
+                                Seg::Curve(a, b, c) => Seg::Curve(
+                                    ev.state.ctm.apply(a),
+                                    ev.state.ctm.apply(b),
+                                    ev.state.ctm.apply(c),
+                                ),
+                                Seg::Close => Seg::Close,
+                            })
+                            .collect();
+                        user_and_dev_matches = mapped == p.segments;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+
+    // `FormBegin` sees outer `CA=0.3, ca=0.6`:
+    let (ba_s, ba_f) = form_begin_alpha.unwrap();
+    assert_approx(ba_s, 0.3);
+    assert_approx(ba_f, 0.6);
+
+    // Inside transparency group: `CA=1, ca=1, BM=Normal, SMask=None`:
+    let ig = inside_group_state.unwrap();
+    assert_approx(ig.stroke_alpha, 1.0);
+    assert_approx(ig.fill_alpha, 1.0);
+    assert!(ig.blend_mode.is_normal());
+    assert_eq!(ig.soft_mask, SoftMask::None);
+    assert!(ig.soft_mask_params.is_none());
+
+    // Inside non-group Form XObject: inherits `CA=0.3, ca=0.6, BM=Multiply, SMask`:
+    let ip = inside_plain_state.unwrap();
+    assert_approx(ip.stroke_alpha, 0.3);
+    assert_approx(ip.fill_alpha, 0.6);
+    assert_eq!(ip.blend_mode, BlendState::Mode(Blend::Multiply));
+
+    // After both Form XObjects exit: outer state still has `CA=0.3, ca=0.6`, 20-element `/BC`, and `/TR` ref!
+    let outer = outer_after_forms_state.unwrap();
+    assert_approx(outer.stroke_alpha, 0.3);
+    assert_approx(outer.fill_alpha, 0.6);
+    let smp = outer.soft_mask_params.as_ref().unwrap();
+    assert_eq!(smp.backdrop.as_ref().unwrap().as_slice().len(), 20);
+    assert_eq!(smp.transfer.as_deref(), Some(&Object::from(tr_fn)));
+    assert!(user_and_dev_matches);
+}

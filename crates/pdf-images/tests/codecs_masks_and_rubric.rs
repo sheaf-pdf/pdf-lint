@@ -1901,3 +1901,229 @@ fn dct_subsampled_progressive_restart_markers_and_app14_transform_pinning() {
         "ColorTransform 1 expected YCbCr->RGB [~0, ~118, ~208], got {p_ct1:?}"
     );
 }
+
+#[test]
+fn raw_image_from_parts_fill_rect_decoded_png_and_mask_combinations() {
+    use pdf_images::pdf_color::Family;
+    use pdf_images::{ImageCodec, ImageMeta, RawImage, SampleData};
+
+    // 1. `ImageMeta::new` + `RawImage::from_parts` validation + `fill_rect_decoded` on inverted CMYK.
+    let mut meta = ImageMeta::new(2, 2, 8, 4, Some(Family::DeviceCMYK), false);
+    meta.decode = vec![(1.0, 0.0); 4]; // Inverted CMYK: raw 255 = 0% ink, raw 0 = 100% ink.
+    let mut raw = RawImage::from_parts(
+        meta,
+        ImageCodec::Raw,
+        SampleData::U8(vec![255; 16]),
+        None,
+        None,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    // Reject mismatched decode length or 0 components in `from_parts`:
+    let mut bad_meta = ImageMeta::new(2, 2, 8, 3, Some(Family::DeviceRGB), false);
+    bad_meta.decode = vec![(0.0, 1.0)];
+    assert!(
+        RawImage::from_parts(
+            bad_meta,
+            ImageCodec::Raw,
+            SampleData::U8(vec![0; 12]),
+            None,
+            None,
+            &Limits::DEFAULT,
+        )
+        .is_err()
+    );
+    // `fill_rect_decoded` maps post-`/Decode` `[0, 0, 0, 1]` (100% K black) through `[1.0, 0.0]`
+    // to raw `[255, 255, 255, 0]`:
+    assert_eq!(
+        raw.fill_rect_decoded(0, 0, 1, 1, &[0.0, 0.0, 0.0, 1.0])
+            .unwrap(),
+        Some((0, 0, 1, 1))
+    );
+    let mut check_raw = [0_u16; 4];
+    assert!(raw.pixel_raw(0, 0, &mut check_raw));
+    assert_eq!(check_raw, [255, 255, 255, 0]);
+
+    // 2. Explicit stencil `/Mask` stream at a different resolution (`2x1` mask on `4x2` parent),
+    //    plus `/SMask` overriding `/Mask` when both are present (ISO 32000-2 Table 87).
+    let mask_id = ObjectId::new(10, 0);
+    let smask_id = ObjectId::new(11, 0);
+    let mut objects = BTreeMap::new();
+    // 2x1 stencil mask: left half `0` (painted), right half `1` (masked out -> transparent): `0b0100_0000 = 0x40`.
+    objects.insert(
+        mask_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 2,
+                "Height" => 1,
+                "ImageMask" => true,
+                "BitsPerComponent" => 1,
+            },
+            vec![0x40],
+        )),
+    );
+    // 2x1 soft mask: left half alpha 0, right half alpha 128, with `/Matte [1.0 1.0 1.0]` (white).
+    objects.insert(
+        smask_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 2,
+                "Height" => 1,
+                "ColorSpace" => Object::name("DeviceGray"),
+                "BitsPerComponent" => 8,
+                "Matte" => vec![Object::from(1.0), Object::from(1.0), Object::from(1.0)],
+            },
+            vec![0, 128],
+        )),
+    );
+    let parent_id = ObjectId::new(12, 0);
+    // 4x2 Indexed image: palette `[255, 128, 128]` (50% red premultiplied over white `[255,255,255]`).
+    objects.insert(
+        parent_id,
+        Object::from(Stream::new(
+            dict! {
+                "Subtype" => Object::name("Image"),
+                "Width" => 4,
+                "Height" => 2,
+                "ColorSpace" => vec![
+                    Object::name("Indexed"),
+                    Object::name("DeviceRGB"),
+                    Object::from(0),
+                    Object::bytes(&b"\xFF\x80\x80"[..]),
+                ],
+                "BitsPerComponent" => 8,
+                "Mask" => mask_id,
+            },
+            vec![0; 8],
+        )),
+    );
+    let provider = empty_provider(&objects);
+    let masked_only = decode_xobject(
+        provider,
+        parent_id,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    // Left pixels `(0,0)` and `(1,1)` unmasked (`alpha = 255`), right pixels `(2,0)` and `(3,1)` masked (`alpha = 0`).
+    assert_eq!(masked_only.pixel(0, 0).unwrap()[3], 255);
+    assert_eq!(masked_only.pixel(1, 1).unwrap()[3], 255);
+    assert_eq!(masked_only.pixel(2, 0).unwrap()[3], 0);
+    assert_eq!(masked_only.pixel(3, 1).unwrap()[3], 0);
+
+    // Now add `/SMask` alongside `/Mask`: `/SMask` takes precedence AND un-premultiplies the
+    // `Indexed` base-space `/Matte [1, 1, 1]` at `alpha = 128` (`[255, ~0, ~0, 128]`).
+    objects
+        .get_mut(&parent_id)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .dict
+        .set("SMask", smask_id);
+    let provider = empty_provider(&objects);
+    let smask_wins = decode_xobject(
+        provider,
+        parent_id,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(smask_wins.pixel(0, 0).unwrap()[3], 0);
+    let right_px = smask_wins.pixel(3, 1).unwrap();
+    assert_eq!(right_px[3], 128);
+    assert!(
+        right_px[0] > 250 && right_px[1] <= 3 && right_px[2] <= 3,
+        "expected un-premultiplied pure red, got {right_px:?}"
+    );
+
+    // PNG encoding smoke check (`IHDR` + `IDAT` + `IEND`):
+    let png = smask_wins.to_png().unwrap();
+    assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    assert!(png.windows(4).any(|w| w == b"IHDR"));
+    assert!(png.windows(4).any(|w| w == b"IDAT"));
+    assert!(png.ends_with(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]));
+
+    // 3. `Lab` and 5-component `DeviceN` image decoding.
+    let lab_stream = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 1,
+            "Height" => 1,
+            "ColorSpace" => vec![
+                Object::name("Lab"),
+                Object::from(dict! { "WhitePoint" => vec![Object::from(0.9505), Object::from(1.0), Object::from(1.089)] }),
+            ],
+            "BitsPerComponent" => 8,
+        },
+        vec![255, 128, 128], // L*=100, a*=0, b*=0 -> white
+    );
+    let lab_rgba = decode_stream(
+        provider,
+        &lab_stream,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    let wp = lab_rgba.pixel(0, 0).unwrap();
+    assert!(wp[0] > 245 && wp[1] > 245 && wp[2] > 245, "wp={wp:?}");
+
+    // 5-component DeviceN -> DeviceRGB via Type 4 PostScript tint function `{ pop pop }`.
+    let tint_id = ObjectId::new(20, 0);
+    objects.insert(
+        tint_id,
+        Object::from(Stream::new(
+            dict! {
+                "FunctionType" => 4,
+                "Domain" => vec![
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                ],
+                "Range" => vec![
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                ],
+            },
+            b"{ pop pop }".to_vec(),
+        )),
+    );
+    let devn_stream = Stream::new(
+        dict! {
+            "Subtype" => Object::name("Image"),
+            "Width" => 1,
+            "Height" => 1,
+            "ColorSpace" => vec![
+                Object::name("DeviceN"),
+                Object::from(vec![
+                    Object::name("C1"),
+                    Object::name("C2"),
+                    Object::name("C3"),
+                    Object::name("C4"),
+                    Object::name("C5"),
+                ]),
+                Object::name("DeviceRGB"),
+                Object::from(tint_id),
+            ],
+            "BitsPerComponent" => 8,
+        },
+        vec![200, 100, 50, 10, 20],
+    );
+    let provider = empty_provider(&objects);
+    let devn_rgba = decode_stream(
+        provider,
+        &devn_stream,
+        None,
+        &DecodeOptions::ISO,
+        &Limits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(devn_rgba.pixel(0, 0), Some([200, 100, 50, 255]));
+}

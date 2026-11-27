@@ -11,10 +11,30 @@ use crate::open::Options;
 
 /// Pure-Rust [`RenderBackend`] powered by `pdfs` and `pdf-raster`.
 ///
-/// Opens a [`Pdf<Arc<[u8]>>`](crate::Pdf) (which directly implements
-/// [`RenderedDoc`]), unlocks password-protected files via `pdf-crypt`, caches
-/// the walked page table and parsed fonts across pages, and rasterizes pages or
-/// tiles concurrently across threads (`Send + Sync`, `#![forbid(unsafe_code)]`).
+/// Opens an in-memory [`Pdf<Arc<[u8]>>`](crate::Pdf) (which directly implements
+/// [`RenderedDoc`]), unlocks password-protected files via `pdf-crypt`, walks and
+/// caches the page tree upfront during `open_bytes` / `open_bytes_with_passwords`,
+/// and shares parsed font programs across pages. The returned [`RenderedDoc`] is
+/// `Send + Sync` (`#![forbid(unsafe_code)]`) so caller threads can rasterize
+/// pages or tiles in parallel.
+///
+/// ```
+/// use std::sync::Arc;
+/// use pdfs::prelude::*;
+///
+/// let mut doc = Document::new();
+/// let page = doc.add_page(Rect::new(0.0, 0.0, 72.0, 72.0));
+/// page.fill_color(Color::rgb8([20, 120, 220]));
+/// page.rect(0.0, 0.0, 72.0, 72.0);
+/// page.paint(Paint::Fill);
+/// let bytes: Arc<[u8]> = Arc::from(doc.to_bytes().unwrap());
+///
+/// let backend: &dyn RenderBackend = &RustBackend::new();
+/// let rendered = backend.open_bytes(bytes, None).unwrap();
+/// let (pixmap, _) = rendered.render_page(0, &RenderOpts::dpi(72.0)).unwrap();
+/// assert_eq!(pixmap.pixel_rgba8(36, 36), Some([20, 120, 220, 255]));
+/// assert!(pixmap.to_png().unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+/// ```
 #[derive(Clone)]
 pub struct RustBackend {
     options: Options<'static>,
@@ -72,10 +92,18 @@ impl RenderBackend for RustBackend {
         bytes: Arc<[u8]>,
         password: Option<&str>,
     ) -> Result<Box<dyn RenderedDoc>, BackendError> {
-        let pws = password.map(|s| [Password(s)]);
+        self.open_bytes_with_passwords(bytes, password.as_slice())
+    }
+
+    fn open_bytes_with_passwords(
+        &self,
+        bytes: Arc<[u8]>,
+        passwords: &[&str],
+    ) -> Result<Box<dyn RenderedDoc>, BackendError> {
+        let pws: Vec<Password<'_>> = passwords.iter().copied().map(Password).collect();
         let mut opts = self.options;
-        if let Some(ref arr) = pws {
-            opts.passwords = arr;
+        if !pws.is_empty() {
+            opts.passwords = &pws;
         }
         if let Some(ref fb) = self.fallback {
             opts.font_fallback = Some(fb);

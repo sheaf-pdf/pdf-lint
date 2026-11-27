@@ -15,11 +15,13 @@
 //!   safely across threads on [`Pdf`].
 //! - **Inspect and render pages, geometry, annotations, images, and graphics**
 //!   with [`Pdf::pages`], [`Page::geom`], [`Page::annots`], [`Page::content`],
-//!   [`Page::interpret`], [`Page::encode`], `Page::decode_image` (`images`
-//!   feature), and `Page::render` (`raster` feature): 2D page transforms,
-//!   annotations/links/destinations, placed paths, glyph origins/quads, images,
-//!   shadings, clips, marked content, position-independent content re-encoding,
-//!   and pure-Rust 2D page and tile rasterization.
+//!   [`Page::images`], [`Page::interpret`], [`Page::encode`],
+//!   `Page::decode_image` / `Page::decode_image_raw` (`images` feature), and
+//!   `Page::render` / `Page::render_pixmap` (`raster` feature): 2D page
+//!   transforms, annotations/links/destinations, placed paths, glyph
+//!   origins/quads, images, shadings, clips, marked content,
+//!   position-independent content re-encoding, and pure-Rust 2D page and tile
+//!   rasterization.
 //! - **Extract text and fonts** with [`Page::text`] and [`Page::fonts`] in
 //!   content-stream order, or use `Page::text_page` and `Page::search`
 //!   (`text-layout` feature) for spatial reading order, `unicode-bidi` RTL
@@ -148,7 +150,7 @@ pub use pdf_gfx::Rect;
 pub use pdf_raster::PdfiumBackend;
 
 #[cfg(feature = "raster")]
-pub mod backend;
+mod backend;
 pub mod build;
 mod document;
 #[cfg(feature = "embed")]
@@ -381,6 +383,7 @@ mod tests {
         shared::<pdf_fonts::Shown>();
         shared::<crate::Rect>();
         shared::<pdf_gfx::PageGeom>();
+        shared::<pdf_gfx::ImageDrawn>();
         shared::<pdf_gfx::Summary>();
         shared::<pdf_gfx::EncodedPage>();
         shared::<pdf_gfx::Canvas>();
@@ -428,6 +431,8 @@ mod tests {
             shared::<crate::RustBackend>();
             shared::<pdf_raster::Pixmap>();
             shared::<pdf_raster::RenderOpts>();
+            shared::<pdf_raster::RenderSummary>();
+            shared::<pdf_raster::Renderer<'_>>();
             shared::<pdf_raster::RenderCache>();
             shared::<pdf_raster::Limits>();
             shared::<pdf_raster::Error>();
@@ -453,10 +458,14 @@ mod tests {
         .unwrap();
         let img_id = doc.structure_mut().add(Object::from(img_stream));
         {
-            let p = doc.add_page(Rect::new(0.0, 0.0, 100.0, 100.0));
-            p.fill_color(Color::rgb8([230, 50, 40]));
-            p.rect(10.0, 10.0, 80.0, 80.0);
-            p.paint(Paint::Fill);
+            let mut canvas = Canvas::new();
+            canvas.fill_color(Color::rgb8([230, 50, 40]));
+            canvas.fill_rect(Rect::new(10.0, 10.0, 90.0, 90.0));
+            canvas.draw_xobject(
+                Res::written(img_id),
+                Matrix::new(20.0, 0.0, 0.0, 20.0, 20.0, 20.0),
+            );
+            *doc.add_page(Rect::new(0.0, 0.0, 100.0, 100.0)) = canvas.into_writer();
         }
         let bytes = doc.to_bytes().unwrap();
 
@@ -464,20 +473,35 @@ mod tests {
         let pages = pdf.pages().unwrap();
         let page = pages.get(0).unwrap();
 
-        // Direct image decode on `Page`:
+        // Discover images drawn on `Page` and decode both RGBA8 and raw samples:
+        let drawn_images = page.images().unwrap();
+        assert_eq!(drawn_images.len(), 1);
+        assert_eq!(drawn_images[0].of, ImageOf::XObject(img_id));
         let decoded = page.decode_image(img_id).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        let raw_decoded = page.decode_image_raw(img_id).unwrap();
+        assert_eq!((raw_decoded.width(), raw_decoded.height()), (2, 2));
 
-        // Direct page rasterization on `Page`:
-        let opts = RenderOpts::with_viewport(Viewport::Page {
-            width: 100,
-            rotation: Rotation::R0,
-        });
+        // Direct page rasterization on `Page` (`render` and `render_pixmap` + `to_png`):
+        let opts = RenderOpts::page_width(100);
         let (pix, sum) = page.render(&opts).unwrap();
+        assert_eq!(page.render_pixmap(&opts).unwrap(), pix);
+        assert!(pix.to_png().unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
         assert_eq!((pix.width(), pix.height()), (100, 100));
-        assert_eq!(pix.pixel_rgba8(50, 50), Some([230, 50, 40, 255]));
+        assert_eq!(pix.pixel_rgba8(85, 85), Some([230, 50, 40, 255]));
         assert_eq!(pix.pixel_rgba8(2, 2), Some([255, 255, 255, 255]));
-        assert!(sum.reported && sum.gfx.segments >= 1);
+        assert!(sum.reported && sum.gfx.segments >= 1 && sum.images_drawn == 1);
+
+        // `RustBackend::open_bytes_with_passwords` tries multiple candidate passwords in one open:
+        let mut enc_doc = Document::new();
+        enc_doc.add_page(Rect::new(0.0, 0.0, 40.0, 40.0));
+        let pw = Password("correct-pass").prepared().unwrap();
+        enc_doc.encrypt(&Protection::new(&pw)).unwrap();
+        let enc_bytes: Arc<[u8]> = Arc::from(enc_doc.to_bytes().unwrap());
+        let unlocked_doc = RustBackend::new()
+            .open_bytes_with_passwords(enc_bytes, &["wrong-1", "correct-pass"])
+            .unwrap();
+        assert_eq!(unlocked_doc.page_count(), 1);
 
         // `Pdf` directly implements `RenderedDoc`:
         assert_eq!(RenderedDoc::page_count(&pdf), 1);

@@ -1,11 +1,15 @@
-//! Convenience re-exports for common PDF reading and writing workflows (`use pdfs::prelude::*;`).
+//! Convenience re-exports for common PDF reading, rendering, and writing
+//! workflows (`use pdfs::prelude::*;`).
 //!
 //! Includes `pdfs`'s primary entry points (`Pdf`, `Document`, `Page`, `Options`,
-//! `Limits`, `open`, `from_bytes`, `standard_font`, and `EmbeddedFont` with
-//! `embed`) alongside frequently used types from the re-exported crate family
-//! (`Rect`, `Std14`, `Color`, `Paint`, `Password`, `Protection`, `Permissions`,
-//! `Encryption`, `Object`, `Dict`, etc.), those the annotation builders take
-//! among them (`BuiltAnnot`, `RedactMark`, `DefaultAppearance`, `Quadding`,
+//! `Limits`, `open`, `from_bytes`, `standard_font`, `EmbeddedFont` with `embed`,
+//! `RustBackend` with `raster`, and `PdfiumBackend` with `pdfium`) alongside
+//! frequently used types from the re-exported crate family (`Rect`, `Std14`,
+//! `Color`, `Paint`, `Password`, `Protection`, `Permissions`, `Encryption`,
+//! `Object`, `Dict`, `ImageDrawn`, `ImageOf`, `RawImage` / `RgbaImage` with
+//! `images`, `Pixmap` / `RenderOpts` / `RenderSummary` / `Renderer` / `Viewport`
+//! / `RenderBackend` / `RenderedDoc` with `raster`, etc.) and annotation builder
+//! types (`BuiltAnnot`, `RedactMark`, `DefaultAppearance`, `Quadding`,
 //! `QuadPoints`, `PaintStyle`).
 
 #[cfg(feature = "embed")]
@@ -29,7 +33,9 @@ pub use pdf_annots::{
 pub use pdf_content_streams::{Color, ContentWriter, Paint, Res};
 pub use pdf_crypt::{Encoded, Password, Permissions, Protection};
 pub use pdf_fonts::{Font, Shown, ShownString, Std14, Unread};
-pub use pdf_gfx::{Canvas, EncodedPage, Matrix, PageGeom, Point, Quad, Rotation};
+pub use pdf_gfx::{
+    Canvas, EncodedPage, ImageDrawn, ImageOf, Matrix, PageGeom, Point, Quad, Rotation,
+};
 #[cfg(feature = "text-layout")]
 pub use pdf_gfx::{
     SearchOpts, TextAlign, TextBoxStyle, TextPage, TextPageOpts, VerticalAlign, WrapMode,
@@ -42,7 +48,8 @@ pub use pdf_objects::version::Version;
 pub use pdf_objects::{Dict, Object, ObjectId, Why};
 #[cfg(feature = "raster")]
 pub use pdf_raster::{
-    BackendError, PixelFormat, Pixmap, RenderBackend, RenderOpts, RenderedDoc, Viewport,
+    BackendError, PixelFormat, Pixmap, RenderBackend, RenderOpts, RenderSummary, RenderedDoc,
+    Renderer, Viewport,
 };
 pub use pdf_semantics::action::{Action, OpenAction};
 pub use pdf_semantics::dest::{Dest, DestFit, DestTable, ResolvedDest};

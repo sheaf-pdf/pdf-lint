@@ -6,47 +6,62 @@
 //! `pdf-raster` operates over any [`Resolve`](pdf_objects::Resolve) +
 //! [`Streams`](pdf_objects::Streams) provider without performing file I/O,
 //! keeping its internal 2D software compositor private so only domain types
-//! ([`Pixmap`], [`Viewport`], [`RenderOpts`], [`PageGeom`](pdf_gfx::PageGeom))
-//! appear in the public API.
+//! ([`Pixmap`], [`Viewport`], [`RenderOpts`], [`Renderer`],
+//! [`PageGeom`](pdf_gfx::PageGeom)) appear in the public API.
 //!
 //! # Core Concepts
 //!
 //! - **Viewer-aligned [`Viewport`]s & [`Pixmap`] formats:**
-//!   Supports whole-page width fits (`Viewport::Page`), zoomed sub-rectangles
-//!   (`Viewport::Tile`), physical DPI (`Viewport::Dpi`, honoring `/UserUnit`),
-//!   and explicit affine transforms (`Viewport::Custom`), outputting straight
-//!   `RGBA8`, native `BGRA8`, or premultiplied `RGBA8` under upfront [`Limits`]
-//!   budgets.
-//! - **Complete 2D PDF imaging pipeline ([`render_page`], [`render_page_with`], [`render_content`]):**
+//!   Supports whole-page width fits (`Viewport::Page` / [`RenderOpts::page_width`]),
+//!   zoomed sub-rectangles (`Viewport::Tile`), physical DPI (`Viewport::Dpi` /
+//!   [`RenderOpts::dpi`], honoring `/UserUnit` under `Rules::Iso`), and explicit
+//!   affine transforms (`Viewport::Custom`), outputting straight `RGBA8`,
+//!   straight `BGRA8`, or premultiplied `RGBA8` under upfront [`Limits`] budgets
+//!   with zero-dependency PNG export ([`Pixmap::to_png`]).
+//! - **2D PDF imaging pipeline ([`Renderer`], [`render_page`], [`render_page_with`], [`render_content`]):**
 //!   - Vector paths (`NonZero` & `EvenOdd` fills, anisotropic user-space strokes,
 //!     caps, joins, miter limits, dash patterns, and `0 w` device hairlines).
 //!   - Clipping stacks (`W` / `W*` path clips, `4..=7 Tr` glyph-outline text
 //!     clips, and Form XObject `/BBox` clips).
 //!   - Text rendering across embedded TrueType, OpenType/CFF, CFF, and Type 1
 //!     programs (`pdf-fonts`), Type 3 `/CharProcs` (`d0` colored and `d1`
-//!     uncolored stencils), caller-supplied [`FontFallback`] faces, and built-in
-//!     vector fallback contours.
+//!     uncolored stencils), caller-supplied [`FontFallback`] faces (queried via
+//!     [`FontQuery`] with `/BaseFont`, CID `/Ordering`, and sample Unicode
+//!     scalars), and built-in Latin/ZapfDingbats legibility contours.
 //!   - Placed Image XObjects and inline images via `pdf-images` (`DCTDecode`,
 //!     `CCITTFaxDecode`, `JBIG2Decode`, `JPXDecode`, `/ImageMask` stencils,
-//!     `/Mask`, and `/SMask` + `/Matte`).
-//!   - PDF §11 transparency groups (`/Group`), all 16 separable and
+//!     `/Mask`, `/SMask` + `/Matte`, and area-averaged `2×` mipmap downsampling
+//!     for high-DPI scans).
+//!   - PDF §11 isolated transparency groups (`/Group`), all 16 separable and
 //!     non-separable blend modes (`/BM`), constant opacities (`/ca`, `/CA`), and
 //!     `/Alpha` / `/Luminosity` soft masks (`/SMask` with `/BC` and `/TR`).
 //!   - Colored and uncolored tiling patterns (`PatternType 1`) and shadings
 //!     (`sh` and `PatternType 2`, `ShadingType 1..=5`) evaluated through
 //!     `pdf-color`.
-//!   - Optional content groups (`/OCProperties` `/OCG` & `/OCMD`), non-widget
-//!     `/Annots` (`pdf-annots`), and interactive `/AcroForm` widgets
-//!     (`pdf-forms`), with stateless [`Appearances::Synthesize`] or
-//!     [`Appearances::WrittenOnly`] modes.
-//! - **Resource Budgets & Unwind Note:**
+//!   - Optional content groups (`/OCProperties` `/OCG`, `/OCMD`, `/AS`, and
+//!     `/Usage`), non-widget `/Annots` (`pdf-annots`), and interactive
+//!     `/AcroForm` widgets (`pdf-forms`), with stateless
+//!     [`Appearances::Synthesize`] or [`Appearances::WrittenOnly`] modes.
+//! - **Supported vs. Approximated Constructs ([`RenderSummary::approximated`] & [`Fault`]):**
+//!   Non-isolated (`/I false`), knockout (`/K true`), or non-sRGB (`/CS`)
+//!   transparency groups are composited as isolated `sRGB` groups
+//!   ([`Fault::ApproximatedGroup`]); Coons and tensor-product patch meshes
+//!   (`ShadingType 6` and `7`) are skipped after painting any `/Background`
+//!   ([`Fault::UnsupportedShading`]); unembedded fonts without a matching
+//!   [`FontFallback`] face use built-in placeholder contours
+//!   ([`Fault::SubstitutedFont`]); and overprint (`/OP`/`/op`), per-channel
+//!   transfer curves (`/TR2`), and halftone screens (`/HT`) are not modeled.
+//!   Every approximation sets [`RenderSummary::approximated`] to `true`.
+//! - **Resource Budgets, Cancellation & Unwind Note:**
 //!   Coordinates, dash expansions, layer nesting, and offscreen buffers are
-//!   clamped and budgeted upfront before invoking the software 2D rasterizer.
-//!   As defense-in-depth against bugs in third-party rasterizer or image-codec
-//!   dependencies, internal rasterizer calls are additionally guarded with
-//!   `std::panic::catch_unwind` (converting any unexpected panic into
-//!   [`Error::RasterizerPanic`]); under `panic = "abort"` (including libFuzzer
-//!   harnesses), an upstream dependency panic will abort instead of unwinding.
+//!   clamped and budgeted upfront before invoking the software 2D rasterizer,
+//!   and in-flight renders can be cancelled cooperatively via
+//!   [`RenderOpts::with_stop`] ([`Error::Cancelled`]). As defense-in-depth
+//!   against bugs in third-party rasterizer or image-codec dependencies,
+//!   internal rasterizer calls are guarded with `std::panic::catch_unwind`
+//!   (converting any unexpected panic into [`Error::RasterizerPanic`]); under
+//!   `panic = "abort"` (including libFuzzer harnesses), an upstream dependency
+//!   panic will abort instead of unwinding.
 //!
 //! # Example
 //!
@@ -153,7 +168,7 @@ mod phases;
 mod pixmap;
 
 pub use backend::{BackendError, RenderBackend, RenderedDoc};
-pub use engine::{render_content, render_content_with, render_page, render_page_with};
+pub use engine::{Renderer, render_content, render_content_with, render_page, render_page_with};
 pub use error::Error;
 pub use fallback::{FontFallback, FontQuery, RenderCache};
 pub use fault::Fault;
@@ -187,6 +202,7 @@ mod doc_tests {
         check::<AntiAlias>();
         check::<RenderOpts>();
         check::<RenderSummary>();
+        check::<Renderer<'static>>();
         check::<FontQuery>();
         check::<RenderCache>();
         check::<BackendError>();
@@ -212,6 +228,14 @@ mod doc_tests {
             );
         }
         assert!(!readme.contains("](../"), "a link climbs out of the crate");
+        for (at, _) in readme.match_indices("](") {
+            let target = &readme[at + 2..];
+            let target = &target[..target.find(')').unwrap_or(target.len())];
+            assert!(
+                target.starts_with("https://"),
+                "a link in README.md isn't an https:// URL: {target}"
+            );
+        }
 
         fn first_rust_block_readme(md: &str) -> &str {
             let after = md
@@ -249,7 +273,7 @@ mod doc_tests {
     }
 
     #[test]
-    fn debug_formatting_redacts_pixel_bytes() {
+    fn debug_formatting_redacts_pixel_bytes_and_font_names() {
         let sentinel = [0xDE, 0xAD, 0xBE, 0xEF];
         let mut bytes = Vec::with_capacity(16);
         for _ in 0..4 {
@@ -261,6 +285,35 @@ mod doc_tests {
         assert!(dbg.contains("byte_len: 16"));
         assert!(!dbg.contains("222"));
         assert!(!dbg.to_ascii_lowercase().contains("deadbeef"));
+
+        // Verify `FontQuery` Debug redacts `/BaseFont`, `/Ordering`, and `sample_char`.
+        let font_dict = pdf_objects::Object::from(pdf_objects::dict! {
+            "Type" => pdf_objects::Object::name("Font"),
+            "Subtype" => pdf_objects::Object::name("Type1"),
+            "BaseFont" => pdf_objects::Object::name("ABCDEF+SecretFontName"),
+        });
+        let empty = std::collections::BTreeMap::<pdf_objects::ObjectId, pdf_objects::Object>::new();
+        let prov = pdf_objects::WithStreams::new(&empty, |id, _| {
+            Err(pdf_objects::Unreadable::new(
+                id,
+                pdf_objects::Why::Damaged,
+                "none",
+            ))
+        });
+        let font = pdf_fonts::Fonts::for_rendering()
+            .get(prov, &font_dict, &pdf_fonts::Limits::DEFAULT, &mut {
+                usize::MAX
+            })
+            .unwrap()
+            .unwrap();
+        let query = FontQuery::from_font(&font).with_sample_char(Some('祕'));
+        assert_eq!(query.base_font(), Some(&b"ABCDEF+SecretFontName"[..]));
+        assert_eq!(query.family_name(), Some(&b"SecretFontName"[..]));
+        assert_eq!(query.sample_char(), Some('祕'));
+        let qdbg = format!("{query:?}");
+        assert!(!qdbg.contains("SecretFontName"), "{qdbg}");
+        assert!(!qdbg.contains('祕'), "{qdbg}");
+        assert!(qdbg.contains("base_font_len: Some(21)"), "{qdbg}");
     }
 }
 

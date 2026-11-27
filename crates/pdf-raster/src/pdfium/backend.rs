@@ -15,6 +15,7 @@ use pdfium_render::prelude::{
 };
 
 use crate::backend::{BackendError, RenderBackend, RenderedDoc};
+use crate::engine::check_cancelled;
 use crate::limits::Limits;
 use crate::opts::{RenderMedium, RenderOpts, RenderSummary, Viewport};
 use crate::pixmap::{PixelFormat, Pixmap};
@@ -320,6 +321,7 @@ impl RenderedDoc for PdfiumRenderedDoc {
         page_index: usize,
         opts: &RenderOpts,
     ) -> Result<(Pixmap, RenderSummary), BackendError> {
+        check_cancelled(opts).map_err(BackendError::Raster)?;
         if matches!(opts.viewport, Viewport::Custom { .. }) && opts.draw.forms {
             return Err(BackendError::Unsupported(
                 "PDFium cannot render interactive form widgets under Viewport::Custom",
@@ -473,10 +475,18 @@ fn render_into_pixmap(
     };
     // Pre-fill a single tightly packed pixel buffer directly in Rust so overhang
     // tiles are cleared cleanly and `Rgba8` / `Bgra8` require zero extra copies!
-    let mut buf = vec![0_u8; pixel_count * 4];
-    for px in buf.as_chunks_mut::<4>().0 {
-        *px = fill;
-    }
+    let byte_len = pixel_count * 4;
+    let mut buf = if fill == [0, 0, 0, 0] {
+        vec![0_u8; byte_len]
+    } else if fill == [255, 255, 255, 255] {
+        vec![255_u8; byte_len]
+    } else {
+        let mut v = vec![0_u8; byte_len];
+        for px in v.as_chunks_mut::<4>().0 {
+            *px = fill;
+        }
+        v
+    };
     let cfg = cfg.clear_before_rendering(false);
     {
         let mut bitmap =

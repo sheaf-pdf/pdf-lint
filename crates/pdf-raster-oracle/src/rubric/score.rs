@@ -1,11 +1,12 @@
 //! Category-selectable `0–100` visual and ISO 32000-2 conformance rubric.
 //!
 //! Pure safe Rust (`#![forbid(unsafe_code)]`) implementing:
-//! - Perceptual **Oklab $(L, a, b)$** pixel comparison (dual-backdrop when translucent);
-//! - $3 \times 3$ gradient classification into **Interior Zone** vs. **Edge Band**, with
-//!   bidirectional $1\text{ px}$ Chamfer shift relaxation to separate harmless anti-aliasing phase
-//!   shifts from missing or displaced marks;
-//! - $16 \times 16$ worst-tile + percentile pooling into three orthogonal sub-penalties
+//! - Perceptual **Oklab `(L, a, b)`** pixel comparison (dual-backdrop when translucent);
+//! - `3x3` gradient classification into **Interior Zone** vs. **Edge Band**, with
+//!   bidirectional `1 px` Chamfer shift relaxation plus `3x3` local-mean ink-density
+//!   matching to separate harmless anti-aliasing phase shifts from missing, displaced,
+//!   or wrong small-text glyphs;
+//! - `16x16` worst-tile + percentile pooling into three orthogonal sub-penalties
 //!   (`struct_pen`, `color_pen`, `edge_pen`) and five [`Grade`] bands;
 //! - Toggleable [`RubricCategories`] and [`RubricProfile`] presets (`ConformingCore`,
 //!   `PdfiumWild`, `IsoNormative`, `WriteAndSanitize`);
@@ -14,9 +15,43 @@
 use std::fmt;
 use std::ops::{BitAnd, BitOr, BitOrAssign};
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use super::Error;
-use super::image::RgbaImage;
+use super::image::{RgbaImage, RgbaImageExt};
+
+/// Errors returned when parsing [`Grade`], [`RubricProfile`], or TSV baselines
+/// ([`parse_baseline_tsv`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ParseError {
+    /// Unrecognized [`Grade`] identifier.
+    #[error("unknown rubric grade: {0:?}")]
+    UnknownGrade(String),
+    /// Unrecognized [`RubricProfile`] identifier.
+    #[error("unknown rubric profile: {0:?}")]
+    UnknownProfile(String),
+    /// Non-comment TSV row did not contain 8 tab-separated columns.
+    #[error("line {line}: expected 8 tab-separated columns, found {found}")]
+    ColumnCount {
+        /// 1-based line number.
+        line: usize,
+        /// Observed column count.
+        found: usize,
+    },
+    /// Invalid field value on a TSV row.
+    #[error("line {line}: bad {field} {value:?}: {reason}")]
+    InvalidField {
+        /// 1-based line number.
+        line: usize,
+        /// Column name.
+        field: &'static str,
+        /// Raw column text.
+        value: String,
+        /// Parse failure detail.
+        reason: String,
+    },
+}
 
 /// Qualitative grade band mapped from a `0.0..=100.0` [`VisualScore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -70,7 +105,7 @@ impl fmt::Display for Grade {
 }
 
 impl FromStr for Grade {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -79,7 +114,7 @@ impl FromStr for Grade {
             "Subtle" => Ok(Grade::Subtle),
             "Noticeable" => Ok(Grade::Noticeable),
             "Divergent" => Ok(Grade::Divergent),
-            other => Err(format!("unknown rubric grade: {other:?}")),
+            other => Err(ParseError::UnknownGrade(other.to_string())),
         }
     }
 }
@@ -91,21 +126,40 @@ pub struct VisualScore {
     pub score: f32,
     /// Qualitative grade band.
     pub grade: Grade,
-    /// Worst-tile localized structural penalty (`0.0..=60.0`), insensitive to $\le 1\text{ px}$
-    /// edge shifts and $\pm 2$ LSB rounding but highly sensitive to missing or extra marks.
+    /// Worst-tile localized structural penalty (`0.0..=60.0`), insensitive to `<= 1 px`
+    /// edge shifts and `+/- 2` LSB rounding but highly sensitive to missing, extra, or
+    /// wrong glyph/path marks.
     pub struct_pen: f32,
-    /// Interior-zone color fidelity penalty (`0.0..=25.0`) measured in Oklab $\Delta E_{\text{OK}}$.
+    /// Interior-zone color fidelity penalty (`0.0..=25.0`) measured in Oklab `Delta E_OK`.
     pub color_pen: f32,
     /// Edge-band anti-aliasing / subpixel coverage penalty (`0.0..=15.0`).
     pub edge_pen: f32,
-    /// Maximum per-pixel Oklab Euclidean distance $\Delta E_{\text{OK}}$ across the image.
+    /// Maximum per-pixel Oklab Euclidean distance `Delta E_OK` across the image.
     pub max_delta_e: f32,
-    /// Mean Oklab $\Delta E_{\text{OK}}$ across interior pixels.
+    /// Mean Oklab `Delta E_OK` across interior pixels.
     pub interior_mean_delta_e: f32,
     /// Maximum absolute single-channel `u8` difference (`0..=255`) in raw `RGBA8`.
     pub max_channel_diff: u8,
     /// `(tile_x, tile_y)` coordinates (`16x16` grid) of the highest-penalty structural tile.
     pub worst_tile: (u32, u32),
+}
+
+/// Like [`score_images`], but rejects uniform/blank `reference` images with
+/// [`Error::UniformReference`] so differential oracle tests cannot pass vacuously
+/// when both renderers emit a blank canvas.
+///
+/// # Errors
+///
+/// Returns [`Error::DimensionMismatch`] on mismatched dimensions or
+/// [`Error::UniformReference`] if every pixel of `reference` is identical.
+pub fn score_non_uniform_images(
+    candidate: &RgbaImage,
+    reference: &RgbaImage,
+) -> Result<VisualScore, Error> {
+    if reference.is_uniform() {
+        return Err(Error::UniformReference);
+    }
+    score_images(candidate, reference)
 }
 
 /// Evaluates the `0.0..=100.0` perceptual [`VisualScore`] between `candidate` and `reference`.
@@ -295,6 +349,47 @@ fn score_composited(
         interior_vals.extend_from_slice(&shift_de);
     }
 
+    // 2b. 3x3 local-mean Oklab image + 1-px Birchfield-Tomasi hull comparison (`blur_shift_de`).
+    // In edge-dense small text (e.g. 6x8 glyphs), every pixel's 3x3 raw hull spans `[black..white]`,
+    // so point `shift_de` alone collapses near zero even when wrong glyphs are drawn. Comparing
+    // 3x3 local Oklab means with 3x3 shift relaxation stays identically zero for any <= 1 px
+    // translation or subpixel AA shift, while catching wrong glyph counters/stems!
+    let blur_cand = box_blur_3x3(w, h, &cand_lab);
+    let blur_ref = box_blur_3x3(w, h, &ref_lab);
+    let mut blur_shift_de = vec![0.0_f32; total];
+    for y in 0..h {
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(h - 1);
+        for x in 0..w {
+            let idx = y * w + x;
+            let bc = blur_cand[idx];
+            let br = blur_ref[idx];
+            if delta_e_ok(bc, br) <= 0.08 {
+                continue;
+            }
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(w - 1);
+            let mut r_lo = br;
+            let mut r_hi = br;
+            let mut c_lo = bc;
+            let mut c_hi = bc;
+            for ny in y0..=y1 {
+                for nx in x0..=x1 {
+                    let nidx = ny * w + nx;
+                    let rn = blur_ref[nidx];
+                    let cn = blur_cand[nidx];
+                    for k in 0..3 {
+                        r_lo[k] = r_lo[k].min(rn[k]);
+                        r_hi[k] = r_hi[k].max(rn[k]);
+                        c_lo[k] = c_lo[k].min(cn[k]);
+                        c_hi[k] = c_hi[k].max(cn[k]);
+                    }
+                }
+            }
+            blur_shift_de[idx] = box_delta_e(bc, r_lo, r_hi).max(box_delta_e(br, c_lo, c_hi));
+        }
+    }
+
     // 3. 16x16 tile structural pooling.
     let tiles_x = w.div_ceil(16);
     let tiles_y = h.div_ceil(16);
@@ -312,8 +407,12 @@ fn score_composited(
             let mut sum_sq = 0.0_f32;
             for py in py0..py1 {
                 for px in px0..px1 {
-                    // Subtract 2-LSB quantization noise floor (0.012 in Oklab).
-                    let excess = (shift_de[py * w + px] - 0.012).max(0.0);
+                    let idx = py * w + px;
+                    // Subtract 2-LSB quantization noise floor (0.012 in Oklab) on point shift_de,
+                    // and 0.08 stem-darkening/hinting deadzone on 3x3 local-mean shift_de.
+                    let point_excess = (shift_de[idx] - 0.012).max(0.0);
+                    let density_excess = (blur_shift_de[idx] - 0.08).max(0.0) * 2.0;
+                    let excess = point_excess.max(density_excess);
                     sum_sq += excess * excess;
                     tile_buf.push(excess);
                 }
@@ -381,14 +480,46 @@ fn percentile(values: &mut [f32], q: f32) -> f32 {
     values[idx.min(values.len() - 1)]
 }
 
+fn box_blur_3x3(w: usize, h: usize, lab: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let mut out = vec![[0.0_f32; 3]; w * h];
+    for y in 0..h {
+        let y0 = y.saturating_sub(1);
+        let y1 = (y + 1).min(h - 1);
+        for x in 0..w {
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(w - 1);
+            let mut sum = [0.0_f32; 3];
+            let mut count = 0_u32;
+            for ny in y0..=y1 {
+                for nx in x0..=x1 {
+                    let px = lab[ny * w + nx];
+                    sum[0] += px[0];
+                    sum[1] += px[1];
+                    sum[2] += px[2];
+                    count += 1;
+                }
+            }
+            let inv = 1.0 / (count as f32);
+            out[y * w + x] = [sum[0] * inv, sum[1] * inv, sum[2] * inv];
+        }
+    }
+    out
+}
+
+static SRGB_TO_LINEAR: LazyLock<[f32; 256]> = LazyLock::new(|| {
+    std::array::from_fn(|c| {
+        let s = (c as f32) / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    })
+});
+
 #[inline]
 fn srgb_u8_to_linear(c: u8) -> f32 {
-    let s = f32::from(c) / 255.0;
-    if s <= 0.04045 {
-        s / 12.92
-    } else {
-        ((s + 0.055) / 1.055).powf(2.4)
-    }
+    SRGB_TO_LINEAR[c as usize]
 }
 
 /// Converts an `sRGB8` pixel `[R, G, B]` into Björn Ottosson's perceptual **Oklab** `[L, a, b]`.
@@ -449,7 +580,7 @@ pub fn render_diff_strip(candidate: &RgbaImage, reference: &RgbaImage) -> Result
         width: w,
         height: h,
     })?;
-    let mut out = RgbaImage::new(strip_w, h, [0, 0, 0, 255])?;
+    let mut out = RgbaImage::from_solid(strip_w, h, [0, 0, 0, 255])?;
     let c_rgb = candidate.composite_solid([255, 255, 255]);
     let r_rgb = reference.composite_solid([255, 255, 255]);
 
@@ -625,7 +756,7 @@ impl fmt::Display for RubricProfile {
 }
 
 impl FromStr for RubricProfile {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -633,7 +764,7 @@ impl FromStr for RubricProfile {
             "PdfiumWild" => Ok(RubricProfile::PdfiumWild),
             "IsoNormative" => Ok(RubricProfile::IsoNormative),
             "WriteAndSanitize" => Ok(RubricProfile::WriteAndSanitize),
-            other => Err(format!("unknown rubric profile: {other:?}")),
+            other => Err(ParseError::UnknownProfile(other.to_string())),
         }
     }
 }
@@ -832,7 +963,7 @@ pub struct BaselineRow {
     pub color_pen: f32,
     /// Recorded edge anti-aliasing sub-penalty.
     pub edge_pen: f32,
-    /// Recorded maximum Oklab $\Delta E_{\text{OK}}$.
+    /// Recorded maximum Oklab `Delta E_OK`.
     pub max_delta_e: f32,
 }
 
@@ -905,8 +1036,8 @@ pub fn format_baseline_tsv(rows: &[BaselineRow]) -> String {
 ///
 /// # Errors
 ///
-/// Returns a descriptive line-numbered error string if any non-comment row is malformed.
-pub fn parse_baseline_tsv(tsv: &str) -> Result<Vec<BaselineRow>, String> {
+/// Returns [`ParseError`] if any non-comment row is malformed.
+pub fn parse_baseline_tsv(tsv: &str) -> Result<Vec<BaselineRow>, ParseError> {
     let mut rows = Vec::new();
     for (idx, line) in tsv.lines().enumerate() {
         let line_no = idx + 1;
@@ -916,24 +1047,38 @@ pub fn parse_baseline_tsv(tsv: &str) -> Result<Vec<BaselineRow>, String> {
         }
         let cols: Vec<&str> = line.split('\t').collect();
         if cols.len() != 8 {
-            return Err(format!(
-                "line {line_no}: expected 8 tab-separated columns, found {}",
-                cols.len()
-            ));
+            return Err(ParseError::ColumnCount {
+                line: line_no,
+                found: cols.len(),
+            });
         }
-        let parse_f32 = |col: &str, name: &str| -> Result<f32, String> {
-            col.parse::<f32>()
-                .map_err(|e| format!("line {line_no}: bad {name} {col:?}: {e}"))
+        let parse_f32 = |col: &str, field: &'static str| -> Result<f32, ParseError> {
+            col.parse::<f32>().map_err(|e| ParseError::InvalidField {
+                line: line_no,
+                field,
+                value: col.to_string(),
+                reason: e.to_string(),
+            })
         };
         rows.push(BaselineRow {
             case: cols[0].to_string(),
             profile: cols[1]
                 .parse()
-                .map_err(|e| format!("line {line_no}: {e}"))?,
+                .map_err(|e: ParseError| ParseError::InvalidField {
+                    line: line_no,
+                    field: "profile",
+                    value: cols[1].to_string(),
+                    reason: e.to_string(),
+                })?,
             score: parse_f32(cols[2], "score")?,
             grade: cols[3]
                 .parse()
-                .map_err(|e| format!("line {line_no}: {e}"))?,
+                .map_err(|e: ParseError| ParseError::InvalidField {
+                    line: line_no,
+                    field: "grade",
+                    value: cols[3].to_string(),
+                    reason: e.to_string(),
+                })?,
             struct_pen: parse_f32(cols[4], "struct_pen")?,
             color_pen: parse_f32(cols[5], "color_pen")?,
             edge_pen: parse_f32(cols[6], "edge_pen")?,
@@ -949,7 +1094,7 @@ mod tests {
 
     #[test]
     fn exact_match_scores_100_and_1_lsb_never_scores_exact() {
-        let a = RgbaImage::new(32, 32, [120, 160, 200, 255]).unwrap();
+        let a = RgbaImage::from_solid(32, 32, [120, 160, 200, 255]).unwrap();
         let mut b = a.clone();
         let exact = score_images(&a, &b).unwrap();
         assert_eq!(exact.score, 100.0);
@@ -968,7 +1113,7 @@ mod tests {
 
     #[test]
     fn uniform_2_lsb_lut_jitter_scores_imperceptible() {
-        let mut reference = RgbaImage::new(64, 64, [100, 140, 180, 255]).unwrap();
+        let mut reference = RgbaImage::from_solid(64, 64, [100, 140, 180, 255]).unwrap();
         let mut candidate = reference.clone();
         for y in 0..64 {
             for x in 0..64 {
@@ -1000,7 +1145,7 @@ mod tests {
     #[test]
     fn subpixel_edge_aa_shift_scores_subtle_without_structural_penalty() {
         // Vertical dark bar on white background with slightly different AA edge coverage (~0.3 px).
-        let mut reference = RgbaImage::new(64, 64, [255, 255, 255, 255]).unwrap();
+        let mut reference = RgbaImage::from_solid(64, 64, [255, 255, 255, 255]).unwrap();
         reference.fill_rect(20, 8, 24, 48, [20, 20, 20, 255]);
         for y in 8..56 {
             reference.set_pixel(19, y, [180, 180, 180, 255]);
@@ -1032,7 +1177,7 @@ mod tests {
         // 99.998% identical 400x500 white page, except candidate dropped a 4-pixel minus sign!
         // Naive whole-page PSNR / pixel-match rate would score this 99.998% ("pass"); our
         // worst-tile structural rubric must flag it as `Divergent` (< 75.0).
-        let candidate = RgbaImage::new(400, 500, [255, 255, 255, 255]).unwrap();
+        let candidate = RgbaImage::from_solid(400, 500, [255, 255, 255, 255]).unwrap();
         let mut reference = candidate.clone();
         reference.fill_rect(198, 244, 4, 1, [0, 0, 0, 255]);
 
@@ -1044,10 +1189,65 @@ mod tests {
     }
 
     #[test]
+    fn wrong_small_text_glyphs_in_edge_dense_tile_score_divergent() {
+        // Edge-dense 6x8 small-text glyphs ("OOOO" hollow counters vs "XXXX" crossed strokes):
+        // every pixel has both black ink and white paper in its 3x3 neighborhood, yet 3x3
+        // local-mean hull scoring detects the wrong glyph topology as `Divergent` (< 75.0).
+        let mut reference = RgbaImage::from_solid(48, 16, [255, 255, 255, 255]).unwrap();
+        let mut candidate = reference.clone();
+        for i in 0..4_u32 {
+            let gx = 4 + i * 10;
+            let gy = 4;
+            // Hollow 6x8 'O' in reference:
+            reference.fill_rect(gx, gy, 6, 1, [0, 0, 0, 255]);
+            reference.fill_rect(gx, gy + 7, 6, 1, [0, 0, 0, 255]);
+            reference.fill_rect(gx, gy, 1, 8, [0, 0, 0, 255]);
+            reference.fill_rect(gx + 5, gy, 1, 8, [0, 0, 0, 255]);
+            // Crossed/filled 'X'/box in candidate:
+            for row in 0..8_u32 {
+                let c0 = (row * 5) / 7;
+                let c1 = 5 - c0;
+                candidate.fill_rect(gx + c0.min(4), gy + row, 2, 1, [0, 0, 0, 255]);
+                candidate.fill_rect(gx + c1.min(4), gy + row, 2, 1, [0, 0, 0, 255]);
+            }
+        }
+        let s = score_images(&candidate, &reference).unwrap();
+        assert_eq!(
+            s.grade,
+            Grade::Divergent,
+            "wrong small glyphs must be Divergent: {s:?}"
+        );
+        assert!(s.score < 75.0, "{s:?}");
+        assert!(s.struct_pen > 20.0, "{s:?}");
+    }
+
+    #[test]
+    fn uniform_reference_guard_and_typed_parse_errors() {
+        let blank_a = RgbaImage::from_solid(16, 16, [255, 255, 255, 255]).unwrap();
+        let blank_b = blank_a.clone();
+        assert_eq!(
+            score_non_uniform_images(&blank_a, &blank_b),
+            Err(Error::UniformReference)
+        );
+        assert!(matches!(
+            "Bogus".parse::<Grade>(),
+            Err(ParseError::UnknownGrade(_))
+        ));
+        assert!(matches!(
+            "Bogus".parse::<RubricProfile>(),
+            Err(ParseError::UnknownProfile(_))
+        ));
+        assert!(matches!(
+            parse_baseline_tsv("only\ttwo\n"),
+            Err(ParseError::ColumnCount { line: 1, found: 2 })
+        ));
+    }
+
+    #[test]
     fn wrong_cmyk_swatch_triggers_color_penalty() {
         // Adobe CMYK cyan (0, 174, 239) vs naive subtractive cyan (0, 255, 255).
-        let reference = RgbaImage::new(32, 32, [0, 174, 239, 255]).unwrap();
-        let candidate = RgbaImage::new(32, 32, [0, 255, 255, 255]).unwrap();
+        let reference = RgbaImage::from_solid(32, 32, [0, 174, 239, 255]).unwrap();
+        let candidate = RgbaImage::from_solid(32, 32, [0, 255, 255, 255]).unwrap();
         let s = score_images(&candidate, &reference).unwrap();
         assert!(s.color_pen > 15.0, "{s:?}");
         assert!(s.score < 80.0, "{s:?}");
@@ -1057,8 +1257,8 @@ mod tests {
     fn dual_backdrop_catches_white_on_white_alpha_bug() {
         // Opaque white vs completely transparent white: identical over white, completely different
         // over dark checkerboard!
-        let opaque_white = RgbaImage::new(16, 16, [255, 255, 255, 255]).unwrap();
-        let transparent = RgbaImage::new(16, 16, [255, 255, 255, 0]).unwrap();
+        let opaque_white = RgbaImage::from_solid(16, 16, [255, 255, 255, 255]).unwrap();
+        let transparent = RgbaImage::from_solid(16, 16, [255, 255, 255, 0]).unwrap();
         let s = score_images(&transparent, &opaque_white).unwrap();
         assert_eq!(s.grade, Grade::Divergent, "{s:?}");
         assert!(s.score < 50.0, "{s:?}");
@@ -1066,8 +1266,8 @@ mod tests {
 
     #[test]
     fn rubric_profiles_and_tsv_roundtrip() {
-        let img_a = RgbaImage::new(16, 16, [40, 120, 200, 255]).unwrap();
-        let img_b = RgbaImage::new(16, 16, [41, 120, 200, 255]).unwrap();
+        let img_a = RgbaImage::from_solid(16, 16, [40, 120, 200, 255]).unwrap();
+        let img_b = RgbaImage::from_solid(16, 16, [41, 120, 200, 255]).unwrap();
 
         // ConformingCore passes when Iso == Pdfium, Pdfium matches ref, and 0 faults.
         let core_cfg = RubricProfile::ConformingCore.config();
@@ -1105,7 +1305,7 @@ mod tests {
             &wild_cfg,
             &CaseEvaluation {
                 candidate_pdfium: Some(&img_a),
-                candidate_iso: Some(&RgbaImage::new(16, 16, [0, 255, 255, 255]).unwrap()),
+                candidate_iso: Some(&RgbaImage::from_solid(16, 16, [0, 255, 255, 255]).unwrap()),
                 pdfium_reference: Some(&img_a),
                 iso_reference: None,
                 iso_fault_count: 1,

@@ -1,11 +1,12 @@
 //! `DCTDecode` (JPEG) adapter over `zune-jpeg`.
 
+use std::borrow::Cow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Resolve, Rules};
 use zune_jpeg::JpegDecoder;
-use zune_jpeg::zune_core::bytestream::{ZByteIoError, ZByteReaderTrait, ZSeekFrom};
+use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
@@ -24,6 +25,9 @@ pub(crate) struct DctDecoded {
 }
 
 /// Decodes a `DCTDecode` byte slice into 8-bit native-channel [`SampleData`].
+///
+/// Note: `catch_unwind` isolates internal panics in `zune-jpeg` (`0.5.15`) under default
+/// `panic = "unwind"` builds; `panic = "abort"` binaries abort on internal third-party panics.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn decode_dct<'o, R, S>(
     objects: R,
@@ -64,24 +68,62 @@ where
         });
     }
 
+    // Check SOF dimensions and component count upfront before building a patched buffer or
+    // invoking `zune-jpeg`.
+    let sof_comps = match scanned.components {
+        Some(c) if !(1..=4).contains(&c) => {
+            return Err(Error::Codec {
+                codec: ImageCodec::Dct,
+                detail: format!("unsupported JPEG component count ({c})"),
+            });
+        }
+        Some(c) => {
+            if let (Some(w), Some(h)) = (scanned.width, scanned.height) {
+                let pixels = check_dimensions(u32::from(w), u32::from(h), limits)?;
+                let _ = check_sample_budget(pixels.saturating_mul(u64::from(c)), limits)?;
+            }
+            c
+        }
+        None => expected_components,
+    };
+
+    // Configure synthetic APP14 + `zune-jpeg` (`0.5.15`) output colorspace so we extract raw
+    // channels in the image's own component count in a single decoder pass.
+    let do_transform = resolve_color_transform(sof_comps, parms_ct, scanned.adobe_transform, rules);
+    let (synthetic_app14, out_cs, manual_ycck) = match sof_comps {
+        1 => (None, ColorSpace::Luma, false),
+        2 => (
+            None,
+            ColorSpace::MultiBand(core::num::NonZeroU32::new(2).unwrap()),
+            false,
+        ),
+        3 => {
+            if do_transform {
+                (Some(1_u8), ColorSpace::RGB, false)
+            } else {
+                (Some(0_u8), ColorSpace::RGB, false)
+            }
+        }
+        4 => (Some(0_u8), ColorSpace::CMYK, do_transform),
+        _ => (None, ColorSpace::RGB, false),
+    };
+
+    let patched = patch_jpeg_bytes(span, scanned.app14_range, synthetic_app14);
     let max_w = (limits.max_width as usize).min(65_535);
     let max_h = (limits.max_height as usize).min(65_535);
 
     let run = catch_unwind(AssertUnwindSafe(|| -> Result<DctDecoded, Error> {
-        // Probe headers first on a patched view so zune-jpeg's dimension checks use `limits`.
         let options = DecoderOptions::default()
             .set_max_width(max_w)
             .set_max_height(max_h)
-            .set_strict_mode(false);
-        let mut probe = JpegDecoder::new_with_options(
-            PatchedJpeg::new(span, scanned.app14_range.clone(), None),
-            options,
-        );
-        probe.decode_headers().map_err(|e| Error::Codec {
+            .set_strict_mode(false)
+            .jpeg_set_out_colorspace(out_cs);
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(patched.as_ref()), options);
+        decoder.decode_headers().map_err(|e| Error::Codec {
             codec: ImageCodec::Dct,
             detail: format!("{e}"),
         })?;
-        let Some(info) = probe.info() else {
+        let Some(info) = decoder.info() else {
             return Err(Error::Codec {
                 codec: ImageCodec::Dct,
                 detail: "JPEG headers missing frame info".to_string(),
@@ -100,43 +142,6 @@ where
 
         let pixels = check_dimensions(w, h, limits)?;
         let out_bytes = check_sample_budget(pixels.saturating_mul(u64::from(comps)), limits)?;
-
-        // Decide whether YCbCr->RGB (3-ch) or YCCK->CMYK (4-ch) transform applies.
-        let do_transform = resolve_color_transform(comps, parms_ct, scanned.adobe_transform, rules);
-
-        // Configure synthetic APP14 + zune-jpeg output colorspace so we extract raw channels in the
-        // image's own component count.
-        let (synthetic_app14, out_cs, manual_ycck) = match comps {
-            1 => (None, ColorSpace::Luma, false),
-            2 => (
-                None,
-                ColorSpace::MultiBand(core::num::NonZeroU32::new(2).unwrap()),
-                false,
-            ),
-            3 => {
-                if do_transform {
-                    // Force YCbCr -> RGB.
-                    (Some(1_u8), ColorSpace::RGB, false)
-                } else {
-                    // Force literal 3-channel RGB copy without YCbCr conversion.
-                    (Some(0_u8), ColorSpace::RGB, false)
-                }
-            }
-            4 => {
-                // Always extract raw 4-channel IDCT+upsampled planes from zune-jpeg, then apply
-                // BT.601 YCCK -> CMYK when `do_transform` is true.
-                (Some(0_u8), ColorSpace::CMYK, do_transform)
-            }
-            _ => unreachable!(),
-        };
-
-        let decode_opts = options.jpeg_set_out_colorspace(out_cs);
-        let reader = PatchedJpeg::new(span, scanned.app14_range.clone(), synthetic_app14);
-        let mut decoder = JpegDecoder::new_with_options(reader, decode_opts);
-        decoder.decode_headers().map_err(|e| Error::Codec {
-            codec: ImageCodec::Dct,
-            detail: format!("{e}"),
-        })?;
         let Some(buf_size) = decoder.output_buffer_size() else {
             return Err(Error::Codec {
                 codec: ImageCodec::Dct,
@@ -195,12 +200,15 @@ fn find_soi(data: &[u8]) -> Option<usize> {
 #[derive(Default)]
 struct ScannedJpeg {
     precision: Option<u8>,
+    width: Option<u16>,
+    height: Option<u16>,
+    components: Option<u8>,
     adobe_transform: Option<u8>,
     app14_range: Option<core::ops::Range<usize>>,
 }
 
-/// Scans JPEG marker segments from `FF D8` up to `SOS` (`FF DA`) to locate any Adobe `APP14`
-/// transform byte and check SOF precision before handing the stream to `zune-jpeg`.
+/// Scans JPEG marker segments from `FF D8` up to `SOS` (`FF DA`) to extract SOF frame geometry
+/// and locate any Adobe `APP14` transform byte in a single pass before invoking `zune-jpeg`.
 fn scan_jpeg_headers(span: &[u8]) -> ScannedJpeg {
     let mut out = ScannedJpeg::default();
     if span.len() < 4 || span[..2] != [0xFF, 0xD8] {
@@ -237,9 +245,15 @@ fn scan_jpeg_headers(span: &[u8]) -> ScannedJpeg {
         if matches!(
             marker,
             0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF
-        ) && !payload.is_empty()
-        {
-            out.precision = Some(payload[0]);
+        ) {
+            if !payload.is_empty() {
+                out.precision = Some(payload[0]);
+            }
+            if payload.len() >= 6 {
+                out.height = Some(u16::from_be_bytes([payload[1], payload[2]]));
+                out.width = Some(u16::from_be_bytes([payload[3], payload[4]]));
+                out.components = Some(payload[5]);
+            }
         } else if marker == 0xEE && payload.len() >= 12 && &payload[..5] == b"Adobe" {
             out.adobe_transform = Some(payload[11]);
             out.app14_range = Some(marker_start..(i + seg_len));
@@ -300,6 +314,7 @@ fn ycck_to_cmyk_in_place(buf: &mut [u8]) {
 }
 
 const ADOBE_APP14_LEN: usize = 16;
+const TRAILING_EOI: [u8; 2] = [0xFF, 0xD9];
 
 fn make_adobe_app14(transform: u8) -> [u8; ADOBE_APP14_LEN] {
     [
@@ -308,154 +323,44 @@ fn make_adobe_app14(transform: u8) -> [u8; ADOBE_APP14_LEN] {
     ]
 }
 
-/// Zero-copy virtual JPEG byte reader that optionally splices an Adobe `APP14` segment right after
-/// `SOI` (removing any existing `APP14`) and ensures a trailing `EOI` (`FF D9`) for truncated inline
-/// or XObject streams.
-struct PatchedJpeg<'a> {
-    segments: [&'a [u8]; 4],
-    app14_buf: [u8; ADOBE_APP14_LEN],
-    use_app14: bool,
-    total_len: usize,
-    pos: usize,
-}
+/// Splices a synthetic Adobe `APP14` segment right after `SOI` (removing any existing `APP14`) and
+/// ensures a trailing `EOI` (`FF D9`), borrowing `span` without copying when neither edit is
+/// needed.
+fn patch_jpeg_bytes<'a>(
+    span: &'a [u8],
+    existing_app14: Option<core::ops::Range<usize>>,
+    inject_transform: Option<u8>,
+) -> Cow<'a, [u8]> {
+    let needs_eoi = !span.ends_with(&TRAILING_EOI);
+    if inject_transform.is_none() && !needs_eoi {
+        return Cow::Borrowed(span);
+    }
 
-const TRAILING_EOI: [u8; 2] = [0xFF, 0xD9];
+    let extra = (if inject_transform.is_some() {
+        ADOBE_APP14_LEN
+    } else {
+        0
+    }) + (if needs_eoi { 2 } else { 0 });
+    let mut out = Vec::with_capacity(span.len() + extra);
 
-impl<'a> PatchedJpeg<'a> {
-    fn new(
-        span: &'a [u8],
-        existing_app14: Option<core::ops::Range<usize>>,
-        inject_transform: Option<u8>,
-    ) -> Self {
-        let app14_buf = make_adobe_app14(inject_transform.unwrap_or(0));
-        let use_app14 = inject_transform.is_some();
-
-        let (soi_part, mid_part, rest_part) = if span.len() >= 2 {
-            match existing_app14 {
-                Some(r) if use_app14 && r.start >= 2 && r.end <= span.len() => {
-                    (&span[..2], &span[2..r.start], &span[r.end..])
-                }
-                _ => (&span[..2], &[][..], &span[2..]),
+    if let Some(transform) = inject_transform
+        && span.len() >= 2
+    {
+        out.extend_from_slice(&span[..2]);
+        out.extend_from_slice(&make_adobe_app14(transform));
+        match existing_app14 {
+            Some(r) if r.start >= 2 && r.end <= span.len() => {
+                out.extend_from_slice(&span[2..r.start]);
+                out.extend_from_slice(&span[r.end..]);
             }
-        } else {
-            (span, &[][..], &[][..])
-        };
-
-        let needs_eoi = span.len() < 2 || span[span.len() - 2..] != TRAILING_EOI;
-        let tail_eoi: &[u8] = if needs_eoi { &TRAILING_EOI } else { &[] };
-
-        let total_len = soi_part.len()
-            + (if use_app14 { ADOBE_APP14_LEN } else { 0 })
-            + mid_part.len()
-            + rest_part.len()
-            + tail_eoi.len();
-
-        PatchedJpeg {
-            segments: [soi_part, mid_part, rest_part, tail_eoi],
-            app14_buf,
-            use_app14,
-            total_len,
-            pos: 0,
+            _ => out.extend_from_slice(&span[2..]),
         }
+    } else {
+        out.extend_from_slice(span);
     }
 
-    fn byte_at(&self, mut idx: usize) -> Option<u8> {
-        if idx >= self.total_len {
-            return None;
-        }
-        let s0 = self.segments[0];
-        if idx < s0.len() {
-            return Some(s0[idx]);
-        }
-        idx -= s0.len();
-        if self.use_app14 {
-            if idx < ADOBE_APP14_LEN {
-                return Some(self.app14_buf[idx]);
-            }
-            idx -= ADOBE_APP14_LEN;
-        }
-        for seg in &self.segments[1..] {
-            if idx < seg.len() {
-                return Some(seg[idx]);
-            }
-            idx -= seg.len();
-        }
-        None
+    if needs_eoi {
+        out.extend_from_slice(&TRAILING_EOI);
     }
-
-    fn copy_from_pos(&self, out: &mut [u8]) -> usize {
-        let avail = self.total_len.saturating_sub(self.pos);
-        let n = out.len().min(avail);
-        for (i, slot) in out[..n].iter_mut().enumerate() {
-            *slot = self.byte_at(self.pos + i).unwrap_or(0);
-        }
-        n
-    }
-}
-
-impl ZByteReaderTrait for PatchedJpeg<'_> {
-    fn read_byte_no_error(&mut self) -> u8 {
-        let b = self.byte_at(self.pos).unwrap_or(0);
-        if self.pos < self.total_len {
-            self.pos += 1;
-        }
-        b
-    }
-
-    fn read_exact_bytes(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
-        self.peek_exact_bytes(buf)?;
-        self.pos += buf.len();
-        Ok(())
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
-        let n = self.copy_from_pos(buf);
-        self.pos += n;
-        Ok(n)
-    }
-
-    fn peek_bytes(&mut self, buf: &mut [u8]) -> Result<usize, ZByteIoError> {
-        Ok(self.copy_from_pos(buf))
-    }
-
-    fn peek_exact_bytes(&mut self, buf: &mut [u8]) -> Result<(), ZByteIoError> {
-        let left = self.total_len.saturating_sub(self.pos);
-        if buf.len() > left {
-            return Err(ZByteIoError::NotEnoughBytes(buf.len(), left));
-        }
-        self.copy_from_pos(buf);
-        Ok(())
-    }
-
-    fn z_seek(&mut self, from: ZSeekFrom) -> Result<u64, ZByteIoError> {
-        let (base, by) = match from {
-            ZSeekFrom::Start(n) => (0_usize, i64::try_from(n).unwrap_or(i64::MAX)),
-            ZSeekFrom::End(n) => (self.total_len, n),
-            ZSeekFrom::Current(n) => (self.pos, n),
-        };
-        let mag = usize::try_from(by.unsigned_abs()).unwrap_or(usize::MAX);
-        let next = if by >= 0 {
-            base.saturating_add(mag)
-        } else {
-            base.saturating_sub(mag)
-        };
-        self.pos = next.min(self.total_len);
-        Ok(self.pos as u64)
-    }
-
-    fn is_eof(&mut self) -> Result<bool, ZByteIoError> {
-        Ok(self.pos >= self.total_len)
-    }
-
-    fn z_position(&mut self) -> Result<u64, ZByteIoError> {
-        Ok(self.pos as u64)
-    }
-
-    fn read_remaining(&mut self, sink: &mut Vec<u8>) -> Result<usize, ZByteIoError> {
-        let left = self.total_len.saturating_sub(self.pos);
-        let mut rest = vec![0_u8; left];
-        let n = self.read_bytes(&mut rest)?;
-        sink.extend_from_slice(&rest[..n]);
-        Ok(n)
-    }
+    Cow::Owned(out)
 }

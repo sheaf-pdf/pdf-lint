@@ -8,11 +8,12 @@
 
 use jpeg_encoder::{ColorType, Encoder as JpegEncoder, ImageBuffer, JpegColorType, SamplingFactor};
 use pdf_color::Family;
-use pdf_filters::{Backend, Encoder, Layout, Level, Prediction, Row, encode};
+use pdf_filters::{Encoder, Layout, Level, Prediction, Row, encode};
 use pdf_objects::{Dict, Object, ObjectId, Stream, dict};
 
 use crate::error::EncodeError;
 use crate::header::MaskSpec;
+use crate::inline_chain::flate_backend;
 use crate::rgba::RgbaImage;
 use crate::samples::RawImage;
 
@@ -115,7 +116,7 @@ pub fn encode_raw_flate(
             level,
             predictor: prediction,
         }],
-        Backend::MinizOxide,
+        flate_backend(),
         &mut compressed,
     )?;
 
@@ -136,7 +137,7 @@ pub fn encode_raw_flate(
     if raw.meta().interpolate {
         d.set("Interpolate", true);
     }
-    if let Some(intent) = raw.meta().intent.and_then(|i| i.as_pdf_name()) {
+    if let Some(intent) = raw.meta().intent.as_ref().and_then(|i| i.as_pdf_name()) {
         d.set("Intent", Object::name(intent));
     }
     if !raw.meta().has_default_decode(raw.prepared_space()) {
@@ -199,15 +200,23 @@ pub fn encode_rgba_flate(image: &RgbaImage, level: Level) -> Result<EncodedImage
     let w = image.width();
     let h = image.height();
     let pixels = (w as usize) * (h as usize);
+    let chunks = image.as_bytes().as_chunks::<4>().0;
+    let has_transparency = chunks.iter().any(|px| px[3] < 255);
     let mut rgb = Vec::with_capacity(pixels * 3);
-    let mut alpha = Vec::with_capacity(pixels);
-    let mut has_transparency = false;
+    let mut alpha = if has_transparency {
+        Vec::with_capacity(pixels)
+    } else {
+        Vec::new()
+    };
 
-    for &[r, g, b, a] in image.as_bytes().as_chunks::<4>().0 {
-        rgb.extend_from_slice(&[r, g, b]);
-        alpha.push(a);
-        if a < 255 {
-            has_transparency = true;
+    if has_transparency {
+        for &[r, g, b, a] in chunks {
+            rgb.extend_from_slice(&[r, g, b]);
+            alpha.push(a);
+        }
+    } else {
+        for &[r, g, b, _] in chunks {
+            rgb.extend_from_slice(&[r, g, b]);
         }
     }
 
@@ -224,7 +233,7 @@ pub fn encode_rgba_flate(image: &RgbaImage, level: Level) -> Result<EncodedImage
             level,
             predictor: pred,
         }],
-        Backend::MinizOxide,
+        flate_backend(),
         &mut compressed,
     )?;
 
@@ -275,7 +284,7 @@ fn encode_gray_smask(
             level,
             predictor: pred,
         }],
-        Backend::MinizOxide,
+        flate_backend(),
         &mut compressed,
     )?;
     let d = dict! {
@@ -447,4 +456,83 @@ impl ImageBuffer for PdfCmykAsYcck<'_> {
             buffers[3].push(k);
         }
     }
+}
+
+const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+
+fn crc32_png(chunk_type: [u8; 4], payload: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFF_u32;
+    for &b in chunk_type.iter().chain(payload) {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn write_png_chunk(out: &mut Vec<u8>, chunk_type: [u8; 4], payload: &[u8]) {
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(&chunk_type);
+    out.extend_from_slice(payload);
+    out.extend_from_slice(&crc32_png(chunk_type, payload).to_be_bytes());
+}
+
+/// Encodes straight-alpha `RGBA8` `pixels` (`width * height * 4` bytes) into a standard 8-bit
+/// truecolor+alpha PNG file (`IHDR` + `IDAT` + `IEND`).
+///
+/// # Errors
+///
+/// Returns [`EncodeError::Dimensions`] if `width == 0`, `height == 0`, or the
+/// byte count overflows, [`EncodeError::BufferLength`] if `pixels.len()` does
+/// not equal `width * height * 4`, or [`EncodeError::Filter`] on Flate failure.
+pub fn encode_png_rgba8(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, EncodeError> {
+    if width == 0 || height == 0 {
+        return Err(EncodeError::Dimensions { width, height });
+    }
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or(EncodeError::Dimensions { width, height })?;
+    if pixels.len() != expected {
+        return Err(EncodeError::BufferLength {
+            actual: pixels.len(),
+            expected,
+        });
+    }
+    let layout = Layout {
+        colors: 4,
+        bits_per_component: 8,
+        columns: width,
+    };
+    let mut idat = Vec::new();
+    encode(
+        pixels,
+        &[Encoder::Flate {
+            level: Level::DEFAULT,
+            predictor: Prediction::Png(layout, Row::Sub),
+        }],
+        flate_backend(),
+        &mut idat,
+    )?;
+    if u32::try_from(idat.len()).is_err() {
+        return Err(EncodeError::Dimensions { width, height });
+    }
+
+    let mut ihdr = [0_u8; 13];
+    ihdr[0..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    ihdr[8] = 8; // bit depth
+    ihdr[9] = 6; // color type: RGBA
+    ihdr[10] = 0; // deflate compression
+    ihdr[11] = 0; // adaptive filter method 0
+    ihdr[12] = 0; // no interlace
+
+    let mut out = Vec::with_capacity(8 + 25 + 12 + idat.len() + 12);
+    out.extend_from_slice(&PNG_SIGNATURE);
+    write_png_chunk(&mut out, *b"IHDR", &ihdr);
+    write_png_chunk(&mut out, *b"IDAT", &idat);
+    write_png_chunk(&mut out, *b"IEND", &[]);
+    Ok(out)
 }

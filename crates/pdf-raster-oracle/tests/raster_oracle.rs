@@ -20,7 +20,8 @@ use pdf_raster::{
     Viewport, render_page_with,
 };
 use pdf_raster_oracle::rubric::{
-    CaseEvaluation, RgbaImage, RubricProfile, compare_backends, evaluate_case, score_images,
+    CaseEvaluation, RgbaImage, RgbaImageExt, RubricProfile, compare_backends, evaluate_case,
+    score_images,
 };
 use pdf_raster_oracle::{RenderOptions, require_pdfium, require_pdfium_backend};
 use pdf_structure::read::Recovery;
@@ -141,6 +142,10 @@ fn assert_rubric_case(
         .unwrap_or_else(|e| panic!("PDFium render failed on {name}: {e}"));
     assert!(!oracle_sum.reported);
     let oracle_img = RgbaImage::from_pixmap(&oracle_pix).unwrap();
+    assert!(
+        !oracle_img.is_uniform(),
+        "case {name} rendered completely uniform/blank in PDFium oracle"
+    );
 
     let mut cfg = RubricProfile::ConformingCore.config();
     cfg.visual_pdfium_floor = min_score;
@@ -740,22 +745,22 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
         Err(BackendError::Unsupported(_))
     ));
     let mut custom_no_forms = RenderOpts::with_viewport(custom_vp);
-    custom_no_forms.draw = Draw {
-        annots: true,
-        forms: false,
-    };
+    custom_no_forms.draw = Draw::new(true, false);
     let rubric = RubricProfile::ConformingCore.config();
-    let custom_outcome = compare_backends(
+    let custom_score = compare_backends(
         &rust,
         &pdfium,
         bytes.clone(),
         Some("viewer-pass"),
         0,
         &custom_no_forms,
-        &rubric,
+        rubric.visual_pdfium_floor,
     )
     .unwrap();
-    assert!(custom_outcome.passed, "{custom_outcome:?}");
+    assert!(
+        custom_score.score >= rubric.visual_pdfium_floor,
+        "{custom_score:?}"
+    );
 
     for rot in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
         let mut opts = RenderOpts::with_viewport(Viewport::Page {
@@ -763,19 +768,19 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
             rotation: rot,
         });
         opts.format = PixelFormat::Bgra8;
-        let outcome = compare_backends(
+        let score = compare_backends(
             &rust,
             &pdfium,
             bytes.clone(),
             Some("viewer-pass"),
             0,
             &opts,
-            &rubric,
+            rubric.visual_pdfium_floor,
         )
         .unwrap();
         assert!(
-            outcome.passed,
-            "page 0 rotation {rot:?} failed: {outcome:?}"
+            score.score >= rubric.visual_pdfium_floor,
+            "page 0 rotation {rot:?} failed: {score:?}"
         );
     }
 
@@ -804,19 +809,19 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
         });
         tile_opts.background = bg;
         tile_opts.anti_alias = AntiAlias::NONE;
-        let outcome = compare_backends(
+        let score = compare_backends(
             &rust,
             &pdfium,
             bytes.clone(),
             Some("viewer-pass"),
             0,
             &tile_opts,
-            &rubric,
+            rubric.visual_pdfium_floor,
         )
         .unwrap();
         assert!(
-            outcome.passed,
-            "tile ({tx}, {ty}, {rot:?}) failed ConformingCore rubric: {outcome:?}"
+            score.score >= rubric.visual_pdfium_floor,
+            "tile ({tx}, {ty}, {rot:?}) failed floor: {score:?}"
         );
     }
 
@@ -917,9 +922,20 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
                 (pp.width(), pp.height()),
                 "viewport {vp:?} pixel size mismatch"
             );
-            let cmp =
-                compare_backends(&rust, &pdfium, inh_pdf.clone(), None, 0, &opts, &rubric).unwrap();
-            assert!(cmp.passed, "viewport {vp:?} failed: {cmp:?}");
+            let cmp = compare_backends(
+                &rust,
+                &pdfium,
+                inh_pdf.clone(),
+                None,
+                0,
+                &opts,
+                rubric.visual_pdfium_floor,
+            )
+            .unwrap();
+            assert!(
+                cmp.score >= rubric.visual_pdfium_floor,
+                "viewport {vp:?} failed: {cmp:?}"
+            );
         }
     }
 
@@ -993,9 +1009,18 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
             width: 100,
             rotation: Rotation::R0,
         });
-        let z_cmp = compare_backends(&rust, &pdfium, z_pdf, None, 0, &z_opts, &rubric).unwrap();
+        let z_cmp = compare_backends(
+            &rust,
+            &pdfium,
+            z_pdf,
+            None,
+            0,
+            &z_opts,
+            rubric.visual_pdfium_floor,
+        )
+        .unwrap();
         assert!(
-            z_cmp.passed,
+            z_cmp.score >= rubric.visual_pdfium_floor,
             "missing 'Z' (.notdef) diverged from PDFium: {z_cmp:?}"
         );
 

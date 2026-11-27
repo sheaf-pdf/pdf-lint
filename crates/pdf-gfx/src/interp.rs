@@ -145,8 +145,8 @@ impl fmt::Debug for At<'_> {
 
 impl<'e> At<'e> {
     /// Active `/Resources` object for the content stream containing this event
-    /// (the Form XObject's own `/Resources`, or the page's when inherited or at
-    /// top level).
+    /// (the Form XObject's own `/Resources`, or the enclosing stream's—and
+    /// ultimately the page's—when inherited, or the page's at top level).
     #[must_use]
     pub const fn resources(&self) -> Option<&'e Object> {
         self.resources
@@ -932,8 +932,8 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
                     .reader
                     .quiet_array_for(smask_dict, b"BC")
                     .and_then(|arr| {
-                        let mut vals = Vec::with_capacity(arr.len().min(16));
-                        for item in arr.iter().take(16) {
+                        let mut vals = Vec::with_capacity(arr.len().min(32));
+                        for item in arr.iter().take(32) {
                             let v = self.reader.quiet_float_of(item)?;
                             if !v.is_finite() {
                                 return None;
@@ -1256,7 +1256,7 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
         let drawn_in = self
             .emit(at, state, marks, Kind::FormBegin(shown))
             .and_then(|()| {
-                let begun = state.form(shown.matrix, shown.bbox);
+                let begun = state.form(shown.matrix, shown.bbox, shown.group.is_some());
                 if begun.clip.segments() > self.lim.segments {
                     return Err(past(Cap::Segments));
                 }

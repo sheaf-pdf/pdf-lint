@@ -4,8 +4,9 @@ use pdf_objects::Unreadable;
 
 use crate::limits::LimitKind;
 
-/// Hard failure returned by [`crate::render_page`], [`crate::render_page_with`],
-/// [`crate::render_content`], or [`crate::Viewport::resolve`].
+/// Hard failure returned by [`crate::Renderer`], [`crate::render_page`],
+/// [`crate::render_page_with`], [`crate::render_content`], [`crate::Pixmap`], or
+/// [`crate::Viewport::resolve`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -17,9 +18,20 @@ pub enum Error {
     /// zero width/height, non-finite DPI, or singular matrix).
     #[error("invalid viewport: {0}")]
     InvalidViewport(&'static str),
+    /// Caller-supplied pixel buffer length did not match `width * height * 4`.
+    #[error("pixmap buffer length {actual} does not match expected {expected} bytes")]
+    BufferLength {
+        /// Actual byte slice length supplied.
+        actual: usize,
+        /// Expected `width * height * 4` byte length.
+        expected: usize,
+    },
     /// A configured [`crate::Limits`] resource cap was exceeded.
-    #[error("rasterization exceeded resource limit ({0:?})")]
+    #[error("rasterization exceeded resource limit: {0}")]
     Limit(LimitKind),
+    /// Rasterization was cooperatively aborted via [`crate::RenderOpts::stop`].
+    #[error("rasterization cancelled")]
+    Cancelled,
     /// Page-tree inspection failed.
     #[error("PDF page-tree error: {0}")]
     Pages(#[from] pdf_semantics::pages::Error),

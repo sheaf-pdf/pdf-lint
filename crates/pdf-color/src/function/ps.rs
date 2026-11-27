@@ -1,6 +1,8 @@
 //! Bounded, recursion-free ISO 32000-2 §7.10.5 (Table 42) PostScript calculator parser and
 //! stack-machine evaluator.
 
+use pdf_objects::Rules;
+
 use crate::limits::Limits;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,20 +76,159 @@ enum Val {
     Proc { start: usize, end: usize },
 }
 
+impl Default for Val {
+    fn default() -> Self {
+        Val::Int(0)
+    }
+}
+
 impl Val {
     #[inline]
-    fn as_f32(self) -> Option<f32> {
+    fn as_num(self, pdfium: bool) -> Option<f32> {
         match self {
             Val::Int(i) => Some(i as f32),
             Val::Real(r) => Some(r),
+            Val::Bool(b) if pdfium => Some(if b { 1.0 } else { 0.0 }),
             Val::Bool(_) | Val::Proc { .. } => None,
         }
+    }
+
+    #[inline]
+    fn as_int(self, pdfium: bool) -> Option<i32> {
+        match self {
+            Val::Int(i) => Some(i),
+            Val::Real(r) if pdfium => Some(if r.is_finite() { r.trunc() as i32 } else { 0 }),
+            Val::Bool(b) if pdfium => Some(i32::from(b)),
+            Val::Real(_) | Val::Bool(_) | Val::Proc { .. } => None,
+        }
+    }
+
+    #[inline]
+    fn as_cond(self, pdfium: bool) -> Option<bool> {
+        match self {
+            Val::Bool(b) => Some(b),
+            Val::Int(i) if pdfium => Some(i != 0),
+            Val::Real(r) if pdfium => Some(r != 0.0 && !r.is_nan()),
+            Val::Int(_) | Val::Real(_) | Val::Proc { .. } => None,
+        }
+    }
+}
+
+/// Stack-resident buffer that spills to a heap `Vec` only when length exceeds `N`, while always
+/// exposing a single contiguous slice.
+struct SmallStack<T: Copy, const N: usize> {
+    inline: [T; N],
+    len: usize,
+    spilled: Vec<T>,
+}
+
+impl<T: Copy + Default, const N: usize> SmallStack<T, N> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            inline: [T::default(); N],
+            len: 0,
+            spilled: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        if self.spilled.is_empty() {
+            self.len
+        } else {
+            self.spilled.len()
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, val: T, cap: usize) -> bool {
+        let cur = self.len();
+        if cur >= cap {
+            return false;
+        }
+        if !self.spilled.is_empty() {
+            self.spilled.push(val);
+        } else if cur < N {
+            self.inline[cur] = val;
+            self.len = cur + 1;
+        } else {
+            self.spilled.reserve(cap.max(N + 1));
+            self.spilled.extend_from_slice(&self.inline[..N]);
+            self.spilled.push(val);
+        }
+        true
+    }
+
+    /// Pushes `val` when replacing an already-popped operand (so length cannot exceed prior cap).
+    #[inline]
+    fn push_within(&mut self, val: T) {
+        if !self.spilled.is_empty() {
+            self.spilled.push(val);
+        } else {
+            self.inline[self.len] = val;
+            self.len += 1;
+        }
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<T> {
+        if !self.spilled.is_empty() {
+            self.spilled.pop()
+        } else if self.len > 0 {
+            self.len -= 1;
+            Some(self.inline[self.len])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        if self.spilled.is_empty() {
+            &self.inline[..self.len]
+        } else {
+            &self.spilled
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        if self.spilled.is_empty() {
+            &mut self.inline[..self.len]
+        } else {
+            &mut self.spilled
+        }
+    }
+
+    #[inline]
+    fn extend_from_within(&mut self, start: usize, cap: usize) -> bool {
+        let cur = self.len();
+        let n = cur - start;
+        if cur + n > cap {
+            return false;
+        }
+        if !self.spilled.is_empty() {
+            self.spilled.extend_from_within(start..);
+        } else if cur + n <= N {
+            self.inline.copy_within(start..cur, cur);
+            self.len = cur + n;
+        } else {
+            self.spilled.reserve(cap.max(cur + n));
+            self.spilled.extend_from_slice(&self.inline[..cur]);
+            self.spilled.extend_from_within(start..);
+        }
+        true
     }
 }
 
 #[derive(Clone, PartialEq)]
 pub(super) struct Program {
     code: Vec<Op>,
+    max_ops: usize,
+    max_stack: usize,
+    max_depth: usize,
+    rules: Rules,
 }
 
 impl Program {
@@ -95,7 +236,11 @@ impl Program {
         self.code.len()
     }
 
-    pub(super) fn parse(bytes: &[u8], limits: &Limits) -> Result<Program, PsParseError> {
+    pub(super) fn parse(
+        bytes: &[u8],
+        rules: Rules,
+        limits: &Limits,
+    ) -> Result<Program, PsParseError> {
         let mut cursor = skip_ws_and_comments(bytes, 0);
         if bytes.get(cursor) != Some(&b'{') {
             return Err(PsParseError::Syntax);
@@ -169,28 +314,45 @@ impl Program {
             return Err(PsParseError::Syntax);
         }
 
-        Ok(Program { code })
+        Ok(Program {
+            code,
+            max_ops: limits.postscript_ops,
+            max_stack: limits.postscript_stack,
+            max_depth: limits.space_depth,
+            rules,
+        })
     }
 
-    pub(super) fn exec(&self, inputs: &[f32], outputs: &mut [f32], limits: &Limits) -> bool {
-        if inputs.len() > limits.postscript_stack || outputs.len() > limits.postscript_stack {
+    pub(super) fn exec(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        rules_override: Option<Rules>,
+    ) -> bool {
+        let max_stack = self.max_stack;
+        if inputs.len() > max_stack || outputs.len() > max_stack {
             return false;
         }
-        let mut stack = Vec::with_capacity(inputs.len().max(outputs.len()).min(128));
+        let pdfium = rules_override.unwrap_or(self.rules) != Rules::Iso;
+
+        let mut stack: SmallStack<Val, 128> = SmallStack::new();
         for &x in inputs {
-            stack.push(Val::Real(sanitize_f32(x)));
+            if !stack.push(Val::Real(sanitize_f32(x)), max_stack) {
+                return false;
+            }
         }
 
-        let mut frames: Vec<(usize, usize)> = Vec::with_capacity(8);
-        frames.push((0, self.code.len()));
+        let frame_cap = self.max_depth.saturating_add(2);
+        let mut frames: SmallStack<(usize, usize), 66> = SmallStack::new();
+        let _ = frames.push((0, self.code.len()), frame_cap.max(2));
         let mut steps = 0_usize;
 
-        while let Some((pc, end)) = frames.last_mut() {
+        while let Some((pc, end)) = frames.as_mut_slice().last_mut() {
             if *pc >= *end {
                 frames.pop();
                 continue;
             }
-            if steps >= limits.postscript_ops {
+            if steps >= self.max_ops {
                 return false;
             }
             steps += 1;
@@ -198,40 +360,31 @@ impl Program {
             let op = self.code[*pc];
             *pc += 1;
 
-            let push = |stack: &mut Vec<Val>, v: Val| -> bool {
-                if stack.len() >= limits.postscript_stack {
-                    false
-                } else {
-                    stack.push(v);
-                    true
-                }
-            };
-
             match op {
                 Op::Int(i) => {
-                    if !push(&mut stack, Val::Int(i)) {
+                    if !stack.push(Val::Int(i), max_stack) {
                         return false;
                     }
                 }
                 Op::Real(r) => {
-                    if !push(&mut stack, Val::Real(r)) {
+                    if !stack.push(Val::Real(r), max_stack) {
                         return false;
                     }
                 }
                 Op::Bool(b) => {
-                    if !push(&mut stack, Val::Bool(b)) {
+                    if !stack.push(Val::Bool(b), max_stack) {
                         return false;
                     }
                 }
                 Op::Proc { end_ip } => {
                     let proc_start = *pc;
                     *pc = end_ip;
-                    if !push(
-                        &mut stack,
+                    if !stack.push(
                         Val::Proc {
                             start: proc_start,
                             end: end_ip,
                         },
+                        max_stack,
                     ) {
                         return false;
                     }
@@ -241,9 +394,10 @@ impl Program {
                         let v = i
                             .checked_abs()
                             .map_or_else(|| Val::Real(-(i as f32)), Val::Int);
-                        stack.push(v);
+                        stack.push_within(v);
                     }
-                    Some(Val::Real(r)) => stack.push(Val::Real(sanitize_f32(r.abs()))),
+                    Some(Val::Real(r)) => stack.push_within(Val::Real(sanitize_f32(r.abs()))),
+                    Some(Val::Bool(b)) if pdfium => stack.push_within(Val::Int(i32::from(b))),
                     _ => return false,
                 },
                 Op::Neg => match stack.pop() {
@@ -251,9 +405,10 @@ impl Program {
                         let v = i
                             .checked_neg()
                             .map_or_else(|| Val::Real(-(i as f32)), Val::Int);
-                        stack.push(v);
+                        stack.push_within(v);
                     }
-                    Some(Val::Real(r)) => stack.push(Val::Real(sanitize_f32(-r))),
+                    Some(Val::Real(r)) => stack.push_within(Val::Real(sanitize_f32(-r))),
+                    Some(Val::Bool(b)) if pdfium => stack.push_within(Val::Int(-i32::from(b))),
                     _ => return false,
                 },
                 Op::Add => {
@@ -265,13 +420,13 @@ impl Program {
                             let v = ia
                                 .checked_add(ib)
                                 .map_or_else(|| Val::Real((ia as f32) + (ib as f32)), Val::Int);
-                            stack.push(v);
+                            stack.push_within(v);
                         }
                         _ => {
-                            let (Some(fa), Some(fb)) = (a.as_f32(), b.as_f32()) else {
+                            let (Some(fa), Some(fb)) = (a.as_num(pdfium), b.as_num(pdfium)) else {
                                 return false;
                             };
-                            stack.push(Val::Real(sanitize_f32(fa + fb)));
+                            stack.push_within(Val::Real(sanitize_f32(fa + fb)));
                         }
                     }
                 }
@@ -284,13 +439,13 @@ impl Program {
                             let v = ia
                                 .checked_sub(ib)
                                 .map_or_else(|| Val::Real((ia as f32) - (ib as f32)), Val::Int);
-                            stack.push(v);
+                            stack.push_within(v);
                         }
                         _ => {
-                            let (Some(fa), Some(fb)) = (a.as_f32(), b.as_f32()) else {
+                            let (Some(fa), Some(fb)) = (a.as_num(pdfium), b.as_num(pdfium)) else {
                                 return false;
                             };
-                            stack.push(Val::Real(sanitize_f32(fa - fb)));
+                            stack.push_within(Val::Real(sanitize_f32(fa - fb)));
                         }
                     }
                 }
@@ -303,52 +458,56 @@ impl Program {
                             let v = ia
                                 .checked_mul(ib)
                                 .map_or_else(|| Val::Real((ia as f32) * (ib as f32)), Val::Int);
-                            stack.push(v);
+                            stack.push_within(v);
                         }
                         _ => {
-                            let (Some(fa), Some(fb)) = (a.as_f32(), b.as_f32()) else {
+                            let (Some(fa), Some(fb)) = (a.as_num(pdfium), b.as_num(pdfium)) else {
                                 return false;
                             };
-                            stack.push(Val::Real(sanitize_f32(fa * fb)));
+                            stack.push_within(Val::Real(sanitize_f32(fa * fb)));
                         }
                     }
                 }
                 Op::Div => {
                     let (Some(fb), Some(fa)) = (
-                        stack.pop().and_then(Val::as_f32),
-                        stack.pop().and_then(Val::as_f32),
+                        stack.pop().and_then(|v| v.as_num(pdfium)),
+                        stack.pop().and_then(|v| v.as_num(pdfium)),
                     ) else {
                         return false;
                     };
                     if fb == 0.0 {
                         return false;
                     }
-                    stack.push(Val::Real(sanitize_f32(fa / fb)));
+                    stack.push_within(Val::Real(sanitize_f32(fa / fb)));
                 }
                 Op::Idiv => {
-                    let (Some(Val::Int(ib)), Some(Val::Int(ia))) = (stack.pop(), stack.pop())
-                    else {
+                    let (Some(ib), Some(ia)) = (
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                    ) else {
                         return false;
                     };
                     if ib == 0 {
                         return false;
                     }
-                    stack.push(Val::Int(ia.wrapping_div(ib)));
+                    stack.push_within(Val::Int(ia.wrapping_div(ib)));
                 }
                 Op::Mod => {
-                    let (Some(Val::Int(ib)), Some(Val::Int(ia))) = (stack.pop(), stack.pop())
-                    else {
+                    let (Some(ib), Some(ia)) = (
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                    ) else {
                         return false;
                     };
                     if ib == 0 {
                         return false;
                     }
-                    stack.push(Val::Int(ia.wrapping_rem(ib)));
+                    stack.push_within(Val::Int(ia.wrapping_rem(ib)));
                 }
                 Op::Atan => {
                     let (Some(den), Some(num)) = (
-                        stack.pop().and_then(Val::as_f32),
-                        stack.pop().and_then(Val::as_f32),
+                        stack.pop().and_then(|v| v.as_num(pdfium)),
+                        stack.pop().and_then(|v| v.as_num(pdfium)),
                     ) else {
                         return false;
                     };
@@ -362,55 +521,62 @@ impl Program {
                     if deg >= 360.0 {
                         deg -= 360.0;
                     }
-                    stack.push(Val::Real(sanitize_f32(deg)));
+                    stack.push_within(Val::Real(sanitize_f32(deg)));
                 }
                 Op::Ceiling => match stack.pop() {
-                    Some(Val::Int(i)) => stack.push(Val::Int(i)),
-                    Some(Val::Real(r)) => stack.push(Val::Real(sanitize_f32(r.ceil()))),
+                    Some(Val::Int(i)) => stack.push_within(Val::Int(i)),
+                    Some(Val::Real(r)) => stack.push_within(Val::Real(sanitize_f32(r.ceil()))),
+                    Some(Val::Bool(b)) if pdfium => stack.push_within(Val::Int(i32::from(b))),
                     _ => return false,
                 },
                 Op::Floor => match stack.pop() {
-                    Some(Val::Int(i)) => stack.push(Val::Int(i)),
-                    Some(Val::Real(r)) => stack.push(Val::Real(sanitize_f32(r.floor()))),
+                    Some(Val::Int(i)) => stack.push_within(Val::Int(i)),
+                    Some(Val::Real(r)) => stack.push_within(Val::Real(sanitize_f32(r.floor()))),
+                    Some(Val::Bool(b)) if pdfium => stack.push_within(Val::Int(i32::from(b))),
                     _ => return false,
                 },
                 Op::Round => match stack.pop() {
-                    Some(Val::Int(i)) => stack.push(Val::Int(i)),
-                    Some(Val::Real(r)) => stack.push(Val::Real(sanitize_f32((r + 0.5).floor()))),
+                    Some(Val::Int(i)) => stack.push_within(Val::Int(i)),
+                    Some(Val::Real(r)) => {
+                        stack.push_within(Val::Real(sanitize_f32((r + 0.5).floor())));
+                    }
+                    Some(Val::Bool(b)) if pdfium => stack.push_within(Val::Int(i32::from(b))),
                     _ => return false,
                 },
                 Op::Truncate => match stack.pop() {
-                    Some(Val::Int(i)) => stack.push(Val::Int(i)),
-                    Some(Val::Real(r)) => stack.push(Val::Real(sanitize_f32(r.trunc()))),
+                    Some(Val::Int(i)) => stack.push_within(Val::Int(i)),
+                    Some(Val::Real(r)) => stack.push_within(Val::Real(sanitize_f32(r.trunc()))),
+                    Some(Val::Bool(b)) if pdfium => stack.push_within(Val::Int(i32::from(b))),
                     _ => return false,
                 },
                 Op::Cvi => match stack.pop() {
-                    Some(Val::Int(i)) => stack.push(Val::Int(i)),
-                    Some(Val::Real(r)) => stack.push(Val::Int(r.trunc() as i32)),
+                    Some(Val::Int(i)) => stack.push_within(Val::Int(i)),
+                    Some(Val::Real(r)) => stack.push_within(Val::Int(r.trunc() as i32)),
+                    Some(Val::Bool(b)) if pdfium => stack.push_within(Val::Int(i32::from(b))),
                     _ => return false,
                 },
                 Op::Cvr => {
-                    let Some(r) = stack.pop().and_then(Val::as_f32) else {
+                    let Some(r) = stack.pop().and_then(|v| v.as_num(pdfium)) else {
                         return false;
                     };
-                    stack.push(Val::Real(sanitize_f32(r)));
+                    stack.push_within(Val::Real(sanitize_f32(r)));
                 }
                 Op::Cos => {
-                    let Some(deg) = stack.pop().and_then(Val::as_f32) else {
+                    let Some(deg) = stack.pop().and_then(|v| v.as_num(pdfium)) else {
                         return false;
                     };
-                    stack.push(Val::Real(sanitize_f32(deg.to_radians().cos())));
+                    stack.push_within(Val::Real(sanitize_f32(deg.to_radians().cos())));
                 }
                 Op::Sin => {
-                    let Some(deg) = stack.pop().and_then(Val::as_f32) else {
+                    let Some(deg) = stack.pop().and_then(|v| v.as_num(pdfium)) else {
                         return false;
                     };
-                    stack.push(Val::Real(sanitize_f32(deg.to_radians().sin())));
+                    stack.push_within(Val::Real(sanitize_f32(deg.to_radians().sin())));
                 }
                 Op::Exp => {
                     let (Some(exp), Some(base)) = (
-                        stack.pop().and_then(Val::as_f32),
-                        stack.pop().and_then(Val::as_f32),
+                        stack.pop().and_then(|v| v.as_num(pdfium)),
+                        stack.pop().and_then(|v| v.as_num(pdfium)),
                     ) else {
                         return false;
                     };
@@ -418,58 +584,96 @@ impl Program {
                     if !val.is_finite() {
                         return false;
                     }
-                    stack.push(Val::Real(val));
+                    stack.push_within(Val::Real(val));
                 }
                 Op::Ln => {
-                    let Some(x) = stack.pop().and_then(Val::as_f32) else {
+                    let Some(x) = stack.pop().and_then(|v| v.as_num(pdfium)) else {
                         return false;
                     };
                     if x <= 0.0 {
                         return false;
                     }
-                    stack.push(Val::Real(sanitize_f32(x.ln())));
+                    stack.push_within(Val::Real(sanitize_f32(x.ln())));
                 }
                 Op::Log => {
-                    let Some(x) = stack.pop().and_then(Val::as_f32) else {
+                    let Some(x) = stack.pop().and_then(|v| v.as_num(pdfium)) else {
                         return false;
                     };
                     if x <= 0.0 {
                         return false;
                     }
-                    stack.push(Val::Real(sanitize_f32(x.log10())));
+                    stack.push_within(Val::Real(sanitize_f32(x.log10())));
                 }
                 Op::Sqrt => {
-                    let Some(x) = stack.pop().and_then(Val::as_f32) else {
+                    let Some(x) = stack.pop().and_then(|v| v.as_num(pdfium)) else {
                         return false;
                     };
                     if x < 0.0 {
                         return false;
                     }
-                    stack.push(Val::Real(sanitize_f32(x.sqrt())));
+                    stack.push_within(Val::Real(sanitize_f32(x.sqrt())));
                 }
                 Op::And => match (stack.pop(), stack.pop()) {
-                    (Some(Val::Bool(b)), Some(Val::Bool(a))) => stack.push(Val::Bool(a && b)),
-                    (Some(Val::Int(b)), Some(Val::Int(a))) => stack.push(Val::Int(a & b)),
+                    (Some(Val::Bool(b)), Some(Val::Bool(a))) => {
+                        stack.push_within(Val::Bool(a && b));
+                    }
+                    (Some(Val::Int(b)), Some(Val::Int(a))) => {
+                        stack.push_within(Val::Int(a & b));
+                    }
+                    (Some(b), Some(a)) if pdfium => {
+                        let (Some(ib), Some(ia)) = (b.as_int(true), a.as_int(true)) else {
+                            return false;
+                        };
+                        stack.push_within(Val::Int(ia & ib));
+                    }
                     _ => return false,
                 },
                 Op::Or => match (stack.pop(), stack.pop()) {
-                    (Some(Val::Bool(b)), Some(Val::Bool(a))) => stack.push(Val::Bool(a || b)),
-                    (Some(Val::Int(b)), Some(Val::Int(a))) => stack.push(Val::Int(a | b)),
+                    (Some(Val::Bool(b)), Some(Val::Bool(a))) => {
+                        stack.push_within(Val::Bool(a || b));
+                    }
+                    (Some(Val::Int(b)), Some(Val::Int(a))) => {
+                        stack.push_within(Val::Int(a | b));
+                    }
+                    (Some(b), Some(a)) if pdfium => {
+                        let (Some(ib), Some(ia)) = (b.as_int(true), a.as_int(true)) else {
+                            return false;
+                        };
+                        stack.push_within(Val::Int(ia | ib));
+                    }
                     _ => return false,
                 },
                 Op::Xor => match (stack.pop(), stack.pop()) {
-                    (Some(Val::Bool(b)), Some(Val::Bool(a))) => stack.push(Val::Bool(a ^ b)),
-                    (Some(Val::Int(b)), Some(Val::Int(a))) => stack.push(Val::Int(a ^ b)),
+                    (Some(Val::Bool(b)), Some(Val::Bool(a))) => {
+                        stack.push_within(Val::Bool(a ^ b));
+                    }
+                    (Some(Val::Int(b)), Some(Val::Int(a))) => {
+                        stack.push_within(Val::Int(a ^ b));
+                    }
+                    (Some(b), Some(a)) if pdfium => {
+                        let (Some(ib), Some(ia)) = (b.as_int(true), a.as_int(true)) else {
+                            return false;
+                        };
+                        stack.push_within(Val::Int(ia ^ ib));
+                    }
                     _ => return false,
                 },
                 Op::Not => match stack.pop() {
-                    Some(Val::Bool(b)) => stack.push(Val::Bool(!b)),
-                    Some(Val::Int(i)) => stack.push(Val::Int(!i)),
+                    Some(Val::Bool(b)) => stack.push_within(Val::Bool(!b)),
+                    Some(Val::Int(i)) => stack.push_within(Val::Int(!i)),
+                    // PDFium (`CPDF_PSEngine::DoOperator(PSOP_NOT)`) pushes `!PopInt()`, so `0.0`
+                    // becomes `1` (true) and any non-zero truncated integer becomes `0` (false).
+                    Some(Val::Real(r)) if pdfium => {
+                        let i = if r.is_finite() { r.trunc() as i32 } else { 0 };
+                        stack.push_within(Val::Bool(i == 0));
+                    }
                     _ => return false,
                 },
                 Op::Bitshift => {
-                    let (Some(Val::Int(shift)), Some(Val::Int(val))) = (stack.pop(), stack.pop())
-                    else {
+                    let (Some(shift), Some(val)) = (
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                    ) else {
                         return false;
                     };
                     let u = val as u32;
@@ -479,7 +683,7 @@ impl Program {
                         let r = shift.unsigned_abs();
                         if r >= 32 { 0 } else { u >> r }
                     };
-                    stack.push(Val::Int(shifted as i32));
+                    stack.push_within(Val::Int(shifted as i32));
                 }
                 Op::Eq | Op::Ne => {
                     let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
@@ -488,12 +692,12 @@ impl Program {
                     let eq = match (a, b) {
                         (Val::Bool(ba), Val::Bool(bb)) => ba == bb,
                         (Val::Int(ia), Val::Int(ib)) => ia == ib,
-                        _ => match (a.as_f32(), b.as_f32()) {
+                        _ => match (a.as_num(pdfium), b.as_num(pdfium)) {
                             (Some(fa), Some(fb)) => fa == fb,
                             _ => return false,
                         },
                     };
-                    stack.push(Val::Bool(if matches!(op, Op::Eq) { eq } else { !eq }));
+                    stack.push_within(Val::Bool(if matches!(op, Op::Eq) { eq } else { !eq }));
                 }
                 Op::Gt | Op::Ge | Op::Lt | Op::Le => {
                     let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
@@ -507,7 +711,7 @@ impl Program {
                             _ => ia <= ib,
                         },
                         _ => {
-                            let (Some(fa), Some(fb)) = (a.as_f32(), b.as_f32()) else {
+                            let (Some(fa), Some(fb)) = (a.as_num(pdfium), b.as_num(pdfium)) else {
                                 return false;
                             };
                             match op {
@@ -518,19 +722,21 @@ impl Program {
                             }
                         }
                     };
-                    stack.push(Val::Bool(res));
+                    stack.push_within(Val::Bool(res));
                 }
                 Op::If => {
-                    let (Some(Val::Proc { start, end }), Some(Val::Bool(cond))) =
-                        (stack.pop(), stack.pop())
+                    let (Some(Val::Proc { start, end }), Some(cond)) =
+                        (stack.pop(), stack.pop().and_then(|v| v.as_cond(pdfium)))
                     else {
                         return false;
                     };
                     if cond {
-                        if frames.len() > limits.space_depth {
+                        if frames.len() > self.max_depth {
                             return false;
                         }
-                        frames.push((start, end));
+                        if !frames.push((start, end), frame_cap.max(2)) {
+                            return false;
+                        }
                     }
                 }
                 Op::IfElse => {
@@ -543,18 +749,25 @@ impl Program {
                             start: t_start,
                             end: t_end,
                         }),
-                        Some(Val::Bool(cond)),
-                    ) = (stack.pop(), stack.pop(), stack.pop())
+                        Some(cond),
+                    ) = (
+                        stack.pop(),
+                        stack.pop(),
+                        stack.pop().and_then(|v| v.as_cond(pdfium)),
+                    )
                     else {
                         return false;
                     };
-                    if frames.len() > limits.space_depth {
+                    if frames.len() > self.max_depth {
                         return false;
                     }
-                    if cond {
-                        frames.push((t_start, t_end));
+                    let target = if cond {
+                        (t_start, t_end)
                     } else {
-                        frames.push((f_start, f_end));
+                        (f_start, f_end)
+                    };
+                    if !frames.push(target, frame_cap.max(2)) {
+                        return false;
                     }
                 }
                 Op::Pop => {
@@ -563,76 +776,85 @@ impl Program {
                     }
                 }
                 Op::Dup => {
-                    let Some(&top) = stack.last() else {
+                    let Some(&top) = stack.as_slice().last() else {
                         return false;
                     };
-                    if !push(&mut stack, top) {
+                    if !stack.push(top, max_stack) {
                         return false;
                     }
                 }
                 Op::Exch => {
-                    let len = stack.len();
+                    let slice = stack.as_mut_slice();
+                    let len = slice.len();
                     if len < 2 {
                         return false;
                     }
-                    stack.swap(len - 1, len - 2);
+                    slice.swap(len - 1, len - 2);
                 }
                 Op::Copy => {
-                    let Some(Val::Int(n)) = stack.pop() else {
+                    let Some(n) = stack.pop().and_then(|v| v.as_int(pdfium)) else {
                         return false;
                     };
                     let Ok(n) = usize::try_from(n) else {
                         return false;
                     };
-                    if n > stack.len() || stack.len() + n > limits.postscript_stack {
+                    if n > stack.len() {
                         return false;
                     }
                     let start = stack.len() - n;
-                    stack.extend_from_within(start..);
+                    if !stack.extend_from_within(start, max_stack) {
+                        return false;
+                    }
                 }
                 Op::Index => {
-                    let Some(Val::Int(n)) = stack.pop() else {
+                    let Some(n) = stack.pop().and_then(|v| v.as_int(pdfium)) else {
                         return false;
                     };
                     let Ok(n) = usize::try_from(n) else {
                         return false;
                     };
-                    if n >= stack.len() {
+                    let slice = stack.as_slice();
+                    if n >= slice.len() {
                         return false;
                     }
-                    let val = stack[stack.len() - 1 - n];
-                    if !push(&mut stack, val) {
+                    let val = slice[slice.len() - 1 - n];
+                    if !stack.push(val, max_stack) {
                         return false;
                     }
                 }
                 Op::Roll => {
-                    let (Some(Val::Int(j)), Some(Val::Int(n))) = (stack.pop(), stack.pop()) else {
+                    let (Some(j), Some(n)) = (
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                        stack.pop().and_then(|v| v.as_int(pdfium)),
+                    ) else {
                         return false;
                     };
                     if n < 0 {
                         return false;
                     }
                     let n_usize = n as usize;
-                    if n_usize > stack.len() {
+                    let slice = stack.as_mut_slice();
+                    if n_usize > slice.len() {
                         return false;
                     }
                     if n_usize > 1 {
                         let k = j.rem_euclid(n) as usize;
-                        let start = stack.len() - n_usize;
-                        stack[start..].rotate_right(k);
+                        let start = slice.len() - n_usize;
+                        slice[start..].rotate_right(k);
                     }
                 }
             }
         }
 
-        if stack.len() < outputs.len() {
+        let slice = stack.as_slice();
+        if slice.len() < outputs.len() {
             return false;
         }
-        // ISO 32000-2 §7.10.5: after execution, the top `n` values (or exact `n` values) represent
-        // `y_0 .. y_{n-1}` from bottom to top; PDFium pops `n` values from the top of the stack in
-        // reverse (`outputs[n - 1]` from top down to `outputs[0]`).
-        let base = stack.len() - outputs.len();
-        for (out, &val) in outputs.iter_mut().zip(&stack[base..]) {
+        // ISO 32000-2 §7.10.5: after execution, the top `n` values represent `y_0 .. y_{n-1}` from
+        // bottom to top; PDFium pops `n` values from the top of the stack in reverse
+        // (`outputs[n - 1]` from top down to `outputs[0]`).
+        let base = slice.len() - outputs.len();
+        for (out, &val) in outputs.iter_mut().zip(&slice[base..]) {
             match val {
                 Val::Int(i) => *out = i as f32,
                 Val::Real(r) => *out = sanitize_f32(r),

@@ -1,4 +1,4 @@
-//! Resource caps bounding untrusted PDF image decoding and mask recursion.
+//! Resource caps bounding untrusted PDF image decoding.
 
 /// Resource limits enforced before and during image decoding.
 ///
@@ -13,13 +13,12 @@ pub struct Limits {
     pub max_height: u32,
     /// Maximum total pixel count `width * height` (`134_217_728`, i.e., 128 megapixels by default).
     pub max_pixels: u64,
-    /// Maximum unpacked sample or RGBA8 buffer size in bytes (`256 MiB` by default).
+    /// Maximum unpacked sample, RGBA8, or transient `JPXDecode` `f32` wavelet working-plane buffer
+    /// size (`width * height * channels * 4` bytes) (`256 MiB` by default).
     pub max_sample_bytes: usize,
     /// Maximum byte length read from `Streams::decoded_standard` or subsidiary streams such as
     /// `/JBIG2Globals` (`64 MiB` by default).
     pub max_encoded_bytes: usize,
-    /// Maximum indirect recursion depth when decoding `/Mask` and `/SMask` streams (`4` by default).
-    pub mask_depth: u8,
     /// Resource limits forwarded to [`pdf_color`] when parsing and evaluating `/ColorSpace`.
     pub color: pdf_color::Limits,
     /// Resource limits forwarded to [`pdf_content_streams`] when expanding inline image parameters.
@@ -40,7 +39,6 @@ impl Limits {
         max_pixels: 128 * 1024 * 1024,
         max_sample_bytes: 256 * 1024 * 1024,
         max_encoded_bytes: 64 * 1024 * 1024,
-        mask_depth: 4,
         color: pdf_color::Limits::DEFAULT,
         content: pdf_content_streams::Limits::DEFAULT,
     };
@@ -60,6 +58,4 @@ pub enum LimitKind {
     SampleBytes,
     /// Encoded or standard-filtered stream size exceeded [`Limits::max_encoded_bytes`].
     EncodedBytes,
-    /// Subsidiary `/Mask` or `/SMask` nesting exceeded [`Limits::mask_depth`].
-    MaskDepth,
 }

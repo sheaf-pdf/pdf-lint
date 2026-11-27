@@ -180,16 +180,48 @@ fn answers<S: ByteSource>(pdf: &Pdf<S>, reached: &mut Reached) -> Answers {
             assert_eq!(annots, annots_with, "annots fault sink invariance");
             let _ = page.plan_flatten(pdf_annots::FlattenOpts::DEFAULT);
             let _ = page.plan_flatten(pdf_annots::FlattenOpts::DEFAULT.with_redactions(true));
+            #[cfg(feature = "images")]
+            if let Ok(imgs) = page.images() {
+                for img in imgs.into_iter().take(4) {
+                    if let pdf_gfx::ImageOf::XObject(img_id) = img.of {
+                        let d1 = page.decode_image(img_id).map_err(words);
+                        let mut d_faults = Vec::new();
+                        let d2 = page.decode_image_with(img_id, &mut d_faults).map_err(words);
+                        assert_eq!(d1, d2, "decode_image fault sink invariance");
+                        let _ = page.decode_image_raw(img_id);
+                    }
+                }
+            }
             #[cfg(feature = "raster")]
             {
-                let ropts = pdf_raster::RenderOpts::with_viewport(pdf_raster::Viewport::Page {
-                    width: 16,
-                    rotation: pdf_gfx::Rotation::R0,
-                });
+                let ropts = pdf_raster::RenderOpts::page_width(16);
                 let r1 = page.render(&ropts).map_err(words);
                 let mut r_faults = Vec::new();
                 let r2 = page.render_with(&ropts, &mut r_faults).map_err(words);
                 assert_eq!(r1, r2, "render fault sink invariance");
+
+                for vp in [
+                    pdf_raster::Viewport::Dpi {
+                        dpi: 18.0,
+                        rotation: pdf_gfx::Rotation::R90,
+                    },
+                    pdf_raster::Viewport::Tile {
+                        page_width: 24,
+                        page_height: 24,
+                        x: 8,
+                        y: 8,
+                        w: 16,
+                        h: 16,
+                        rotation: pdf_gfx::Rotation::R0,
+                    },
+                    pdf_raster::Viewport::Custom {
+                        width: 16,
+                        height: 16,
+                        page_to_device: geom.to_view(),
+                    },
+                ] {
+                    let _ = page.render_pixmap(&pdf_raster::RenderOpts::with_viewport(vp));
+                }
             }
             #[cfg(feature = "text-layout")]
             {
@@ -312,8 +344,10 @@ fn small() -> Limits {
         limits.raster.max_pixels = 2048;
         limits.raster.max_pixmap_bytes = 8192;
         limits.raster.max_layer_depth = 4;
-        limits.raster.max_pattern_cells = 32;
+        limits.raster.max_tile_side = 32;
+        limits.raster.max_tile_pixels = 1024;
         limits.raster.max_shading_samples = 4096;
+        limits.raster.max_scene_bytes = 32768;
         limits.raster.max_annots = 16;
     }
     limits.font_budget = 1 << 12;
@@ -368,6 +402,16 @@ pub fn read(data: &[u8]) -> Reached {
     capped.limits = small();
     let pdf_capped = capped.from_bytes(data).expect("bytes in memory open");
     answers(&pdf_capped, &mut Reached::default());
+    #[cfg(feature = "raster")]
+    {
+        use pdf_raster::RenderBackend;
+        let backend = crate::RustBackend::new().with_options(capped);
+        if let Ok(doc) = backend.open_bytes(std::sync::Arc::from(data), None)
+            && doc.page_count() > 0
+        {
+            let _ = doc.render_page(0, &pdf_raster::RenderOpts::page_width(16));
+        }
+    }
     edited(&pdf, &mut reached);
 
     if *pdf.encryption() == Encryption::None {

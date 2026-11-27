@@ -113,8 +113,8 @@ mod rgba;
 mod samples;
 
 pub use encode::{
-    EncodedImage, JpegColorSpace, encode_jpeg, encode_jpeg_bytes, encode_raw_flate,
-    encode_rgba_flate,
+    EncodedImage, JpegColorSpace, encode_jpeg, encode_jpeg_bytes, encode_png_rgba8,
+    encode_raw_flate, encode_rgba_flate,
 };
 pub use error::{EncodeError, Error, ScrubError};
 pub use fault::Fault;

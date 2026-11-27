@@ -148,8 +148,10 @@ impl Limits {
         r.max_pixels = r.max_pixels.min(other.max_pixels);
         r.max_pixmap_bytes = r.max_pixmap_bytes.min(other.max_pixmap_bytes);
         r.max_layer_depth = r.max_layer_depth.min(other.max_layer_depth);
-        r.max_pattern_cells = r.max_pattern_cells.min(other.max_pattern_cells);
+        r.max_tile_side = r.max_tile_side.min(other.max_tile_side);
+        r.max_tile_pixels = r.max_tile_pixels.min(other.max_tile_pixels);
         r.max_shading_samples = r.max_shading_samples.min(other.max_shading_samples);
+        r.max_scene_bytes = r.max_scene_bytes.min(other.max_scene_bytes);
         r.max_annots = r.max_annots.min(other.max_annots);
 
         r.gfx.content = min_content(r.gfx.content, other.gfx.content);
@@ -171,7 +173,6 @@ impl Limits {
             .images
             .max_encoded_bytes
             .min(other.images.max_encoded_bytes);
-        r.images.mask_depth = r.images.mask_depth.min(other.images.mask_depth);
         r.images.color = min_color(r.images.color, other.images.color);
         r.images.content = min_content(r.images.content, other.images.content);
 

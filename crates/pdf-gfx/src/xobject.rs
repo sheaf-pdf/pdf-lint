@@ -29,7 +29,8 @@ pub struct TransparencyGroup<'a> {
     pub isolated: bool,
     /// `/K`: whether the group is a knockout group (`false` when absent).
     pub knockout: bool,
-    /// `/CS`: optional group blending color space object.
+    /// `/CS`: optional group blending color space object (which may be an
+    /// indirect [`Object::as_reference`] requiring resolution via [`Resolve`]).
     pub color_space: Option<&'a Object>,
 }
 
@@ -48,27 +49,29 @@ impl<'o> TransparencyGroup<'o> {
     /// `/S` entry is `/Transparency`.
     #[must_use]
     pub fn from_dict<R: Resolve<'o>>(objects: R, dict: &'o Dict) -> Option<TransparencyGroup<'o>> {
-        let group_val = dict.get(b"Group")?;
-        let group_obj = match group_val.as_reference() {
-            Some(id) => objects.resolve(id)?,
-            None => group_val,
+        let hop = |v: &'o Object| -> Option<&'o Object> {
+            match v.as_reference() {
+                Some(id) => objects.resolve(id),
+                None => Some(v),
+            }
         };
-        let group = group_obj.as_dict()?;
-        let s_val = group.get(b"S")?;
-        let s_obj = match s_val.as_reference() {
-            Some(id) => objects.resolve(id)?,
-            None => s_val,
+        let seen = |v: &'o Object| -> Option<&'o Object> {
+            hop(v).filter(|obj| obj.as_reference().is_none())
         };
-        if s_obj.as_name() != Some(b"Transparency") {
+        let group_step = hop(dict.get(b"Group")?)?;
+        let group_obj = seen(group_step)?;
+        let group = group_obj
+            .as_dict()
+            .or_else(|| group_obj.as_stream().map(|s| &s.dict))?;
+        let s_obj = seen(group.get(b"S")?)?;
+        let s_name = s_obj.as_name().or_else(|| s_obj.as_bytes());
+        if s_name != Some(b"Transparency") {
             return None;
         }
         let bool_at = |key: &[u8]| -> bool {
             group
                 .get(key)
-                .and_then(|v| match v.as_reference() {
-                    Some(id) => objects.resolve(id),
-                    None => Some(v),
-                })
+                .and_then(seen)
                 .and_then(Object::as_bool)
                 .unwrap_or(false)
         };
@@ -358,7 +361,7 @@ impl<'o> XObject<'o> {
             .get(b"Resources")
             .filter(|r| reader.plain_dict_of(r).is_some());
         let oc = dict.get(b"OC").and_then(Object::as_reference);
-        let group = read_transparency_group(reader, dict);
+        let group = TransparencyGroup::from_dict(&reader.objects as &dyn Resolve<'o>, dict);
         if let Some(unreadable) = reader.take_failure() {
             return Err(Error::Unreadable(unreadable));
         }
@@ -371,21 +374,6 @@ impl<'o> XObject<'o> {
             group,
         }))
     }
-}
-
-fn read_transparency_group<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(
-    reader: &ObjReader<'_, O, S>,
-    dict: &'o Dict,
-) -> Option<TransparencyGroup<'o>> {
-    let group = reader.quiet_dict_of_value(dict.get(b"Group")?)?;
-    if reader.quiet_name_or_bytes_for(group, b"S") != Some(b"Transparency") {
-        return None;
-    }
-    Some(TransparencyGroup {
-        isolated: reader.quiet_bool_for(group, b"I").unwrap_or(false),
-        knockout: reader.quiet_bool_for(group, b"K").unwrap_or(false),
-        color_space: group.get(b"CS"),
-    })
 }
 
 fn read_image_xobject<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized>(

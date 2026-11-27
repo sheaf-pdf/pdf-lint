@@ -9,7 +9,8 @@ use pdf_color::pdf_objects::{
     resolve_fn,
 };
 use pdf_color::{
-    EvalOptions, Fault, Function, FunctionKind, Limits, Paint, PreparedSpace, Space, Spaces,
+    EvalOptions, Fault, Function, FunctionKind, Limits, LookupError, Paint, PreparedSpace, Space,
+    Spaces,
 };
 
 fn empty_streams<'o>() -> impl Resolve<'o> + Streams + Copy {
@@ -45,7 +46,7 @@ fn type0_sampled_functions_unpack_all_bit_depths_and_interpolate() {
     assert_eq!(f8.inputs(), 1);
     assert_eq!(f8.outputs(), 2);
 
-    let mid = f8.eval_vec(&[0.25], &Limits::DEFAULT).unwrap();
+    let mid = f8.eval_vec(&[0.25]).unwrap();
     assert!(
         (mid[0] - 0.6).abs() < 0.01 && (mid[1] - 0.3).abs() < 0.01,
         "{mid:?}"
@@ -71,7 +72,7 @@ fn type0_sampled_functions_unpack_all_bit_depths_and_interpolate() {
     )
     .unwrap()
     .unwrap();
-    let center = f4.eval_vec(&[0.5, 0.5], &Limits::DEFAULT).unwrap();
+    let center = f4.eval_vec(&[0.5, 0.5]).unwrap();
     assert!((center[0] - 0.5).abs() < 1e-5, "{center:?}");
 
     // 16-bps and 1-bps unpacking checks.
@@ -94,8 +95,8 @@ fn type0_sampled_functions_unpack_all_bit_depths_and_interpolate() {
         let func = Function::read(empty_streams(), &s, Rules::Iso, &Limits::DEFAULT, &mut ())
             .unwrap()
             .unwrap();
-        assert_eq!(func.eval_vec(&[0.0], &Limits::DEFAULT), Some(vec![0.0]));
-        assert!((func.eval_vec(&[1.0], &Limits::DEFAULT).unwrap()[0] - want_hi).abs() < 1e-6);
+        assert_eq!(func.eval_vec(&[0.0]), Some(vec![0.0]));
+        assert!((func.eval_vec(&[1.0]).unwrap()[0] - want_hi).abs() < 1e-6);
     }
 
     // Short stream reports `Fault::SampleDataLength` and returns `None`.
@@ -161,14 +162,11 @@ fn type2_and_type3_exponential_and_stitching_functions() {
     .unwrap();
     assert!(faults.is_empty(), "{faults:?}");
     assert_eq!(f.kind(), FunctionKind::Stitching);
-    assert_eq!(
-        f.eval_vec(&[0.25], &Limits::DEFAULT),
-        Some(vec![0.25, 0.75])
-    );
+    assert_eq!(f.eval_vec(&[0.25]), Some(vec![0.25, 0.75]));
     // At boundary x == 0.5, selects second subfunction at encoded 0.0 -> `[0.5, 0.5]`.
-    assert_eq!(f.eval_vec(&[0.5], &Limits::DEFAULT), Some(vec![0.5, 0.5]));
+    assert_eq!(f.eval_vec(&[0.5]), Some(vec![0.5, 0.5]));
     // At x == 0.75, encoded = 0.5 in `f_high` (`N = 2.0` -> `0.5^2 = 0.25`) -> `0.5 + 0.25 * 0.5 = 0.625`.
-    let hi = f.eval_vec(&[0.75], &Limits::DEFAULT).unwrap();
+    let hi = f.eval_vec(&[0.75]).unwrap();
     assert!(
         (hi[0] - 0.625).abs() < 1e-6 && (hi[1] - 0.375).abs() < 1e-6,
         "{hi:?}"
@@ -203,7 +201,7 @@ fn type4_postscript_calculator_covers_table_42_and_enforces_caps() {
         .unwrap()
         .unwrap();
         assert!(faults.is_empty(), "{faults:?}");
-        f.eval_vec(x, &Limits::DEFAULT)
+        f.eval_vec(x)
     };
 
     // Trig in degrees (`sin(90) = 1`, `cos(180) = -1`, `-1 0 atan = 270`).
@@ -310,7 +308,7 @@ fn default_decode_and_lookup_extraction_helpers() {
             idx.lookup_bytes(&store_idx, 64).unwrap().as_deref(),
             Some(&b"\x10\x20\x30\x40\x50\x60"[..])
         );
-        assert_eq!(idx.lookup_bytes(&store_idx, 3).unwrap_err().why, Why::Limit);
+        assert_eq!(idx.lookup_bytes(&store_idx, 3), Err(LookupError::Limit));
     } else {
         panic!("expected Space::Indexed");
     }
@@ -344,14 +342,8 @@ fn iso_vs_pdfium_color_policies_and_special_colorants() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(
-        iso_cg.eval_srgb8(&[0.5], &Limits::DEFAULT),
-        Some([188, 188, 188])
-    );
-    assert_eq!(
-        pdfium_cg.eval_srgb8(&[0.5], &Limits::DEFAULT),
-        Some([128, 128, 128])
-    );
+    assert_eq!(iso_cg.eval_srgb8(&[0.5]), Some([188, 188, 188]));
+    assert_eq!(pdfium_cg.eval_srgb8(&[0.5]), Some([128, 128, 128]));
 
     // 2. `/DefaultGray` substitution in `Rules::Iso` (`EvalOptions::from_spaces`).
     let resources = Object::from(dict! {
@@ -371,13 +363,17 @@ fn iso_vs_pdfium_color_policies_and_special_colorants() {
     )
     .unwrap()
     .unwrap();
+    assert_eq!(prep_def_gray.eval_srgb8(&[0.5]), Some([188, 188, 188]));
     assert_eq!(
-        prep_def_gray.eval_srgb8(&[0.5], &Limits::DEFAULT),
-        Some([188, 188, 188])
+        prep_def_gray
+            .eval_with_rules(&[0.5], Rules::Pdfium)
+            .unwrap()
+            .srgb8(),
+        Some([128, 128, 128])
     );
 
     // 3. `Separation /None` returns `Paint::None`; `Separation /All` returns `1 - t` under ISO vs
-    //    tint transform under PDFium.
+    //    tint transform under PDFium (and `eval_with_rules` switches cleanly between both!).
     let tint_red = Object::from(dict! {
         "FunctionType" => 2,
         "Domain" => vec![Object::from(0.0), Object::from(1.0)],
@@ -400,12 +396,9 @@ fn iso_vs_pdfium_color_policies_and_special_colorants() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(prep_none.eval(&[0.7], &Limits::DEFAULT), Some(Paint::None));
+    assert_eq!(prep_none.eval(&[0.7]), Some(Paint::None));
     assert_eq!(
-        prep_none
-            .eval(&[0.7], &Limits::DEFAULT)
-            .unwrap()
-            .srgb8_over([51, 102, 153]),
+        prep_none.eval(&[0.7]).unwrap().srgb8_over([51, 102, 153]),
         [51, 102, 153]
     );
 
@@ -433,13 +426,21 @@ fn iso_vs_pdfium_color_policies_and_special_colorants() {
     )
     .unwrap()
     .unwrap();
+    assert_eq!(prep_all_iso.eval_srgb8(&[0.7]), Some([77, 77, 77]));
+    assert_eq!(prep_all_pdfium.eval_srgb8(&[0.7]), Some([255, 77, 77]));
     assert_eq!(
-        prep_all_iso.eval_srgb8(&[0.7], &Limits::DEFAULT),
-        Some([77, 77, 77])
+        prep_all_iso
+            .eval_with_rules(&[0.7], Rules::Pdfium)
+            .unwrap()
+            .srgb8(),
+        Some([255, 77, 77])
     );
     assert_eq!(
-        prep_all_pdfium.eval_srgb8(&[0.7], &Limits::DEFAULT),
-        Some([255, 77, 77])
+        prep_all_pdfium
+            .eval_with_rules(&[0.7], Rules::Iso)
+            .unwrap()
+            .srgb8(),
+        Some([77, 77, 77])
     );
 }
 
@@ -488,9 +489,7 @@ fn icc_profiles_convert_via_moxcms_and_corrupt_profiles_fall_back_with_fault() {
     .unwrap()
     .unwrap();
     assert!(faults.is_empty(), "{faults:?}");
-    let p3_rgb = prep_p3
-        .eval_srgb8(&[0.8, 0.2, 0.1], &Limits::DEFAULT)
-        .unwrap();
+    let p3_rgb = prep_p3.eval_srgb8(&[0.8, 0.2, 0.1]).unwrap();
     assert!(
         p3_rgb[0] > 210 && p3_rgb[1] < 45,
         "Display P3 wider red gamut: {p3_rgb:?}"
@@ -508,7 +507,7 @@ fn icc_profiles_convert_via_moxcms_and_corrupt_profiles_fall_back_with_fault() {
     .unwrap()
     .unwrap();
     assert!(faults.is_empty(), "{faults:?}");
-    let gray_rgb = prep_gray.eval_srgb8(&[0.5], &Limits::DEFAULT).unwrap();
+    let gray_rgb = prep_gray.eval_srgb8(&[0.5]).unwrap();
     assert!((i16::from(gray_rgb[0]) - 145).abs() <= 2, "{gray_rgb:?}");
 
     // Corrupt ICC profile emits `Fault::IccProfile` and falls back to `/Alternate` (`DeviceRGB`).
@@ -524,22 +523,33 @@ fn icc_profiles_convert_via_moxcms_and_corrupt_profiles_fall_back_with_fault() {
     .unwrap();
     assert_eq!(faults.len(), 1);
     assert_eq!(faults[0].1, Fault::IccProfile);
-    assert_eq!(
-        prep_bad.eval_srgb8(&[0.2, 0.4, 0.8], &Limits::DEFAULT),
-        Some([51, 102, 204])
-    );
+    assert_eq!(prep_bad.eval_srgb8(&[0.2, 0.4, 0.8]), Some([51, 102, 204]));
 
-    // `/OutputIntents` destination profile overrides unprofiled `DeviceRGB` under `Rules::Iso`.
+    // `/OutputIntents` destination profile overrides unprofiled `DeviceRGB` under `Rules::Iso`,
+    // while `eval_with_rules(..., Rules::Pdfium)` evaluates unprofiled `DeviceRGB`.
     let mut opts_oi = EvalOptions::ISO;
     opts_oi.output_intent_profile = Some(&p3_bytes);
     let dev_rgb = Object::name("DeviceRGB");
     let prep_oi = PreparedSpace::prepare(store, &dev_rgb, &opts_oi, &Limits::DEFAULT, &mut ())
         .unwrap()
         .unwrap();
+    assert_eq!(prep_oi.eval_srgb8(&[0.8, 0.2, 0.1]), Some(p3_rgb));
     assert_eq!(
-        prep_oi.eval_srgb8(&[0.8, 0.2, 0.1], &Limits::DEFAULT),
-        Some(p3_rgb)
+        prep_oi
+            .eval_with_rules(&[0.8, 0.2, 0.1], Rules::Pdfium)
+            .unwrap()
+            .srgb8(),
+        Some([204, 51, 26])
     );
+
+    // Direct `from_icc_bytes` and batched `eval_pixels_srgb8` match per-pixel evaluation.
+    let from_bytes =
+        PreparedSpace::from_icc_bytes(&p3_bytes, 3, &EvalOptions::ISO, &Limits::DEFAULT, &mut ())
+            .unwrap();
+    assert_eq!(from_bytes.eval_srgb8(&[0.8, 0.2, 0.1]), Some(p3_rgb));
+    let mut batch_out = [[0_u8; 3]; 2];
+    assert!(from_bytes.eval_pixels_srgb8(&[0.8, 0.2, 0.1, 0.0, 0.0, 0.0], &mut batch_out, [0; 3]));
+    assert_eq!(batch_out, [p3_rgb, [0, 0, 0]]);
 }
 
 #[test]
@@ -581,10 +591,7 @@ fn icc_based_at_space_depth_limit_never_panics_and_stitching_shares_sample_budge
     )
     .unwrap()
     .unwrap();
-    assert_eq!(
-        prep_zero.eval_srgb8(&[1.0, 0.0, 0.0], &zero_depth),
-        Some([255, 0, 0])
-    );
+    assert_eq!(prep_zero.eval_srgb8(&[1.0, 0.0, 0.0]), Some([255, 0, 0]));
 
     // `/DefaultRGB` pointing to `ICCBased` with `space_depth = 1` reaches `prepare_icc`
     // at `depth == 1 == limits.space_depth`, where `depth + 1 > space_depth`: must not panic!
@@ -601,10 +608,7 @@ fn icc_based_at_space_depth_limit_never_panics_and_stitching_shares_sample_budge
     )
     .unwrap()
     .unwrap();
-    assert_eq!(
-        prep_def.eval_srgb8(&[1.0, 0.0, 0.0], &depth_one),
-        Some([255, 0, 0])
-    );
+    assert_eq!(prep_def.eval_srgb8(&[1.0, 0.0, 0.0]), Some([255, 0, 0]));
 
     // Build a 70-deep chain of `ICCBased` `/Alternate`s exceeding `Limits::DEFAULT.space_depth` (64).
     let mut chain_store: BTreeMap<ObjectId, Object> = BTreeMap::new();
@@ -653,10 +657,7 @@ fn icc_based_at_space_depth_limit_never_panics_and_stitching_shares_sample_budge
     // `Space::read` or `PreparedSpace::prepare` caps the deep chain cleanly without panicking;
     // if prepared, evaluating must also succeed without panicking.
     if let Some(p) = prep_chain {
-        assert_eq!(
-            p.eval_srgb8(&[0.0, 1.0, 0.0], &Limits::DEFAULT),
-            Some([0, 255, 0])
-        );
+        assert_eq!(p.eval_srgb8(&[0.0, 1.0, 0.0]), Some([0, 255, 0]));
     }
 
     // 2. Stitching (Type 3) function referencing a sampled (Type 0) stream 100 times
@@ -763,10 +764,7 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
         PreparedSpace::prepare(streams, &sep, &EvalOptions::ISO, &Limits::DEFAULT, &mut ())
             .unwrap()
             .unwrap();
-    assert_eq!(
-        prep_sep.eval_srgb8(&[1.0], &Limits::DEFAULT),
-        Some([255, 128, 0])
-    );
+    assert_eq!(prep_sep.eval_srgb8(&[1.0]), Some([255, 128, 0]));
 
     // 2. ISO 32000-2 §8.6.5.6 `/Default*` substitution:
     //    - `Lab` is FORBIDDEN as `/DefaultRGB` (falls back to unprofiled `DeviceRGB`).
@@ -789,10 +787,7 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
     .unwrap()
     .unwrap();
     // Unprofiled DeviceRGB `[0.0, 1.0, 0.0]` -> `[0, 255, 0]` (whereas Lab `[0, 1, 0]` would be near black!).
-    assert_eq!(
-        prep_rgb.eval_srgb8(&[0.0, 1.0, 0.0], &Limits::DEFAULT),
-        Some([0, 255, 0])
-    );
+    assert_eq!(prep_rgb.eval_srgb8(&[0.0, 1.0, 0.0]), Some([0, 255, 0]));
 
     let sep_gray = Object::from(vec![
         Object::name("Separation"),
@@ -817,10 +812,7 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(
-        prep_def_gray.eval_srgb8(&[1.0], &Limits::DEFAULT),
-        Some([255, 0, 0])
-    );
+    assert_eq!(prep_def_gray.eval_srgb8(&[1.0]), Some([255, 0, 0]));
 
     // 3. Tiny non-zero domain (`[0.0, 1e-8]`) and stitching boundaries (`x == Bounds[i]` and `x == Domain[1]`),
     //    plus indirect `ObjectId` stream decoding on Type 0 and Type 4 functions.
@@ -894,7 +886,7 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
     )
     .unwrap()
     .unwrap();
-    let mid = tiny_fn.eval_vec(&[0.5e-8], &Limits::DEFAULT).unwrap()[0];
+    let mid = tiny_fn.eval_vec(&[0.5e-8]).unwrap()[0];
     assert!(
         (mid - 0.5).abs() < 0.02,
         "tiny domain [0, 1e-8] must interpolate to ~0.5 at midpoint, got {mid}"
@@ -936,12 +928,9 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
     )
     .unwrap()
     .unwrap();
-    assert!((st_fn.eval_vec(&[0.5], &Limits::DEFAULT).unwrap()[0] - 0.7).abs() < 1e-5);
-    assert!((st_fn.eval_vec(&[1.0], &Limits::DEFAULT).unwrap()[0] - 0.9).abs() < 1e-5);
+    assert!((st_fn.eval_vec(&[0.5]).unwrap()[0] - 0.7).abs() < 1e-5);
+    assert!((st_fn.eval_vec(&[1.0]).unwrap()[0] - 0.9).abs() < 1e-5);
 
-    // PostScript overflow promotion + negative `roll` (`[10, 20, 30] 3 -1 roll` -> `[20, 30, 10]`, top is `10`?
-    // Wait: `-1` roll shifts left by 1 (`k = (-1).rem_euclid(3) = 2` right-rotates `[10, 20, 30]` -> `[20, 30, 10]`,
-    // `pop pop` leaves `20`, `2147483648.0 + 20.0`!).
     let ps_ok = Function::read(
         by_id_streams,
         &Object::reference(21),
@@ -951,7 +940,7 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
     )
     .unwrap()
     .unwrap();
-    let ps_val = ps_ok.eval_vec(&[0.0], &Limits::DEFAULT).unwrap()[0];
+    let ps_val = ps_ok.eval_vec(&[0.0]).unwrap()[0];
     assert!(ps_val > 2.0e9);
 
     let ps_min_idiv = Function::read(
@@ -963,7 +952,7 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
     )
     .unwrap()
     .unwrap();
-    let _ = ps_min_idiv.eval_vec(&[0.0], &Limits::DEFAULT);
+    let _ = ps_min_idiv.eval_vec(&[0.0]);
 
     let ps_rec = Function::read(
         by_id_streams,
@@ -974,5 +963,71 @@ fn tint_surplus_outputs_default_space_families_tiny_domains_and_ps_edges() {
     )
     .unwrap()
     .unwrap();
-    assert!(ps_rec.eval_vec(&[0.0], &Limits::DEFAULT).is_none());
+    assert!(ps_rec.eval_vec(&[0.0]).is_none());
+
+    // 4. `Rules::Pdfium` vs `Rules::Iso` on Type 4 PostScript float-stack coercion:
+    //    Input `7.8` is pushed as a real; `{ 2 idiv }` and `{ 3.0 mod }` and `{ 1.0 { 10 } { 20 } ifelse }`
+    //    fail strict Table 42 type checks under `Rules::Iso` and coerce truncated ints / truthy floats
+    //    under `Rules::Pdfium` (including via `PreparedSpace::eval_with_rules`!).
+    let ps_float_int = Object::from(Stream::new(
+        dict! {
+            "FunctionType" => 4,
+            "Domain" => vec![Object::from(0.0), Object::from(10.0)],
+            "Range" => vec![Object::from(0.0), Object::from(10.0)],
+        },
+        b"{ dup 2 idiv exch 3.0 mod add 1.0 { 0.5 add } { 9.0 } ifelse }".to_vec(),
+    ));
+    let fn_iso = Function::read(
+        empty_streams(),
+        &ps_float_int,
+        Rules::Iso,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    let fn_pdfium = Function::read(
+        empty_streams(),
+        &ps_float_int,
+        Rules::Pdfium,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(fn_iso.eval_vec(&[7.8]), None);
+    // `7.8`: `7 / 2 = 3`, `7 % 3 = 1`, `3 + 1 + 0.5 = 4.5`.
+    assert_eq!(fn_pdfium.eval_vec(&[7.8]), Some(vec![4.5]));
+
+    // `DeviceN [/None]` with a Type 4 tint that uses float `idiv`:
+    let ps_tint = Object::from(Stream::new(
+        dict! {
+            "FunctionType" => 4,
+            "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+            "Range" => vec![Object::from(0.0), Object::from(1.0)],
+        },
+        b"{ 10.0 mul 2 idiv 5.0 div }".to_vec(),
+    ));
+    let dn_none = Object::from(vec![
+        Object::name("DeviceN"),
+        Object::from(vec![Object::name("None")]),
+        Object::name("DeviceGray"),
+        ps_tint,
+    ]);
+    let prep_dn = PreparedSpace::prepare(
+        empty_streams(),
+        &dn_none,
+        &EvalOptions::PDFIUM,
+        &Limits::DEFAULT,
+        &mut (),
+    )
+    .unwrap()
+    .unwrap();
+    // Under PDFium: evaluates tint (`0.7 * 10 = 7.0`, `7 idiv 2 = 3`, `3 / 5 = 0.6` -> 153).
+    assert_eq!(prep_dn.eval_srgb8(&[0.7]), Some([153, 153, 153]));
+    // Overriding to `Rules::Iso` on the same `PreparedSpace` yields `Paint::None`!
+    assert_eq!(
+        prep_dn.eval_with_rules(&[0.7], Rules::Iso),
+        Some(Paint::None)
+    );
 }

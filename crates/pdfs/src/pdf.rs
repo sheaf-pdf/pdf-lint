@@ -278,6 +278,15 @@ impl<S: ByteSource> Pdf<S> {
         pdf_semantics::catalog(&self.reading, trailer)?.ok_or(Error::NoCatalog)
     }
 
+    #[cfg(any(feature = "images", feature = "raster"))]
+    pub(crate) fn optional_catalog(&self) -> Result<Option<&Dict>, Error> {
+        match self.catalog() {
+            Ok(dict) => Ok(Some(dict)),
+            Err(Error::NoCatalog) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// What it says of itself, its document information dictionary
     /// (ISO 32000-2, 14.3.3), read typed, its text decoded by its rules;
     /// none where its trailer has none. Nothing departing from the clause is
@@ -1181,13 +1190,69 @@ impl<'a, S: ByteSource> Page<'a, S> {
             .search(query, opts))
     }
 
-    /// Decodes an indirect Image XObject `image_id` referenced on this page
-    /// into straight `sRGB` `RGBA8` ([`pdf_images::RgbaImage`], `images`
-    /// feature), without collecting non-fatal faults.
+    /// Lists every Image XObject and inline image drawn on the page (including
+    /// inside Form XObjects) in content-stream drawing order, without decoding
+    /// pixel samples ([`page::images`](fn@page::images)).
+    ///
+    /// Pass any `ImageOf::XObject(id)` entry to [`Page::decode_image`] or
+    /// [`Page::decode_image_raw`] (`images` feature) to decode its pixels.
     ///
     /// # Errors
     ///
-    /// As [`page::decode_image`](fn@page::decode_image) fails.
+    /// As [`Page::interpret`] fails.
+    pub fn images(&self) -> Result<Vec<pdf_gfx::ImageDrawn>, Error> {
+        self.images_with(&mut ())
+    }
+
+    /// [`Page::images`], reporting recoverable ISO 32000-2 departures to `sink`
+    /// ([`pdf_gfx::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::images`] fails.
+    pub fn images_with<K: Sink<pdf_gfx::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Vec<pdf_gfx::ImageDrawn>, Error> {
+        let pdf = self.pdf;
+        page::images_with(&pdf.reading, pdf.fonts(), self.page, &pdf.limits, sink)
+    }
+
+    /// Decodes any indirect Image XObject stream `image_id` in the document
+    /// into straight `sRGB` `RGBA8` ([`pdf_images::RgbaImage`], `images`
+    /// feature), using this page's `/Resources` for `/Default*` color spaces
+    /// and the file's catalog for `/OutputIntents` (under [`Rules::Iso`]),
+    /// without collecting non-fatal faults.
+    ///
+    /// Discover image `ObjectId`s drawn on the page via [`Page::images`], and
+    /// call [`RgbaImage::to_png`](pdf_images::RgbaImage::to_png) to encode PNG
+    /// bytes.
+    ///
+    /// ```
+    /// use pdfs::pdf_images::{JpegColorSpace, encode_jpeg};
+    /// use pdfs::prelude::*;
+    ///
+    /// let mut doc = Document::new();
+    /// let jpg = encode_jpeg(&[240, 60, 40], 1, 1, JpegColorSpace::Rgb, 95).unwrap();
+    /// let img_id = doc.structure_mut().add(Object::from(jpg));
+    /// let mut canvas = Canvas::new();
+    /// canvas.draw_xobject(Res::written(img_id), Matrix::new(50.0, 0.0, 0.0, 50.0, 10.0, 10.0));
+    /// *doc.add_page(Rect::new(0.0, 0.0, 100.0, 100.0)) = canvas.into_writer();
+    ///
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    /// let page = pdf.pages().unwrap().get(0).unwrap();
+    /// let drawn = page.images().unwrap();
+    /// let ImageOf::XObject(id) = drawn[0].of else { unreachable!() };
+    /// let rgba = page.decode_image(id).unwrap();
+    /// assert_eq!((rgba.width(), rgba.height()), (1, 1));
+    /// assert!(rgba.to_png().unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unreadable`] if the catalog or page `/Resources` cannot be read
+    /// (locked, capped, or I/O failure), or [`Error::Images`] if `image_id` is
+    /// missing, malformed, exceeds [`Limits::images`], or fails to decode.
     #[cfg(feature = "images")]
     pub fn decode_image(&self, image_id: ObjectId) -> Result<pdf_images::RgbaImage, Error> {
         self.decode_image_with(image_id, &mut ())
@@ -1206,7 +1271,46 @@ impl<'a, S: ByteSource> Page<'a, S> {
         sink: &mut K,
     ) -> Result<pdf_images::RgbaImage, Error> {
         let pdf = self.pdf;
+        let catalog = pdf.optional_catalog()?;
         page::decode_image_with(
+            &pdf.reading,
+            catalog,
+            self.page,
+            image_id,
+            pdf.rules,
+            &pdf.limits,
+            sink,
+        )
+    }
+
+    /// Decodes any indirect Image XObject stream `image_id` into native
+    /// unpacked samples ([`pdf_images::RawImage`], `images` feature) before
+    /// color conversion or mask compositing, without collecting non-fatal
+    /// faults.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Images`] if `image_id` is missing, malformed, exceeds
+    /// [`Limits::images`], or fails to decode.
+    #[cfg(feature = "images")]
+    pub fn decode_image_raw(&self, image_id: ObjectId) -> Result<pdf_images::RawImage, Error> {
+        self.decode_image_raw_with(image_id, &mut ())
+    }
+
+    /// [`Page::decode_image_raw`], reporting recoverable ISO 32000-2 departures
+    /// to `sink` ([`pdf_images::Fault`], `images` feature).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::decode_image_raw`] fails.
+    #[cfg(feature = "images")]
+    pub fn decode_image_raw_with<K: Sink<pdf_images::Fault> + ?Sized>(
+        &self,
+        image_id: ObjectId,
+        sink: &mut K,
+    ) -> Result<pdf_images::RawImage, Error> {
+        let pdf = self.pdf;
+        page::decode_image_raw_with(
             &pdf.reading,
             self.page,
             image_id,
@@ -1217,13 +1321,58 @@ impl<'a, S: ByteSource> Page<'a, S> {
     }
 
     /// Rasterizes this page into a [`Pixmap`](pdf_raster::Pixmap) (`raster`
-    /// feature) under `opts`, the file's [`Rules`], and the narrower of
-    /// `opts.limits` and [`Limits::raster`], reusing [`Pdf::render_cache`] and
-    /// [`Pdf::font_fallback`] without collecting non-fatal faults.
+    /// feature), discarding [`RenderSummary`](pdf_raster::RenderSummary) for
+    /// concise call sites (e.g. `page.render_pixmap(&RenderOpts::dpi(150.0))?.to_png()`).
+    ///
+    /// As with [`Page::render`], [`Pdf::rules`] overrides `opts.rules` and
+    /// resource caps take the element-wise narrower of [`Pdf::limits`] and
+    /// `opts.limits`.
     ///
     /// # Errors
     ///
-    /// As [`page::render`](fn@page::render) fails.
+    /// As [`Page::render`] fails.
+    #[cfg(feature = "raster")]
+    pub fn render_pixmap(
+        &self,
+        opts: &pdf_raster::RenderOpts,
+    ) -> Result<pdf_raster::Pixmap, Error> {
+        Ok(self.render(opts)?.0)
+    }
+
+    /// Rasterizes this page into `(Pixmap, RenderSummary)` (`raster` feature)
+    /// under `opts`, reusing [`Pdf::render_cache`] and [`Pdf::font_fallback`]
+    /// without collecting non-fatal faults.
+    ///
+    /// **Policy & limits override:** [`Pdf::rules`] always overrides
+    /// `opts.rules`, and resource limits take the element-wise narrower of
+    /// [`Pdf::limits`] and `opts.limits` so customizing a single cap on `opts`
+    /// never widens the caps the [`Pdf`] was opened with. Call
+    /// [`Pixmap::to_png`](pdf_raster::Pixmap::to_png) to encode PNG bytes, or
+    /// [`Page::render_pixmap`] when [`RenderSummary`](pdf_raster::RenderSummary)
+    /// is not needed.
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// let mut doc = Document::new();
+    /// let p = doc.add_page(Rect::new(0.0, 0.0, 72.0, 72.0));
+    /// p.fill_color(Color::rgb8([220, 40, 30]));
+    /// p.rect(0.0, 0.0, 72.0, 72.0);
+    /// p.paint(Paint::Fill);
+    ///
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    /// let page = pdf.pages().unwrap().get(0).unwrap();
+    /// let (pixmap, summary) = page.render(&RenderOpts::dpi(72.0)).unwrap();
+    /// assert_eq!((pixmap.width(), pixmap.height()), (72, 72));
+    /// assert_eq!(pixmap.pixel_rgba8(36, 36), Some([220, 40, 30, 255]));
+    /// assert!(!summary.approximated);
+    /// assert!(pixmap.to_png().unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unreadable`] if the catalog cannot be read, or
+    /// [`Error::Raster`] as [`page::render`](fn@page::render) fails.
     #[cfg(feature = "raster")]
     pub fn render(
         &self,
@@ -1245,7 +1394,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         sink: &mut K,
     ) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error> {
         let pdf = self.pdf;
-        let catalog = pdf.catalog().ok();
+        let catalog = pdf.optional_catalog()?;
         page::render_with(
             &pdf.reading,
             catalog,
@@ -1299,7 +1448,12 @@ impl<S: ByteSource> pdf_raster::RenderedDoc for Pdf<S> {
                 page_count: tbl.len(),
             });
         };
-        let catalog = self.catalog().ok();
+        let catalog = self.optional_catalog().map_err(|err| match err {
+            Error::Unreadable(u) if u.why == pdf_objects::Why::Locked => {
+                pdf_raster::BackendError::Locked
+            }
+            other => pdf_raster::BackendError::custom(other),
+        })?;
         page::render_with(
             &self.reading,
             catalog,

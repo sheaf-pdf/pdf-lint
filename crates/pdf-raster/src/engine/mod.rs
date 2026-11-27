@@ -7,20 +7,23 @@ pub(crate) mod ops;
 pub(crate) mod sinks;
 pub(crate) mod stream;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use pdf_content_streams::{Concat, FillRule};
 use pdf_gfx::{BlendState, Mark, MarkProps, PageGeom, Point, Rect, Seg, TransparencyGroup};
 use pdf_objects::Why;
-use pdf_objects::fault::Sink;
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams};
-use pdf_semantics::ocg::{OcState, read as read_oc_properties};
+use pdf_semantics::ocg::{OcEvent, OcState, read as read_oc_properties};
 use pdf_semantics::pages::{Inheritable, Page};
 
 use crate::canvas2d::{Canvas2d, segs_to_bez_path};
 use crate::engine::annots::draw_page_annotations;
+use crate::engine::mask::SoftMaskCacheKey;
 use crate::engine::sinks::{Narrow, SemSinkAdapter};
 use crate::engine::stream::render_stream_into;
 use crate::error::Error;
@@ -28,10 +31,41 @@ use crate::fallback::{FontFallback, RenderCache};
 use crate::fault::Fault;
 use crate::limits::LimitKind;
 use crate::opts::{RenderMedium, RenderOpts, RenderSummary};
+use crate::paint::{ActiveColorKey, resolve_opt};
 use crate::phases::phase;
 use crate::pixmap::Pixmap;
 
 pub(crate) type TileCacheKey = (ObjectId, u32, u32, u8, Option<[u8; 4]>);
+pub(crate) type ImageCacheKey = (ObjectId, Option<[u8; 4]>);
+pub(crate) type ColorCacheKey = (usize, usize, ActiveColorKey);
+
+#[inline]
+pub(crate) fn check_cancelled(opts: &RenderOpts) -> Result<(), Error> {
+    if opts
+        .stop
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
+}
+
+pub(crate) fn is_srgb_group_cs<'o, R: Resolve<'o> + Copy>(objects: R, cs_obj: &'o Object) -> bool {
+    let Ok(Some(resolved)) = resolve_opt(objects, cs_obj) else {
+        return true;
+    };
+    if let Some(name) = resolved.as_name() {
+        return matches!(name, b"DeviceRGB");
+    }
+    if let Some(arr) = resolved.as_array()
+        && let Some(first) = arr.first()
+        && let Ok(Some(head)) = resolve_opt(objects, first)
+    {
+        return head.as_name() == Some(b"DeviceRGB");
+    }
+    false
+}
 
 /// Immutable shared context threaded through stream, soft-mask, pattern, text,
 /// and annotation sub-renders.
@@ -73,8 +107,14 @@ pub(crate) struct RenderState {
     pub(crate) decompressed_left: usize,
     pub(crate) subrenders_left: usize,
     pub(crate) offscreen_pixels_left: u64,
+    pub(crate) scene_bytes_used: usize,
     pub(crate) active_streams: Vec<ObjectId>,
     pub(crate) tile_cache: HashMap<TileCacheKey, Arc<vello_cpu::Pixmap>>,
+    pub(crate) image_cache: HashMap<ImageCacheKey, Arc<pdf_images::RgbaImage>>,
+    pub(crate) smask_cache: HashMap<SoftMaskCacheKey, Option<vello_cpu::Mask>>,
+    pub(crate) type3_stream_cache: HashMap<ObjectId, Arc<[u8]>>,
+    pub(crate) color_cache: HashMap<ColorCacheKey, Option<pdf_color::PreparedSpace>>,
+    pub(crate) warned_builtin_fonts: HashSet<usize>,
 }
 
 impl RenderState {
@@ -90,8 +130,14 @@ impl RenderState {
             decompressed_left: opts.limits.gfx.decompressed,
             subrenders_left: opts.limits.gfx.operators.max(1),
             offscreen_pixels_left: opts.limits.max_pixels.saturating_mul(4),
+            scene_bytes_used: 0,
             active_streams: Vec::new(),
             tile_cache: HashMap::new(),
+            image_cache: HashMap::new(),
+            smask_cache: HashMap::new(),
+            type3_stream_cache: HashMap::new(),
+            color_cache: HashMap::new(),
+            warned_builtin_fonts: HashSet::new(),
         }
     }
 
@@ -104,13 +150,40 @@ impl RenderState {
         lim
     }
 
-    pub(crate) fn charge_offscreen_pixels(&mut self, width: u32, height: u32) -> Result<(), Error> {
+    pub(crate) fn charge_offscreen_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        max_scene_bytes: usize,
+    ) -> Result<(), Error> {
         let px = u64::from(width) * u64::from(height);
         if px > self.offscreen_pixels_left {
             return Err(Error::Limit(LimitKind::Pixels));
         }
+        let bytes = px
+            .checked_mul(4)
+            .and_then(|b| usize::try_from(b).ok())
+            .ok_or(Error::Limit(LimitKind::SceneBytes))?;
+        if bytes > max_scene_bytes {
+            return Err(Error::Limit(LimitKind::SceneBytes));
+        }
         self.offscreen_pixels_left -= px;
         Ok(())
+    }
+
+    pub(crate) fn note_cached_bytes(&mut self, bytes: usize, max_scene_bytes: usize) -> bool {
+        if bytes > max_scene_bytes {
+            return false;
+        }
+        if self.scene_bytes_used.saturating_add(bytes) > max_scene_bytes {
+            self.tile_cache.clear();
+            self.image_cache.clear();
+            self.smask_cache.clear();
+            self.type3_stream_cache.clear();
+            self.scene_bytes_used = 0;
+        }
+        self.scene_bytes_used += bytes;
+        true
     }
 }
 
@@ -128,12 +201,176 @@ impl DerefMut for RenderState {
     }
 }
 
+/// Builder-style zero-I/O rasterizer binding [`RenderOpts`] with an optional
+/// shared [`RenderCache`] and [`FontFallback`] provider.
+#[derive(Clone, Copy)]
+pub struct Renderer<'a> {
+    opts: &'a RenderOpts,
+    cache: Option<&'a RenderCache>,
+    fallback: Option<&'a dyn FontFallback>,
+}
+
+impl fmt::Debug for Renderer<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Renderer")
+            .field("opts", &self.opts)
+            .field("has_cache", &self.cache.is_some())
+            .field("has_fallback", &self.fallback.is_some())
+            .finish()
+    }
+}
+
+impl<'a> Renderer<'a> {
+    /// Creates a [`Renderer`] configured with `opts`.
+    #[must_use]
+    pub const fn new(opts: &'a RenderOpts) -> Self {
+        Self {
+            opts,
+            cache: None,
+            fallback: None,
+        }
+    }
+
+    /// Reuses a cross-page [`RenderCache`] across renders.
+    #[must_use]
+    pub const fn with_cache(mut self, cache: &'a RenderCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Attaches a [`FontFallback`] provider for unembedded fonts.
+    #[must_use]
+    pub const fn with_fallback(mut self, fallback: &'a dyn FontFallback) -> Self {
+        self.fallback = Some(fallback);
+        self
+    }
+
+    /// Attaches an optional [`FontFallback`] provider.
+    #[must_use]
+    pub const fn with_fallback_opt(mut self, fallback: Option<&'a dyn FontFallback>) -> Self {
+        self.fallback = fallback;
+        self
+    }
+
+    /// Rasterizes `page` without collecting non-fatal [`Fault`]s.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] on invalid viewports, cancellation, exceeded
+    /// [`crate::Limits`], or unreadable objects/streams.
+    pub fn render_page<'o, O>(
+        &self,
+        objects: O,
+        catalog: Option<&'o Dict>,
+        page: &Page<'o>,
+    ) -> Result<(Pixmap, RenderSummary), Error>
+    where
+        O: Resolve<'o> + Streams + Copy,
+    {
+        self.render_page_with(objects, catalog, page, &mut ())
+    }
+
+    /// Rasterizes `page` over `objects` with zero file I/O, reporting
+    /// recoverable ISO 32000-2 departures and visual approximations to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`Renderer::render_page`].
+    pub fn render_page_with<'o, O, S>(
+        &self,
+        objects: O,
+        catalog: Option<&'o Dict>,
+        page: &Page<'o>,
+        sink: &mut S,
+    ) -> Result<(Pixmap, RenderSummary), Error>
+    where
+        O: Resolve<'o> + Streams + Copy,
+        S: Sink<Fault> + ?Sized,
+    {
+        let owned_cache;
+        let cache = match self.cache {
+            Some(c) => c,
+            None => {
+                owned_cache = RenderCache::new();
+                &owned_cache
+            }
+        };
+        render_page_with(
+            objects,
+            catalog,
+            page,
+            cache,
+            self.fallback,
+            self.opts,
+            sink,
+        )
+    }
+
+    /// Rasterizes a standalone decoded [`Concat`] content stream without
+    /// collecting non-fatal [`Fault`]s.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] on invalid viewports, cancellation, exceeded
+    /// [`crate::Limits`], or unreadable objects/streams.
+    pub fn render_content<'o, O>(
+        &self,
+        objects: O,
+        content: &Concat<'_>,
+        resources: Option<&'o Object>,
+        geom: &PageGeom,
+    ) -> Result<(Pixmap, RenderSummary), Error>
+    where
+        O: Resolve<'o> + Streams + Copy,
+    {
+        self.render_content_with(objects, content, resources, geom, &mut ())
+    }
+
+    /// Rasterizes a standalone decoded [`Concat`] content stream, reporting
+    /// recoverable ISO 32000-2 departures and visual approximations to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`Renderer::render_content`].
+    pub fn render_content_with<'o, O, S>(
+        &self,
+        objects: O,
+        content: &Concat<'_>,
+        resources: Option<&'o Object>,
+        geom: &PageGeom,
+        sink: &mut S,
+    ) -> Result<(Pixmap, RenderSummary), Error>
+    where
+        O: Resolve<'o> + Streams + Copy,
+        S: Sink<Fault> + ?Sized,
+    {
+        let owned_cache;
+        let cache = match self.cache {
+            Some(c) => c,
+            None => {
+                owned_cache = RenderCache::new();
+                &owned_cache
+            }
+        };
+        render_content_with(
+            objects,
+            content,
+            resources,
+            geom,
+            cache,
+            self.fallback,
+            self.opts,
+            sink,
+        )
+    }
+}
+
 /// Rasterizes `page` without collecting non-fatal [`Fault`]s.
 ///
 /// # Errors
 ///
-/// Returns [`Error`] on invalid viewports, exceeded [`crate::Limits`], or
-/// unreadable objects/streams.
+/// Returns [`Error`] on invalid viewports, cancellation, exceeded
+/// [`crate::Limits`], or unreadable objects/streams.
 pub fn render_page<'o, O>(
     objects: O,
     catalog: Option<&'o Dict>,
@@ -149,15 +386,15 @@ where
 }
 
 /// Rasterizes `page` over `objects` with zero file I/O, reporting recoverable
-/// ISO 32000-2 departures to `sink`.
+/// ISO 32000-2 departures and visual approximations to `sink`.
 ///
 /// Passing `&mut ()` disables fault collection and produces the exact same
 /// [`Pixmap`], [`RenderSummary`], and [`Error`]s as any active sink.
 ///
 /// # Errors
 ///
-/// Returns [`Error`] on invalid viewports, exceeded [`crate::Limits`], or
-/// unreadable objects/streams.
+/// Returns [`Error`] on invalid viewports, cancellation, exceeded
+/// [`crate::Limits`], or unreadable objects/streams.
 pub fn render_page_with<'o, O, S>(
     objects: O,
     catalog: Option<&'o Dict>,
@@ -171,6 +408,7 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
+    check_cancelled(opts)?;
     let mut geom = PageGeom::from_page(page);
     if let Some(dict) = page.dict {
         geom = geom.with_page_boxes(objects, dict);
@@ -207,6 +445,15 @@ where
     let page_group = page
         .dict
         .and_then(|d| TransparencyGroup::from_dict(objects, d));
+    if let Some(ref g) = page_group
+        && (!g.isolated
+            || g.knockout
+            || g.color_space
+                .is_some_and(|cs| !is_srgb_group_cs(ctx.objects, cs)))
+    {
+        sink.fault(Place::new(page.id, None), Fault::ApproximatedGroup);
+        state.approximated = true;
+    }
     let pushed_page_group = if page_group.is_some_and(|g| g.isolated) {
         canvas.push_group_layer(None, &BlendState::default(), 1.0, None);
         true
@@ -214,7 +461,7 @@ where
         false
     };
 
-    let contents_slices = decode_page_contents(objects, page.dict, &mut state.decompressed_left)?;
+    let contents_slices = decode_page_contents(objects, page.dict, opts, &mut state, sink)?;
     if !contents_slices.is_empty() {
         let refs: Vec<&[u8]> = contents_slices.iter().map(Vec::as_slice).collect();
         let concat = Concat::new(&refs);
@@ -259,6 +506,7 @@ where
         )?;
     }
 
+    check_cancelled(opts)?;
     canvas.pop_clip();
     let pixmap = canvas.finish(opts.background, opts.format, &opts.limits)?;
     Ok((pixmap, state.summary))
@@ -270,8 +518,8 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`Error`] on invalid viewports, exceeded [`crate::Limits`], or
-/// unreadable objects/streams.
+/// Returns [`Error`] on invalid viewports, cancellation, exceeded
+/// [`crate::Limits`], or unreadable objects/streams.
 pub fn render_content<'o, O>(
     objects: O,
     content: &Concat<'_>,
@@ -297,7 +545,7 @@ where
 }
 
 /// Rasterizes a standalone decoded [`Concat`] content stream, reporting
-/// recoverable ISO 32000-2 departures to `sink`.
+/// recoverable ISO 32000-2 departures and visual approximations to `sink`.
 ///
 /// # Errors
 ///
@@ -317,9 +565,16 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
+    check_cancelled(opts)?;
     let resolved_vp = opts
         .viewport
         .resolve_with_rules(geom, opts.rules, &opts.limits)?;
+    phase!(
+        DEBUG,
+        "render_content",
+        width = resolved_vp.width,
+        height = resolved_vp.height
+    );
     let ctx = RenderCtx {
         objects: Narrow::new(objects),
         oc_state: None,
@@ -348,16 +603,23 @@ where
         sink,
     )?;
 
+    check_cancelled(opts)?;
     canvas.pop_clip();
     let pixmap = canvas.finish(opts.background, opts.format, &opts.limits)?;
     Ok((pixmap, state.summary))
 }
 
-fn decode_page_contents<'o, O: Resolve<'o> + Streams + Copy>(
+fn decode_page_contents<'o, O, S>(
     objects: O,
     page_dict: Option<&'o Dict>,
-    decompressed_budget: &mut usize,
-) -> Result<Vec<Vec<u8>>, Error> {
+    opts: &RenderOpts,
+    state: &mut RenderState,
+    sink: &mut S,
+) -> Result<Vec<Vec<u8>>, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    S: Sink<Fault> + ?Sized,
+{
     let Some(dict) = page_dict else {
         return Ok(Vec::new());
     };
@@ -390,9 +652,10 @@ fn decode_page_contents<'o, O: Resolve<'o> + Streams + Copy>(
     let total = stream_ids.len();
     let mut slices = Vec::with_capacity(total);
     for (idx, sid) in stream_ids.into_iter().enumerate() {
-        match objects.decoded(sid, *decompressed_budget) {
+        check_cancelled(opts)?;
+        match objects.decoded(sid, state.decompressed_left) {
             Ok(bytes) => {
-                *decompressed_budget = decompressed_budget.saturating_sub(bytes.len());
+                state.decompressed_left = state.decompressed_left.saturating_sub(bytes.len());
                 let mut owned = bytes.into_owned();
                 if idx + 1 < total && !owned.ends_with(b"\n") && !owned.ends_with(b" ") {
                     owned.push(b'\n');
@@ -404,7 +667,10 @@ fn decode_page_contents<'o, O: Resolve<'o> + Streams + Copy>(
                     pdf_gfx::Cap::Decompressed,
                 )));
             }
-            Err(u) if matches!(u.why, Why::Damaged | Why::Filter) => continue,
+            Err(u) if matches!(u.why, Why::Damaged | Why::Filter) => {
+                sink.fault(Place::new(Some(sid), None), Fault::SkippedStream);
+                state.approximated = true;
+            }
             Err(u) => return Err(Error::Unreadable(u)),
         }
     }
@@ -430,44 +696,11 @@ where
     else {
         return Ok(None);
     };
-    let mut state = props.default_state();
-
-    for grp in &props.groups {
-        let Some(grp_dict) = objects.try_resolve(grp.id)?.and_then(Object::as_dict) else {
-            continue;
-        };
-        let Some(usage) = grp_dict
-            .get(b"Usage")
-            .and_then(|u| match u.as_reference() {
-                Some(id) => objects.resolve(id),
-                None => Some(u),
-            })
-            .and_then(Object::as_dict)
-        else {
-            continue;
-        };
-        let (sub_key, state_key): (&[u8], &[u8]) = match opts.medium {
-            RenderMedium::Display => (b"View", b"ViewState"),
-            RenderMedium::Print => (b"Print", b"PrintState"),
-        };
-        if let Some(sub) = usage
-            .get(sub_key)
-            .and_then(|v| match v.as_reference() {
-                Some(id) => objects.resolve(id),
-                None => Some(v),
-            })
-            .and_then(Object::as_dict)
-            && let Some(st_name) = sub.get(state_key).and_then(Object::as_name)
-        {
-            match st_name {
-                b"OFF" => state.set_ocg(grp.id, false),
-                b"ON" => state.set_ocg(grp.id, true),
-                _ => {}
-            }
-        }
-    }
-
-    Ok(Some(state))
+    let event = match opts.medium {
+        RenderMedium::Display => OcEvent::View,
+        RenderMedium::Print => OcEvent::Print,
+    };
+    Ok(Some(props.default_state_for_event(event, opts.rules)))
 }
 
 pub(crate) fn is_mark_hidden_by_oc<'a, R: Resolve<'a> + Copy>(
@@ -507,19 +740,12 @@ fn load_output_intent_icc<'o, O: Resolve<'o> + Streams + Copy>(
     let Some(oi_raw) = cat.get(b"OutputIntents") else {
         return Ok(None);
     };
-    let oi_arr = match oi_raw.as_reference() {
-        Some(id) => objects.try_resolve(id)?.and_then(Object::as_array),
-        None => oi_raw.as_array(),
-    };
+    let oi_arr = resolve_opt(objects, oi_raw)?.and_then(Object::as_array);
     let Some(arr) = oi_arr else {
         return Ok(None);
     };
     for item in arr.iter().take(16) {
-        let dict = match item.as_reference() {
-            Some(id) => objects.try_resolve(id)?.and_then(Object::as_dict),
-            None => item.as_dict(),
-        };
-        let Some(d) = dict else {
+        let Some(d) = resolve_opt(objects, item)?.and_then(Object::as_dict) else {
             continue;
         };
         let Some(prof_id) = d.get(b"DestOutputProfile").and_then(Object::as_reference) else {

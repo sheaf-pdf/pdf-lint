@@ -9,6 +9,9 @@ use crate::{GlyphBox, Limits};
 #[allow(dead_code)]
 pub(crate) struct Face(());
 
+#[allow(dead_code)]
+pub(crate) struct FallbackMap(());
+
 impl Face {
     /// Refused, whatever it's given.
     pub(crate) fn open(_: Vec<u8>, _: &[u8], _: &Limits) -> Result<Face, Refusal> {
@@ -35,8 +38,13 @@ impl Face {
         SimpleMap::none()
     }
 
+    pub(crate) fn fallback_map(&self) -> FallbackMap {
+        FallbackMap(())
+    }
+
     pub(crate) fn outline_char(
         &self,
+        _: &FallbackMap,
         _: char,
         _: Option<f32>,
         _: &mut Vec<OutlineVerb>,

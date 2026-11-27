@@ -101,8 +101,10 @@ impl RawImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Limit`] if dimensions or buffer sizes exceed `limits`, or
-    /// [`Error::InvalidBitsPerComponent`] if `meta.bits_per_component` does not match `samples`.
+    /// Returns [`Error::Limit`] if dimensions or buffer sizes exceed `limits`,
+    /// [`Error::InvalidBitsPerComponent`] if `meta.bits_per_component` does not match `samples`
+    /// (or is not `1` for `/ImageMask true`), or [`Error::NotAnImage`] if `meta.components == 0`,
+    /// `meta.decode.len() != meta.components`, or `prepared_space` disagrees with `meta`.
     pub fn from_parts(
         meta: ImageMeta,
         codec: ImageCodec,
@@ -112,6 +114,32 @@ impl RawImage {
         limits: &Limits,
     ) -> Result<Self, Error> {
         let pixels = check_dimensions(meta.width, meta.height, limits)?;
+        if meta.components == 0 {
+            return Err(Error::NotAnImage);
+        }
+        if meta.decode.len() != usize::from(meta.components)
+            || meta
+                .decode
+                .iter()
+                .any(|&(lo, hi)| !lo.is_finite() || !hi.is_finite())
+        {
+            return Err(Error::NotAnImage);
+        }
+        if meta.stencil {
+            if meta.bits_per_component != 1 {
+                return Err(Error::InvalidBitsPerComponent {
+                    bpc: i64::from(meta.bits_per_component),
+                });
+            }
+            if meta.components != 1 || meta.color_space.is_some() || prepared_space.is_some() {
+                return Err(Error::NotAnImage);
+            }
+        } else if let Some(sp) = &prepared_space
+            && (sp.components() != u32::from(meta.components)
+                || meta.color_space.is_some_and(|fam| fam != sp.family()))
+        {
+            return Err(Error::NotAnImage);
+        }
         let comps = u64::from(meta.components);
         match &samples {
             SampleData::Packed { bpc, stride, data } => {
@@ -349,7 +377,8 @@ impl RawImage {
     ///
     /// - **Pre-`/Decode` native samples:** `fill` values are raw integer samples before `/Decode`
     ///   mapping (`[0, 0, 0, 0]` is `0%` ink = white in default `DeviceCMYK`; pass `[0, 0, 0, 255]`
-    ///   for 8-bit `DeviceCMYK` black).
+    ///   for 8-bit `DeviceCMYK` black, or use [`Self::fill_rect_decoded`] to supply post-`/Decode`
+    ///   color-space component values instead).
     /// - **Embedded JPX alpha:** If an embedded JPX alpha plane (`/SMaskInData`) is present, alpha
     ///   inside the scrubbed rectangle is forced to `255` (opaque).
     /// - **Color-key `/Mask`:** Checked upfront; if the clamped `fill` tuple matches the image's
@@ -359,7 +388,9 @@ impl RawImage {
     ///   referenced by [`ImageMeta::smask`] or [`MaskSpec::Stencil`] are **not** modified by
     ///   scrubbing the parent `RawImage` alone (leaving their alpha silhouette—and any `/Matte`
     ///   un-premultiplication against partial alpha—intact). To erase the alpha silhouette over a
-    ///   redacted region as well, scrub the companion mask stream or composite via
+    ///   redacted region as well, scrub and re-encode the companion mask stream (linking it via
+    ///   [`EncodedImage::attach_smask`](crate::EncodedImage::attach_smask) or
+    ///   [`EncodedImage::attach_mask`](crate::EncodedImage::attach_mask)) or composite via
     ///   [`RawImage::to_rgba8`] + [`RgbaImage::fill_rect`](crate::RgbaImage::fill_rect) +
     ///   [`encode_rgba_flate`](crate::encode_rgba_flate).
     ///
@@ -460,12 +491,83 @@ impl RawImage {
             (y1 - y0) as u32,
         )))
     }
+
+    /// Overwrites every pixel in `[x .. x + w) × [y .. y + h)` in-place using post-`/Decode`
+    /// color-space component values `decoded_fill` (`decoded_fill.len() >= self.components()`),
+    /// inverting each component's `/Decode` `[D_min, D_max]` interval to raw integer samples
+    /// `[0 ..= (1 << bpc) - 1]` before delegating to [`Self::fill_rect_raw`].
+    ///
+    /// For example, `[0.0, 0.0, 0.0, 1.0]` paints black in `DeviceCMYK` even when `/Decode` is
+    /// inverted (`[1 0 1 0 1 0 1 0]`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScrubError::InsufficientComponents`] if `decoded_fill.len() < self.components()`,
+    /// or [`ScrubError::ColorKeyTransparentFill`] if the inverted raw sample tuple matches the
+    /// image's [`MaskSpec::ColorKey`] range.
+    pub fn fill_rect_decoded(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        decoded_fill: &[f32],
+    ) -> Result<Option<(u32, u32, u32, u32)>, ScrubError> {
+        let comps = usize::from(self.meta.components);
+        if decoded_fill.len() < comps {
+            return Err(ScrubError::InsufficientComponents {
+                actual: decoded_fill.len(),
+                expected: self.meta.components,
+            });
+        }
+        let max_sample = ((1_u32 << self.meta.bits_per_component) - 1) as f64;
+        let mut raw_stack = [0_u16; 32];
+        let mut raw_heap = Vec::new();
+        let raw: &mut [u16] = if comps <= raw_stack.len() {
+            &mut raw_stack[..comps]
+        } else {
+            raw_heap.resize(comps, 0);
+            &mut raw_heap
+        };
+        for (c, slot) in raw.iter_mut().enumerate() {
+            let (d_min, d_max) = self.meta.decode[c];
+            let span = d_max - d_min;
+            let t = if span.abs() > 0.0 && decoded_fill[c].is_finite() {
+                ((f64::from(decoded_fill[c]) - d_min) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            *slot = (t * max_sample).round() as u16;
+        }
+        self.fill_rect_raw(x, y, w, h, raw)
+    }
 }
 
-/// Decodes raw packed sample bytes (`1, 2, 4, 8, 16` bpc) into [`SampleData`], padding short
-/// streams (using `1` bits for 1-bit `/ImageMask` / `DeviceGray` white default? Wait: ISO/PDFium
-/// pads missing stream bytes with `0` bytes!) and reporting [`Fault::ShortStream`](crate::Fault::ShortStream)
-/// or [`Fault::TrailingBytes`](crate::Fault::TrailingBytes).
+fn copy_padded_bytes<S>(
+    bytes: &[u8],
+    needed: usize,
+    place: pdf_objects::fault::Place,
+    sink: &mut S,
+) -> Vec<u8>
+where
+    S: pdf_objects::fault::Sink<crate::Fault> + ?Sized,
+{
+    let mut buf = vec![0_u8; needed];
+    if bytes.len() < needed {
+        sink.fault(place, crate::Fault::ShortStream);
+        buf[..bytes.len()].copy_from_slice(bytes);
+    } else {
+        if bytes.len() > needed {
+            sink.fault(place, crate::Fault::TrailingBytes);
+        }
+        buf.copy_from_slice(&bytes[..needed]);
+    }
+    buf
+}
+
+/// Decodes raw packed sample bytes (`1, 2, 4, 8, 16` bpc) into [`SampleData`], zero-padding short
+/// streams and reporting [`Fault::ShortStream`](crate::Fault::ShortStream) or
+/// [`Fault::TrailingBytes`](crate::Fault::TrailingBytes).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn decode_raw_samples<S>(
     bytes: &[u8],
@@ -486,35 +588,14 @@ where
         1 | 2 | 4 => {
             let stride = ((u64::from(width) * comps * u64::from(bpc)).div_ceil(8)) as usize;
             let needed = check_sample_budget((stride as u64) * u64::from(height), limits)?;
-            let mut buf = vec![0_u8; needed];
-            if bytes.len() < needed {
-                sink.fault(place, crate::Fault::ShortStream);
-                buf[..bytes.len()].copy_from_slice(bytes);
-            } else {
-                if bytes.len() > needed {
-                    sink.fault(place, crate::Fault::TrailingBytes);
-                }
-                buf.copy_from_slice(&bytes[..needed]);
-            }
-            Ok(SampleData::Packed {
-                bpc,
-                stride,
-                data: buf,
-            })
+            let data = copy_padded_bytes(bytes, needed, place, sink);
+            Ok(SampleData::Packed { bpc, stride, data })
         }
         8 => {
             let needed = check_sample_budget(pixels.saturating_mul(comps), limits)?;
-            let mut buf = vec![0_u8; needed];
-            if bytes.len() < needed {
-                sink.fault(place, crate::Fault::ShortStream);
-                buf[..bytes.len()].copy_from_slice(bytes);
-            } else {
-                if bytes.len() > needed {
-                    sink.fault(place, crate::Fault::TrailingBytes);
-                }
-                buf.copy_from_slice(&bytes[..needed]);
-            }
-            Ok(SampleData::U8(buf))
+            Ok(SampleData::U8(copy_padded_bytes(
+                bytes, needed, place, sink,
+            )))
         }
         16 => {
             let needed_bytes =

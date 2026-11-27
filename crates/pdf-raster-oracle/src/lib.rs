@@ -19,7 +19,7 @@ use pdf_raster::{PdfiumBackend, pdfium};
 
 pub mod rubric;
 
-use rubric::RgbaImage;
+use rubric::{RgbaImage, RgbaImageExt};
 
 /// Pinned Chromium branch number for the workspace PDFium oracle (`as of chromium/8152`).
 pub const PINNED_CHROMIUM_BUILD: u32 = 8152;

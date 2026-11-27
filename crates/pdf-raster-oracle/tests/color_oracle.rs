@@ -4,8 +4,8 @@ use pdf_color::pdf_objects::{Object, ObjectId, Resolve, Streams, dict};
 use pdf_color::{EvalOptions, Fault, Limits, PreparedSpace, Spaces};
 use pdf_fixtures::fixture::{self, Body, Xref};
 use pdf_raster_oracle::rubric::{
-    BaselineRow, CaseEvaluation, RgbaImage, RubricProfile, evaluate_case, format_baseline_tsv,
-    parse_baseline_tsv,
+    BaselineRow, CaseEvaluation, RgbaImage, RgbaImageExt, RubricProfile, evaluate_case,
+    format_baseline_tsv, parse_baseline_tsv,
 };
 use pdf_raster_oracle::{RenderOptions, require_pdfium};
 use pdf_structure::read::{Options, Reading};
@@ -78,16 +78,13 @@ where
     &'o Reading<S>: Resolve<'o> + Streams,
 {
     let w = (swatches.len() * 16) as u32;
-    let mut img = RgbaImage::new(w, 16, [255, 255, 255, 255]).unwrap();
+    let mut img = RgbaImage::from_solid(w, 16, [255, 255, 255, 255]).unwrap();
     for (i, (cs_name, comps)) in swatches.iter().enumerate() {
         let space_val = spaces.get(cs_name).expect("named in test dict").value;
         let prep = PreparedSpace::prepare(reading, space_val, options, &Limits::DEFAULT, sink)
             .unwrap()
             .unwrap();
-        let rgb = prep
-            .eval(comps, &Limits::DEFAULT)
-            .unwrap()
-            .srgb8_over([255, 255, 255]);
+        let rgb = prep.eval(comps).unwrap().srgb8_over([255, 255, 255]);
         img.fill_rect((i * 16) as u32, 0, 16, 16, [rgb[0], rgb[1], rgb[2], 255]);
     }
     img
@@ -333,7 +330,7 @@ fn pdfium_oracle_rubric_conforming_wild_and_iso_normative_suites() {
 
     // --- Suite 3: IsoNormative (analytic ISO reference for unprofiled ISO CMYK, CalGray, All) ---
     let mut iso_ref =
-        RgbaImage::new((wild_swatches.len() * 16) as u32, 16, [255, 255, 255, 255]).unwrap();
+        RgbaImage::from_solid((wild_swatches.len() * 16) as u32, 16, [255, 255, 255, 255]).unwrap();
     for (i, px) in [
         [0, 255, 255, 255],
         [255, 0, 255, 255],
@@ -629,9 +626,7 @@ fn pdfium_oracle_verifies_off_grid_cmyk_lab_whitepoint_short_c1_and_indirect_n()
         )
         .unwrap()
         .unwrap();
-        prep.eval(comps, &Limits::DEFAULT)
-            .unwrap()
-            .srgb8_over([255, 255, 255])
+        prep.eval(comps).unwrap().srgb8_over([255, 255, 255])
     };
     let ck = eval_srgb(b"CK", &[0.33, 0.67, 0.12, 0.25]);
     assert!(

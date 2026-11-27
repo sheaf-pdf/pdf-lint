@@ -3,11 +3,11 @@ name: Publish
 # A crate to crates.io, on its version tag (each crate's tags are its name, -v
 # and its version: pdf-tokenizer-v0.2.0, pdf-objects-v0.1.0-alpha.1,
 # pdf-filters-v0.1.0-alpha.1, pdf-crypt-v0.1.0-alpha.1,
-# pdf-color-v0.1.0-alpha.1, pdf-structure-v0.1.0-alpha.1,
-# pdf-content-streams-v0.1.0-alpha.1, pdf-semantics-v0.1.0-alpha.1,
-# pdf-fonts-v0.1.0-alpha.1, pdf-gfx-v0.1.0-alpha.1,
-# pdf-annots-v0.1.0-alpha.1, pdf-forms-v0.1.0-alpha.1,
-# pdf-linearize-v0.1.0-alpha.1, pdfs-v0.1.0-alpha.1,
+# pdf-color-v0.1.0-alpha.1, pdf-images-v0.1.0-alpha.1,
+# pdf-structure-v0.1.0-alpha.1, pdf-content-streams-v0.1.0-alpha.1,
+# pdf-semantics-v0.1.0-alpha.1, pdf-fonts-v0.1.0-alpha.1,
+# pdf-gfx-v0.1.0-alpha.1, pdf-annots-v0.1.0-alpha.1, pdf-forms-v0.1.0-alpha.1,
+# pdf-raster-v0.1.0-alpha.1, pdf-linearize-v0.1.0-alpha.1, pdfs-v0.1.0-alpha.1,
 # pdf-arlington-v0.1.0-alpha.1, pdf-lint-v0.2.0), by trusted publishing: the
 # run's OpenID Connect token is exchanged for a crates.io token that lives for
 # the job and is revoked when it ends, so no secret is kept here. The
@@ -25,7 +25,7 @@ name: Publish
 
 on:
   push:
-    tags: ["pdf-tokenizer-v*", "pdf-objects-v*", "pdf-filters-v*", "pdf-crypt-v*", "pdf-color-v*", "pdf-structure-v*", "pdf-content-streams-v*", "pdf-semantics-v*", "pdf-fonts-v*", "pdf-gfx-v*", "pdf-annots-v*", "pdf-forms-v*", "pdf-linearize-v*", "pdfs-v*", "pdf-arlington-v*", "pdf-lint-v*", "!pdf-lint-v*-rc.*"]
+    tags: ["pdf-tokenizer-v*", "pdf-objects-v*", "pdf-filters-v*", "pdf-crypt-v*", "pdf-color-v*", "pdf-images-v*", "pdf-structure-v*", "pdf-content-streams-v*", "pdf-semantics-v*", "pdf-fonts-v*", "pdf-gfx-v*", "pdf-annots-v*", "pdf-forms-v*", "pdf-raster-v*", "pdf-linearize-v*", "pdfs-v*", "pdf-arlington-v*", "pdf-lint-v*", "!pdf-lint-v*-rc.*"]
 
 permissions:
   contents: read
@@ -266,6 +266,52 @@ jobs:
       - name: Publish
         if: steps.there.outputs.published != 'true'
         run: cargo publish --locked -p pdf-color
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  pdf-images:
+    name: Publish pdf-images
+    if: startsWith(github.ref, 'refs/tags/pdf-images-v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Check the tag is the crate's version, and the CHANGELOG dates it
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-images/Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "pdf-images-v$version" ]; then
+            echo "The tag is $GITHUB_REF_NAME, and pdf-images's version $version" >&2
+            exit 1
+          fi
+          if ! grep -q "^## $version ([0-9]" crates/pdf-images/CHANGELOG.md; then
+            echo "pdf-images's CHANGELOG has no dated entry for $version" >&2
+            exit 1
+          fi
+      - name: Package, and check what the package holds
+        run: just images-package
+      - name: Look for the version on crates.io
+        id: there
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-images/Cargo.toml | head -n 1)
+          index=$(curl -fs https://index.crates.io/pd/f-/pdf-images || true)
+          if grep -qF "\"vers\":\"$version\"" <<< "$index"; then
+            echo "::notice::pdf-images $version is on crates.io already: nothing to publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Get a crates.io token for this run
+        if: steps.there.outputs.published != 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish
+        if: steps.there.outputs.published != 'true'
+        run: cargo publish --locked -p pdf-images
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
@@ -603,6 +649,52 @@ jobs:
       - name: Publish
         if: steps.there.outputs.published != 'true'
         run: cargo publish --locked -p pdf-forms
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  pdf-raster:
+    name: Publish pdf-raster
+    if: startsWith(github.ref, 'refs/tags/pdf-raster-v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v4
+      - name: Check the tag is the crate's version, and the CHANGELOG dates it
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-raster/Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "pdf-raster-v$version" ]; then
+            echo "The tag is $GITHUB_REF_NAME, and pdf-raster's version $version" >&2
+            exit 1
+          fi
+          if ! grep -q "^## $version ([0-9]" crates/pdf-raster/CHANGELOG.md; then
+            echo "pdf-raster's CHANGELOG has no dated entry for $version" >&2
+            exit 1
+          fi
+      - name: Package, and check what the package holds
+        run: just raster-package
+      - name: Look for the version on crates.io
+        id: there
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/pdf-raster/Cargo.toml | head -n 1)
+          index=$(curl -fs https://index.crates.io/pd/f-/pdf-raster || true)
+          if grep -qF "\"vers\":\"$version\"" <<< "$index"; then
+            echo "::notice::pdf-raster $version is on crates.io already: nothing to publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Get a crates.io token for this run
+        if: steps.there.outputs.published != 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish
+        if: steps.there.outputs.published != 'true'
+        run: cargo publish --locked -p pdf-raster
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 

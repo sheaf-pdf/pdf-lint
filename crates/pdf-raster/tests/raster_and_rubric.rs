@@ -1763,6 +1763,487 @@ fn user_unit_dpi_and_embedded_missing_glyph_follow_iso_and_pdfium_rules() {
     }
 }
 
+#[test]
+fn renderer_builder_cancellation_png_and_buffer_length_behave_deterministically() {
+    use pdf_raster::{Limits, Renderer};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(64), Object::from(48)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(
+                dict! {},
+                b"0.2 0.6 0.9 rg 0 0 64 48 re f\n".to_vec(),
+            )),
+        ),
+    ]);
+    let reading = Reading::open(&pdf[..], &OpenOptions::DEFAULT).unwrap();
+    let catalog = (&reading)
+        .resolve(
+            reading
+                .trailer()
+                .dict()
+                .get(b"Root")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+        )
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let tbl = pages(
+        &reading,
+        catalog,
+        Rules::Pdfium,
+        &SemLimits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    let page = tbl.get(0).unwrap();
+    let cache = RenderCache::new();
+
+    let dpi_opts = RenderOpts::dpi(72.0);
+    let (pix_dpi, sum_dpi) = Renderer::new(&dpi_opts)
+        .with_cache(&cache)
+        .render_page(&reading, Some(catalog), page)
+        .unwrap();
+    assert_eq!((pix_dpi.width(), pix_dpi.height()), (64, 48));
+    assert!(sum_dpi.reported && !sum_dpi.approximated);
+
+    let width_opts = RenderOpts::page_width(32);
+    let (pix_w, _) = Renderer::new(&width_opts)
+        .with_cache(&cache)
+        .render_page(&reading, None, page)
+        .unwrap();
+    assert_eq!((pix_w.width(), pix_w.height()), (32, 24));
+
+    // Cooperative cancellation via `RenderOpts::with_stop`:
+    let stop = Arc::new(AtomicBool::new(true));
+    let stopped_opts = RenderOpts::dpi(72.0).with_stop(stop.clone());
+    assert!(matches!(
+        Renderer::new(&stopped_opts).render_page(&reading, None, page),
+        Err(Error::Cancelled)
+    ));
+    stop.store(false, Ordering::Relaxed);
+    assert!(
+        Renderer::new(&stopped_opts)
+            .render_page(&reading, None, page)
+            .is_ok()
+    );
+
+    // `Pixmap::from_bytes` reports `Error::BufferLength`:
+    assert!(matches!(
+        Pixmap::from_bytes(4, 4, PixelFormat::Rgba8, vec![0; 12], &Limits::DEFAULT),
+        Err(Error::BufferLength {
+            actual: 12,
+            expected: 64,
+        })
+    ));
+
+    // `Pixmap::to_png` + `Pixmap::to_rgba_image` across pixel formats:
+    for fmt in [
+        PixelFormat::Rgba8,
+        PixelFormat::Bgra8,
+        PixelFormat::Rgba8Premul,
+    ] {
+        let mut fopts = RenderOpts::page_width(16);
+        fopts.format = fmt;
+        let (p, _) = Renderer::new(&fopts)
+            .render_page(&reading, None, page)
+            .unwrap();
+        let png = p.to_png().unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png.windows(4).any(|w| w == b"IHDR"));
+        assert!(png.windows(4).any(|w| w == b"IDAT"));
+        assert!(png.ends_with(b"\x00\x00\x00\x00IEND\xaeB`\x82"));
+        let rgba = p
+            .to_rgba_image(&pdf_raster::pdf_images::Limits::DEFAULT)
+            .unwrap();
+        assert_eq!((rgba.width(), rgba.height()), (16, 12));
+        assert_eq!(rgba.pixel(8, 6), p.pixel_rgba8(8, 6));
+    }
+}
+
+#[test]
+fn mipmap_box_downsampling_preserves_thin_strokes_under_antialias() {
+    // 128x128 white RGB image with a 2-px vertical black stripe at `x = 63..65`,
+    // downscaled 8x onto a 16x16 viewport. Iterative 2x box mipmapping preserves
+    // dark ink (~25% coverage -> gray ~191) at `x = 7` or `x = 8`.
+    let mut raw = vec![255_u8; 128 * 128 * 3];
+    for y in 0..128 {
+        for x in 63..65 {
+            let idx = (y * 128 + x) * 3;
+            raw[idx..idx + 3].fill(0);
+        }
+    }
+    let pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(128), Object::from(128)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! { "XObject" => dict! { "Im0" => Object::reference(5) } },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(
+                dict! {},
+                b"q 128 0 0 128 0 0 cm /Im0 Do Q\n".to_vec(),
+            )),
+        ),
+        (
+            5,
+            Object::from(Stream::new(
+                dict! {
+                    "Type" => Object::name("XObject"),
+                    "Subtype" => Object::name("Image"),
+                    "Width" => 128,
+                    "Height" => 128,
+                    "ColorSpace" => Object::name("DeviceRGB"),
+                    "BitsPerComponent" => 8,
+                },
+                raw,
+            )),
+        ),
+    ]);
+    let opts = RenderOpts::page_width(16);
+    let (pix, sum, faults) = render_pdf_bytes(&pdf, &opts);
+    assert!(faults.is_empty());
+    assert_eq!(sum.images_drawn, 1);
+    let min_center_r = (6..=9)
+        .map(|x| pix.pixel_rgba8(x, 8).unwrap()[0])
+        .min()
+        .unwrap();
+    assert!(
+        min_center_r < 225,
+        "2x mipmap downsampling must preserve thin vertical stripe ink on 8x downscale, got min R={min_center_r}"
+    );
+}
+
+#[test]
+fn approximated_summary_faults_font_query_dedup_and_scene_limits() {
+    use pdf_raster::{Fault, FontFallback, FontQuery, Renderer};
+    use std::sync::Mutex;
+
+    // 1. ShadingType 6 (Coons patch mesh) emits `UnsupportedShading { shading_type: 6 }`,
+    //    sets `approximated = true`, and paints `/Background`!
+    let sh6_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(32), Object::from(32)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! { "Shading" => dict! { "S6" => Object::reference(5) } },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (4, Object::from(Stream::new(dict! {}, b"/S6 sh\n".to_vec()))),
+        (
+            5,
+            Object::from(Stream::new(
+                dict! {
+                    "ShadingType" => 6,
+                    "ColorSpace" => Object::name("DeviceRGB"),
+                    "BitsPerCoordinate" => 8,
+                    "BitsPerComponent" => 8,
+                    "BitsPerFlag" => 8,
+                    "Decode" => vec![
+                        Object::from(0), Object::from(32),
+                        Object::from(0), Object::from(32),
+                        Object::from(0), Object::from(1),
+                        Object::from(0), Object::from(1),
+                        Object::from(0), Object::from(1),
+                    ],
+                    "Background" => vec![Object::from(0.8), Object::from(0.1), Object::from(0.2)],
+                },
+                vec![0; 32],
+            )),
+        ),
+    ]);
+    let (sh_pix, sh_sum, sh_faults) = render_pdf_bytes(&sh6_pdf, &RenderOpts::page_width(32));
+    assert!(sh_sum.approximated);
+    assert!(sh_faults.contains(&Fault::UnsupportedShading { shading_type: 6 }));
+    let bg_px = sh_pix.pixel_rgba8(16, 16).unwrap();
+    assert!(bg_px[0] > 180 && bg_px[1] < 50);
+
+    // 2. Dense dash + non-isolated transparency group + damaged `/Contents` stream + unembedded Std14:
+    let approx_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(64), Object::from(64)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Group" => dict! { "S" => Object::name("Transparency"), "I" => false },
+                "Resources" => dict! {
+                    "Font" => dict! {
+                        "F1" => dict! {
+                            "Type" => Object::name("Font"),
+                            "Subtype" => Object::name("Type1"),
+                            "BaseFont" => Object::name("ABCDEF+CustomSans"),
+                        },
+                    },
+                },
+                "Contents" => vec![Object::reference(4), Object::reference(5)],
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(
+                dict! { "Filter" => Object::name("FlateDecode") },
+                b"not-valid-zlib-stream".to_vec(),
+            )),
+        ),
+        (
+            5,
+            Object::from(Stream::new(
+                dict! {},
+                b"[0.001 0.001] 0 d 2 w 4 4 m 60 60 l S BT /F1 14 Tf 8 20 Td (A) Tj (B) Tj ET\n"
+                    .to_vec(),
+            )),
+        ),
+    ]);
+    let (_, ap_sum, ap_faults) = render_pdf_bytes(&approx_pdf, &RenderOpts::page_width(64));
+    assert!(ap_sum.approximated);
+    assert!(ap_faults.contains(&Fault::SkippedStream), "{ap_faults:?}");
+    assert!(
+        ap_faults.contains(&Fault::ApproximatedGroup),
+        "{ap_faults:?}"
+    );
+    assert!(ap_faults.contains(&Fault::DenseDash), "{ap_faults:?}");
+    assert_eq!(
+        ap_faults
+            .iter()
+            .filter(|f| matches!(f, Fault::SubstitutedFont))
+            .count(),
+        1,
+        "SubstitutedFont should emit once per font: {ap_faults:?}"
+    );
+
+    // 3. `FontFallback` receives `base_font`, stripped `family_name`, and `sample_char`:
+    type SeenQuery = (Option<String>, Option<String>, Option<char>);
+    struct SpyFallback {
+        seen: Mutex<Vec<SeenQuery>>,
+        ttf: Arc<[u8]>,
+    }
+    impl FontFallback for SpyFallback {
+        fn fallback_font(&self, query: &FontQuery) -> Option<Arc<[u8]>> {
+            self.seen.lock().unwrap().push((
+                query
+                    .base_font()
+                    .map(|b| String::from_utf8_lossy(b).into_owned()),
+                query
+                    .family_name()
+                    .map(|b| String::from_utf8_lossy(b).into_owned()),
+                query.sample_char(),
+            ));
+            Some(self.ttf.clone())
+        }
+    }
+    let mut tt = TrueType::new(1000);
+    let gid_a = tt.glyph(FixtureGlyph::Box(100, 0, 700, 700), 800);
+    tt.map('A', gid_a);
+    tt.map('B', gid_a);
+    let spy = SpyFallback {
+        seen: Mutex::new(Vec::new()),
+        ttf: Arc::from(tt.build()),
+    };
+    let reading = Reading::open(&approx_pdf[..], &OpenOptions::DEFAULT).unwrap();
+    let catalog = (&reading)
+        .resolve(
+            reading
+                .trailer()
+                .dict()
+                .get(b"Root")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+        )
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let tbl = pages(
+        &reading,
+        catalog,
+        Rules::Pdfium,
+        &SemLimits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    let cache = RenderCache::new();
+    let _ = Renderer::new(&RenderOpts::page_width(64))
+        .with_cache(&cache)
+        .with_fallback(&spy)
+        .render_page(&reading, Some(catalog), tbl.get(0).unwrap())
+        .unwrap();
+    let seen = spy.seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "RenderCache memoizes fallback query per provider: {seen:?}"
+    );
+    assert_eq!(seen[0].0.as_deref(), Some("ABCDEF+CustomSans"));
+    assert_eq!(seen[0].1.as_deref(), Some("CustomSans"));
+    assert_eq!(seen[0].2, Some('A'));
+
+    // 4. `max_tile_pixels` and `max_scene_bytes` caps:
+    let tile_and_img_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(64), Object::from(64)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! { "Pattern" => dict! { "P1" => Object::reference(5) } },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (
+            4,
+            Object::from(Stream::new(
+                dict! {},
+                b"/Pattern cs /P1 scn 0 0 64 64 re f\n".to_vec(),
+            )),
+        ),
+        (
+            5,
+            Object::from(Stream::new(
+                dict! {
+                    "Type" => Object::name("Pattern"),
+                    "PatternType" => 1,
+                    "PaintType" => 1,
+                    "TilingType" => 1,
+                    "BBox" => vec![Object::from(0), Object::from(0), Object::from(16), Object::from(16)],
+                    "XStep" => 16,
+                    "YStep" => 16,
+                    "Resources" => dict! {},
+                },
+                b"0.1 0.5 0.2 rg 0 0 8 8 re f\n".to_vec(),
+            )),
+        ),
+    ]);
+    let tile_reading = Reading::open(&tile_and_img_pdf[..], &OpenOptions::DEFAULT).unwrap();
+    let tile_cat = (&tile_reading)
+        .resolve(
+            tile_reading
+                .trailer()
+                .dict()
+                .get(b"Root")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+        )
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let tile_tbl = pages(
+        &tile_reading,
+        tile_cat,
+        Rules::Pdfium,
+        &SemLimits::DEFAULT,
+        &mut (),
+    )
+    .unwrap();
+    let tile_page = tile_tbl.get(0).unwrap();
+
+    let mut small_tile_opts = RenderOpts::page_width(64);
+    small_tile_opts.limits.max_tile_pixels = 64;
+    assert!(matches!(
+        Renderer::new(&small_tile_opts).render_page(&tile_reading, Some(tile_cat), tile_page),
+        Err(Error::Limit(LimitKind::PatternCells))
+    ));
+
+    let mut small_scene_opts = RenderOpts::page_width(64);
+    small_scene_opts.limits.max_scene_bytes = 64;
+    assert!(matches!(
+        Renderer::new(&small_scene_opts).render_page(&tile_reading, Some(tile_cat), tile_page),
+        Err(Error::Limit(LimitKind::SceneBytes))
+    ));
+}
+
 #[cfg(feature = "pdfium")]
 #[test]
 #[ignore = "requires libpdfium (run via `just test-pdfium`)"]

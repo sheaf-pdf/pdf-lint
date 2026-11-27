@@ -84,6 +84,7 @@ clippy:
     cargo clippy --locked -p pdf-color --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-color --features icc --all-targets -- -D warnings
     cargo clippy --locked -p pdf-images --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-images --no-default-features --all-targets -- -D warnings
     cargo clippy --locked -p pdf-images --features icc,simd,zlib-rs,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --features simd,image-ends,tracing --all-targets -- -D warnings
@@ -113,6 +114,9 @@ clippy:
     cargo clippy --locked -p pdf-forms --no-default-features --features embed,text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-raster --all-targets -- -D warnings
     cargo clippy --locked -p pdf-raster --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --no-default-features --features programs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --no-default-features --features text-layout --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --no-default-features --features pdfium --all-targets -- -D warnings
     cargo clippy --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
@@ -162,6 +166,8 @@ test:
     cargo test --locked -p pdf-color --features icc --doc
     cargo nextest run --locked -p pdf-images
     cargo test --locked -p pdf-images --doc
+    cargo nextest run --locked -p pdf-images --no-default-features
+    cargo test --locked -p pdf-images --no-default-features --doc
     cargo nextest run --locked -p pdf-images --features icc,simd,zlib-rs,tracing
     cargo test --locked -p pdf-images --features icc,simd,zlib-rs,tracing --doc
     cargo nextest run --locked -p pdf-content-streams
@@ -209,6 +215,9 @@ test:
     cargo test --locked -p pdf-raster --doc
     cargo nextest run --locked -p pdf-raster --no-default-features
     cargo test --locked -p pdf-raster --no-default-features --doc
+    cargo nextest run --locked -p pdf-raster --no-default-features --features programs
+    cargo nextest run --locked -p pdf-raster --no-default-features --features text-layout
+    cargo nextest run --locked -p pdf-raster --no-default-features --features pdfium
     cargo nextest run --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing
     cargo test --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing --doc
     cargo nextest run --locked -p pdf-structure --features tracing
@@ -378,6 +387,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-color --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-content-streams --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-images --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-images --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
@@ -391,6 +401,7 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features --features embed,text-layout
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-raster --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-raster --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-raster --no-deps --no-default-features --features pdfium
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features images

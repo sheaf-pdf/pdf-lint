@@ -1252,4 +1252,107 @@ fn outline_bounds_match_char_box_with_shifted_matrices_and_fallback_advances_are
         heavy_font.outline_status(u32::from(b'A'), None, &mut verbs),
         crate::OutlineOutcome::BudgetExceeded
     );
+    // Failed outline extraction leaves existing `verbs` untouched.
+    verbs = sentinel.clone();
+    assert_eq!(
+        heavy_font.outline_status(u32::from(b'A'), None, &mut verbs),
+        crate::OutlineOutcome::BudgetExceeded
+    );
+    assert_eq!(verbs, sentinel);
+
+    // 6. `FontStyle`, `base_font` / `cid_ordering` (redacted in `Debug`), `Fonts::default()` vs
+    //    `Fonts::for_rendering()`, and Type 3 `d0` vs `d1` (`Type3Glyph::uncolored`).
+    let styled_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("ABCDEF+SecretMincho-BoldItalic"),
+        "FontDescriptor" => dict! {
+            "Flags" => 1,
+            "FontWeight" => 700,
+        },
+    };
+    let styled_font = Font::read(
+        streams2,
+        &styled_dict,
+        &Limits::DEFAULT,
+        &mut budget,
+        &mut (),
+    )
+    .unwrap();
+    let st = styled_font.style();
+    assert!(st.fixed_pitch && st.serif && st.italic && st.bold);
+    assert_eq!(
+        styled_font.base_font(),
+        Some(&b"ABCDEF+SecretMincho-BoldItalic"[..])
+    );
+    let dbg_str = format!("{styled_font:?}");
+    assert!(!dbg_str.contains("SecretMincho"), "{dbg_str}");
+
+    let proc_d0 = ObjectId::new(80, 0);
+    let proc_d1 = ObjectId::new(81, 0);
+    let mut t3_objs = std::collections::BTreeMap::new();
+    t3_objs.insert(
+        proc_d0,
+        Object::from(Stream::new(dict! {}, b"500 0 d0".to_vec())),
+    );
+    t3_objs.insert(
+        proc_d1,
+        Object::from(Stream::new(dict! {}, b"600 0 0 0 500 700 d1".to_vec())),
+    );
+    let t3_font_id = ObjectId::new(82, 0);
+    t3_objs.insert(
+        t3_font_id,
+        Object::from(dict! {
+            "Type" => Object::name("Font"),
+            "Subtype" => Object::name("Type3"),
+            "FontBBox" => vec![Object::from(0), Object::from(0), Object::from(1000), Object::from(1000)],
+            "FontMatrix" => vec![
+                Object::from(0.001), Object::from(0), Object::from(0),
+                Object::from(0.001), Object::from(0), Object::from(0),
+            ],
+            "Encoding" => dict! {
+                "Differences" => vec![Object::from(65), Object::name("g0"), Object::name("g1")],
+            },
+            "CharProcs" => dict! {
+                "g0" => proc_d0,
+                "g1" => proc_d1,
+            },
+            "Resources" => dict! { "ProcSet" => vec![Object::name("PDF")] },
+        }),
+    );
+    let t3_streams = WithStreams::new(&t3_objs, |id, _| {
+        t3_objs
+            .get(&id)
+            .and_then(Object::as_stream)
+            .and_then(|s| s.data.bytes())
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| Unreadable::new(id, Why::Damaged, "none"))
+    });
+    let cache_default = crate::Fonts::default();
+    let cached_t3 = cache_default
+        .get(
+            t3_streams,
+            &Object::from(t3_font_id),
+            &Limits::DEFAULT,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cached_t3.type3_glyph(65),
+        Some(crate::Type3Glyph {
+            stream: proc_d0,
+            uncolored: false,
+        })
+    );
+    assert_eq!(
+        cached_t3.type3_glyph(66),
+        Some(crate::Type3Glyph {
+            stream: proc_d1,
+            uncolored: true,
+        })
+    );
+    // Indirect Type 3 font did not clone its direct `/Resources` at load, and borrows it on demand:
+    assert!(cached_t3.type3_resources().is_none());
+    assert!(cached_t3.type3_resources_in(&t3_objs).is_some());
 }

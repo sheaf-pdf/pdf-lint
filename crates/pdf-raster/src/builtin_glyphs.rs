@@ -1,6 +1,8 @@
-//! Built-in vector fallback contours for unembedded fonts (`Std14` Latin/Symbol
-//! and `ZapfDingbats` form/annotation marks) when no external [`crate::FontFallback`]
-//! face supplies an outline.
+//! Built-in vector legibility placeholder contours for unembedded Latin /
+//! ASCII punctuation fonts and `ZapfDingbats` form/annotation marks when no
+//! external [`crate::FontFallback`] face supplies an outline (note: Adobe's
+//! `Symbol` encoding is not mapped here; supply a [`crate::FontFallback`] face
+//! for typographic Standard 14 and symbolic rendering).
 //!
 //! Emits closed [`OutlineVerb`] contours in `1000.0`-unit glyph space scaled to
 //! the target glyph's horizontal advance so text width, alignment, comb cells,

@@ -4,8 +4,11 @@
 //! public API. Coordinates are sanitized and clamped before reaching `kurbo`
 //! curve flatteners, clip/layer stacks are depth-tracked so pops cannot
 //! underflow, and eager strip/flattening calls as well as final scene
-//! rasterization run inside `catch_unwind`.
+//! rasterization run inside `catch_unwind` (note: under `panic = "abort"`
+//! profiles, upstream dependency panics abort rather than unwinding into
+//! [`Error::RasterizerPanic`]).
 
+use std::borrow::Cow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -23,7 +26,7 @@ use vello_cpu::{
 };
 
 use crate::error::Error;
-use crate::limits::Limits;
+use crate::limits::{LimitKind, Limits};
 use crate::pixmap::{PixelFormat, Pixmap, unpremul_rgba};
 
 /// Coordinate clamp (`±1,000,000` user/device units) guarding `kurbo` curve
@@ -56,14 +59,13 @@ pub(crate) struct Canvas2d {
 
 impl Canvas2d {
     pub(crate) fn new(width: u32, height: u32) -> Result<Self, Error> {
-        let w = u16::try_from(width)
-            .ok()
-            .filter(|&v| v > 0)
-            .ok_or(Error::InvalidViewport("width out of u16 range"))?;
-        let h = u16::try_from(height)
-            .ok()
-            .filter(|&v| v > 0)
-            .ok_or(Error::InvalidViewport("height out of u16 range"))?;
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidViewport(
+                "canvas width and height must be >= 1",
+            ));
+        }
+        let w = u16::try_from(width).map_err(|_| Error::Limit(LimitKind::Dimensions))?;
+        let h = u16::try_from(height).map_err(|_| Error::Limit(LimitKind::Dimensions))?;
         let settings = RenderSettings {
             level: simd_level(),
             num_threads: 0,
@@ -168,6 +170,9 @@ impl Canvas2d {
         }
     }
 
+    /// Configures stroke geometry and dash array on `self`, returning `true`
+    /// when a non-degenerate dash pattern exceeded `MAX_DASH_SEGMENTS` and was
+    /// approximated as a solid stroke.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_stroke_style(
         &mut self,
@@ -178,9 +183,9 @@ impl Canvas2d {
         dash: &DashPattern,
         ctm_to_device: Matrix,
         path_extent: f64,
-    ) {
+    ) -> bool {
         if self.panicked {
-            return;
+            return false;
         }
         // ISO 32000-2 §8.4.3.2: a line width of 0 denotes the thinnest line
         // (~1 device pixel) that can be rendered at device resolution.
@@ -210,25 +215,34 @@ impl Canvas2d {
             })
             .with_miter_limit(f64::from(miter_limit.max(1.0)).min(1_000.0));
 
+        let mut dense_dash = false;
         if !dash.is_solid() {
-            let cycle_sum: f64 = dash.array.iter().map(|&v| f64::from(v.max(0.0))).sum();
-            if cycle_sum > 1e-5 && path_extent / cycle_sum <= MAX_DASH_SEGMENTS {
-                let mut pattern: Vec<f64> = dash
-                    .array
-                    .iter()
-                    .take(64)
-                    .map(|&v| f64::from(v.max(0.0)).min(MAX_COORD))
-                    .collect();
-                // Odd-length dash arrays repeat twice per cycle in PDF (§8.4.3.6).
-                if pattern.len() % 2 == 1 {
-                    let clone = pattern.clone();
-                    pattern.extend_from_slice(&clone);
+            let mut pattern: Vec<f64> = dash
+                .array
+                .iter()
+                .take(64)
+                .map(|&v| f64::from(v.max(0.0)).min(MAX_COORD))
+                .collect();
+            let cycle_sum: f64 = pattern.iter().sum();
+            if cycle_sum > 1e-5 {
+                if path_extent / cycle_sum <= MAX_DASH_SEGMENTS {
+                    // Odd-length dash arrays repeat twice per cycle in PDF (§8.4.3.6).
+                    let full_cycle = if pattern.len() % 2 == 1 {
+                        let clone = pattern.clone();
+                        pattern.extend_from_slice(&clone);
+                        cycle_sum * 2.0
+                    } else {
+                        cycle_sum
+                    };
+                    let phase = f64::from(dash.phase).rem_euclid(full_cycle);
+                    stroke = stroke.with_dashes(phase, pattern);
+                } else {
+                    dense_dash = true;
                 }
-                let phase = f64::from(dash.phase).rem_euclid(cycle_sum * 2.0);
-                stroke = stroke.with_dashes(phase, pattern);
             }
         }
         self.ctx.set_stroke(stroke);
+        dense_dash
     }
 
     pub(crate) fn fill_bez_path(&mut self, path: &BezPath) {
@@ -300,54 +314,91 @@ impl Canvas2d {
         }
     }
 
-    /// Draws an `RGBA8` image (`width × height`) placed onto PDF's `[0, 1] × [0, 1]`
+    /// Draws an `RGBA8` image (`img_w × img_h`) placed onto PDF's `[0, 1] × [0, 1]`
     /// unit square (`y = 0` bottom, `y = 1` top) under `unit_to_device`.
+    ///
+    /// When `smooth_downscale` is `true` and the target device extent along X or
+    /// Y is smaller than half the source dimension, iteratively box-filters the
+    /// image by `2×` in premultiplied alpha so high-DPI scanned text and line
+    /// art remain crisp at thumbnail scales instead of aliasing.
+    ///
+    /// Returns `false` if the final texture dimensions exceed `u16::MAX`
+    /// (`65,535` px) and could not be drawn.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_rgba_image(
         &mut self,
-        rgba: Vec<u8>,
+        rgba: Cow<'_, [u8]>,
         img_w: u32,
         img_h: u32,
         unit_to_device: Matrix,
         interpolate: bool,
+        smooth_downscale: bool,
         opacity: f32,
         blend: &BlendState,
-    ) {
-        if self.panicked {
-            return;
+    ) -> bool {
+        if img_w == 0 || img_h == 0 {
+            return true;
         }
-        let (Ok(w), Ok(h)) = (u16::try_from(img_w), u16::try_from(img_h)) else {
-            return;
+        if !unit_to_device.is_finite() || unit_to_device.determinant() == 0.0 {
+            return true;
+        }
+
+        let dev_w = unit_to_device.a.hypot(unit_to_device.b);
+        let dev_h = unit_to_device.c.hypot(unit_to_device.d);
+
+        let mut cur_w = img_w;
+        let mut cur_h = img_h;
+        let mut cur_bytes = rgba;
+        let mut downsampled = false;
+
+        if smooth_downscale && dev_w > 0.0 && dev_h > 0.0 {
+            while ((cur_w as f32) > dev_w * 2.0 && cur_w >= 2)
+                || ((cur_h as f32) > dev_h * 2.0 && cur_h >= 2)
+            {
+                let half_x = (cur_w as f32) > dev_w * 2.0 && cur_w >= 2;
+                let half_y = (cur_h as f32) > dev_h * 2.0 && cur_h >= 2;
+                let (next_w, next_h, next_buf) =
+                    downsample_rgba_box(&cur_bytes, cur_w, cur_h, half_x, half_y);
+                cur_w = next_w;
+                cur_h = next_h;
+                cur_bytes = Cow::Owned(next_buf);
+                downsampled = true;
+            }
+        }
+
+        let (Ok(w), Ok(h)) = (u16::try_from(cur_w), u16::try_from(cur_h)) else {
+            return false;
         };
-        if w == 0 || h == 0 {
-            return;
+        if self.panicked {
+            return true;
         }
-        let Some(vello_pix) = build_vello_pixmap_straight(rgba, w, h) else {
-            return;
+        let Some(vello_pix) = build_vello_pixmap_straight(cur_bytes.into_owned(), w, h) else {
+            return true;
         };
 
         // Image pixel space `[0..w] × [0..h]` (`y` down, row 0 = top) -> PDF unit
         // square `[0..1] × [0..1]` (`y` up, `y = 1` = top):
         // x_u = x_px / w, y_u = 1.0 - y_px / h.
         let img_to_unit = Matrix::new(
-            1.0 / (img_w as f32),
+            1.0 / (cur_w as f32),
             0.0,
             0.0,
-            -1.0 / (img_h as f32),
+            -1.0 / (cur_h as f32),
             0.0,
             1.0,
         );
         let img_to_device = img_to_unit.then(unit_to_device);
         if !img_to_device.is_finite() || img_to_device.determinant() == 0.0 {
-            return;
+            return true;
         }
 
+        let use_bilinear = interpolate || (downsampled && smooth_downscale);
         let brush = Image {
             image: ImageSource::Pixmap(Arc::new(vello_pix)),
             sampler: ImageSampler {
                 x_extend: Extend::Pad,
                 y_extend: Extend::Pad,
-                quality: if interpolate {
+                quality: if use_bilinear {
                     ImageQuality::Medium
                 } else {
                     ImageQuality::Low
@@ -366,6 +417,7 @@ impl Canvas2d {
             ctx.set_paint(brush);
             ctx.fill_rect(&rect);
         });
+        true
     }
 
     /// Rasterizes into an internal `VelloPixmap` (premultiplied `RGBA8`), used
@@ -425,6 +477,85 @@ impl Canvas2d {
         }
         Pixmap::from_bytes(w, h, format, out, limits)
     }
+}
+
+/// Box-filter `2×` step in premultiplied straight-alpha `RGBA8` along `half_x`
+/// and/or `half_y`, handling odd trailing columns/rows cleanly without haloing
+/// transparent pixels.
+fn downsample_rgba_box(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    half_x: bool,
+    half_y: bool,
+) -> (u32, u32, Vec<u8>) {
+    let dst_w = if half_x { (src_w / 2).max(1) } else { src_w };
+    let dst_h = if half_y { (src_h / 2).max(1) } else { src_h };
+    let sw = src_w as usize;
+    let sh = src_h as usize;
+    let dw = dst_w as usize;
+    let dh = dst_h as usize;
+    let mut out = vec![0_u8; dw * dh * 4];
+
+    for dy in 0..dh {
+        let sy0 = if half_y { dy * 2 } else { dy };
+        let sy1 = if half_y {
+            if dy + 1 == dh {
+                sh
+            } else {
+                (dy * 2 + 2).min(sh)
+            }
+        } else {
+            sy0 + 1
+        };
+        for dx in 0..dw {
+            let sx0 = if half_x { dx * 2 } else { dx };
+            let sx1 = if half_x {
+                if dx + 1 == dw {
+                    sw
+                } else {
+                    (dx * 2 + 2).min(sw)
+                }
+            } else {
+                sx0 + 1
+            };
+
+            let mut sum_pr = 0_u32;
+            let mut sum_pg = 0_u32;
+            let mut sum_pb = 0_u32;
+            let mut sum_a = 0_u32;
+            let mut count = 0_u32;
+
+            for sy in sy0..sy1 {
+                let row_base = sy * sw * 4;
+                for sx in sx0..sx1 {
+                    let idx = row_base + sx * 4;
+                    let r = u32::from(src[idx]);
+                    let g = u32::from(src[idx + 1]);
+                    let b = u32::from(src[idx + 2]);
+                    let a = u32::from(src[idx + 3]);
+                    sum_pr += r * a;
+                    sum_pg += g * a;
+                    sum_pb += b * a;
+                    sum_a += a;
+                    count += 1;
+                }
+            }
+
+            let dst_idx = (dy * dw + dx) * 4;
+            if sum_a == 0 || count == 0 {
+                out[dst_idx..dst_idx + 4].copy_from_slice(&[0, 0, 0, 0]);
+            } else {
+                let out_a = ((sum_a + count / 2) / count).min(255) as u8;
+                let un = |sum_pc: u32| -> u8 { ((sum_pc + sum_a / 2) / sum_a).min(255) as u8 };
+                out[dst_idx] = un(sum_pr);
+                out[dst_idx + 1] = un(sum_pg);
+                out[dst_idx + 2] = un(sum_pb);
+                out[dst_idx + 3] = out_a;
+            }
+        }
+    }
+    (dst_w, dst_h, out)
 }
 
 pub(crate) fn build_vello_pixmap_straight(

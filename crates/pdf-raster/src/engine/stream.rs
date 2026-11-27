@@ -1,46 +1,35 @@
 //! Content-stream event state machine (`StreamState`, `q`/`Q`, Form XObject
 //! stacks, clip unwinding, and optional-content suppression).
 
-use std::collections::HashMap;
 use std::ops::ControlFlow;
 
 use pdf_content_streams::{Concat, FillRule, Operator};
 use pdf_gfx::{
-    BlendState, Event, Forms, Kind, Matrix, Opts as GfxOpts, SoftMask, State, Summary, Wants,
-    interpret_with,
+    BlendState, Event, Forms, Kind, Matrix, Opts as GfxOpts, Summary, Wants, interpret_with,
 };
-use pdf_objects::fault::Sink;
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Object, Resolve, Streams};
 use vello_cpu::Mask;
 use vello_cpu::kurbo::BezPath;
 
 use crate::canvas2d::{Canvas2d, segs_to_bez_path};
-use crate::engine::mask::{SoftMaskCacheKey, SoftMaskKey, sync_soft_mask};
+use crate::engine::mask::{SoftMaskKey, sync_soft_mask};
 use crate::engine::ops::{
     accum_text_clip_only, paint_image, paint_path, paint_shading_operator, paint_text,
 };
 use crate::engine::sinks::{EraseSink, GfxSinkAdapter, LocalFaultSink, SharedSink};
-use crate::engine::{RenderCtx, RenderState, is_mark_hidden_by_oc, rect_to_segs};
+use crate::engine::{
+    RenderCtx, RenderState, check_cancelled, is_mark_hidden_by_oc, is_srgb_group_cs, rect_to_segs,
+};
 use crate::error::Error;
 use crate::fault::Fault;
 use crate::limits::LimitKind;
-use crate::paint::lookup_resource_entry;
 
 #[derive(Clone)]
 struct SavedStateEntry {
     clips_pushed: usize,
     mask: Option<Mask>,
     smask_key: SoftMaskKey,
-    group_overrides: GroupOverrides,
-}
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct GroupOverrides {
-    pub(crate) active: bool,
-    pub(crate) ca_fill_set: bool,
-    pub(crate) ca_stroke_set: bool,
-    pub(crate) bm_set: bool,
-    pub(crate) smask_set: bool,
 }
 
 struct FormStackEntry {
@@ -51,7 +40,6 @@ struct FormStackEntry {
     prev_mask: Option<Mask>,
     prev_smask_key: SoftMaskKey,
     prev_base_ctm: Matrix,
-    prev_group_overrides: GroupOverrides,
     suppressed_oc: bool,
 }
 
@@ -61,9 +49,7 @@ pub(crate) struct StreamState {
     current_clips: usize,
     current_mask: Option<Mask>,
     current_smask_key: SoftMaskKey,
-    smask_cache: HashMap<SoftMaskCacheKey, Option<Mask>>,
     stream_base_ctm: Matrix,
-    group_overrides: GroupOverrides,
     oc_hidden_marks: Vec<bool>,
     oc_suppress_count: usize,
     bt_clip_bez: BezPath,
@@ -85,9 +71,7 @@ impl StreamState {
             current_clips: 0,
             current_mask: None,
             current_smask_key: SoftMaskKey::None,
-            smask_cache: HashMap::new(),
             stream_base_ctm: Matrix::IDENTITY,
-            group_overrides: GroupOverrides::default(),
             oc_hidden_marks: Vec::new(),
             oc_suppress_count: 0,
             bt_clip_bez: BezPath::new(),
@@ -152,13 +136,15 @@ impl StreamState {
                     return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Operators)));
                 }
                 state.ops_left -= 1;
+                if state.ops_left & 63 == 0 {
+                    check_cancelled(ctx.opts)?;
+                }
                 match event.at.operator() {
                     Operator::Save => {
                         self.q_stack.push(SavedStateEntry {
                             clips_pushed: self.current_clips,
                             mask: self.current_mask.clone(),
                             smask_key: self.current_smask_key.clone(),
-                            group_overrides: self.group_overrides,
                         });
                         self.current_clips = 0;
                     }
@@ -172,7 +158,6 @@ impl StreamState {
                             self.current_clips = saved.clips_pushed;
                             self.current_mask = saved.mask;
                             self.current_smask_key = saved.smask_key;
-                            self.group_overrides = saved.group_overrides;
                             canvas.set_mask(self.current_mask.clone());
                         }
                     }
@@ -194,36 +179,6 @@ impl StreamState {
                         }
                         self.bt_clip_bez.truncate(0);
                         self.in_bt = false;
-                    }
-                    Operator::ExtGState if self.group_overrides.active => {
-                        if let Some(op_name) = event.at.operand(0).and_then(|o| o.name())
-                            && let Some(gs_obj) = lookup_resource_entry(
-                                objects,
-                                event.at.resources(),
-                                event.at.page_resources(),
-                                b"ExtGState",
-                                &op_name,
-                            )
-                        {
-                            let gs_dict = match gs_obj.as_reference() {
-                                Some(id) => objects.try_resolve(id)?.and_then(Object::as_dict),
-                                None => gs_obj.as_dict(),
-                            };
-                            if let Some(gs) = gs_dict {
-                                if gs.has(b"ca") {
-                                    self.group_overrides.ca_fill_set = true;
-                                }
-                                if gs.has(b"CA") {
-                                    self.group_overrides.ca_stroke_set = true;
-                                }
-                                if gs.has(b"BM") {
-                                    self.group_overrides.bm_set = true;
-                                }
-                                if gs.has(b"SMask") {
-                                    self.group_overrides.smask_set = true;
-                                }
-                            }
-                        }
                     }
                     _ => {}
                 }
@@ -249,6 +204,7 @@ impl StreamState {
             }
 
             Kind::FormBegin(form_use) => {
+                check_cancelled(ctx.opts)?;
                 let hidden = if let (Some(oc), Some(oid)) = (ctx.oc_state, form_use.oc) {
                     let oc_obj = Object::from(oid);
                     !oc.is_visible(objects, &oc_obj)?
@@ -265,7 +221,6 @@ impl StreamState {
                         prev_mask: self.current_mask.clone(),
                         prev_smask_key: self.current_smask_key.clone(),
                         prev_base_ctm: self.stream_base_ctm,
-                        prev_group_overrides: self.group_overrides,
                         suppressed_oc: true,
                     });
                     return Ok(());
@@ -274,7 +229,6 @@ impl StreamState {
                 sync_soft_mask(
                     ctx,
                     event.state,
-                    self.group_overrides,
                     self.page_to_device,
                     self.layer_depth,
                     canvas,
@@ -282,11 +236,15 @@ impl StreamState {
                     sink,
                     &mut self.current_mask,
                     &mut self.current_smask_key,
-                    &mut self.smask_cache,
                 )?;
 
-                let eff_blend = effective_blend(event.state, self.group_overrides);
-                let eff_fill_alpha = effective_fill_alpha(event.state, self.group_overrides);
+                if matches!(event.state.blend_mode, BlendState::Other(_)) {
+                    sink.fault(
+                        Place::new(Some(form_use.form), None),
+                        Fault::UnsupportedBlendMode,
+                    );
+                    state.approximated = true;
+                }
 
                 let mut pushed_bbox_clip = false;
                 if let Some(bbox) = form_use.bbox {
@@ -302,6 +260,19 @@ impl StreamState {
                 }
 
                 let is_group = form_use.group.is_some();
+                if let Some(ref grp) = form_use.group
+                    && (!grp.isolated
+                        || grp.knockout
+                        || grp
+                            .color_space
+                            .is_some_and(|cs| !is_srgb_group_cs(objects, cs)))
+                {
+                    sink.fault(
+                        Place::new(Some(form_use.form), None),
+                        Fault::ApproximatedGroup,
+                    );
+                    state.approximated = true;
+                }
                 let pushed_layer = if is_group {
                     if self.form_stack.len() + self.layer_depth >= ctx.opts.limits.max_layer_depth {
                         if pushed_bbox_clip {
@@ -311,8 +282,8 @@ impl StreamState {
                     }
                     canvas.push_group_layer(
                         None,
-                        &eff_blend,
-                        eff_fill_alpha,
+                        &event.state.blend_mode,
+                        event.state.fill_alpha,
                         self.current_mask.clone(),
                     );
                     canvas.set_mask(None);
@@ -324,18 +295,10 @@ impl StreamState {
                 let prev_mask = self.current_mask.clone();
                 let prev_smask_key = self.current_smask_key.clone();
                 let prev_base = self.stream_base_ctm;
-                let prev_overrides = self.group_overrides;
 
                 if is_group {
                     self.current_mask = None;
                     self.current_smask_key = SoftMaskKey::None;
-                    self.group_overrides = GroupOverrides {
-                        active: true,
-                        ca_fill_set: false,
-                        ca_stroke_set: false,
-                        bm_set: false,
-                        smask_set: false,
-                    };
                 }
                 // `form_use.matrix` from `pdf-gfx` already maps FormSpace -> enclosing
                 // stream's coordinate space (`PageSpace`), so never multiply by
@@ -350,7 +313,6 @@ impl StreamState {
                     prev_mask,
                     prev_smask_key,
                     prev_base_ctm: prev_base,
-                    prev_group_overrides: prev_overrides,
                     suppressed_oc: false,
                 });
                 return Ok(());
@@ -364,7 +326,6 @@ impl StreamState {
                         self.current_mask = entry.prev_mask;
                         self.current_smask_key = entry.prev_smask_key;
                         self.stream_base_ctm = entry.prev_base_ctm;
-                        self.group_overrides = entry.prev_group_overrides;
                         canvas.set_mask(self.current_mask.clone());
                         return Ok(());
                     }
@@ -377,7 +338,6 @@ impl StreamState {
                     self.current_mask = entry.prev_mask;
                     self.current_smask_key = entry.prev_smask_key;
                     self.stream_base_ctm = entry.prev_base_ctm;
-                    self.group_overrides = entry.prev_group_overrides;
                     canvas.set_mask(self.current_mask.clone());
                 }
                 return Ok(());
@@ -417,7 +377,6 @@ impl StreamState {
         sync_soft_mask(
             ctx,
             event.state,
-            self.group_overrides,
             self.page_to_device,
             self.layer_depth,
             canvas,
@@ -425,7 +384,6 @@ impl StreamState {
             sink,
             &mut self.current_mask,
             &mut self.current_smask_key,
-            &mut self.smask_cache,
         )?;
 
         match &event.kind {
@@ -438,7 +396,6 @@ impl StreamState {
                     self.page_to_device,
                     self.layer_depth,
                     self.uncolored_override,
-                    self.group_overrides,
                     canvas,
                     state,
                     sink,
@@ -459,7 +416,6 @@ impl StreamState {
                     self.page_to_device,
                     self.layer_depth,
                     self.uncolored_override,
-                    self.group_overrides,
                     canvas,
                     state,
                     sink,
@@ -475,7 +431,6 @@ impl StreamState {
                     self.page_to_device,
                     self.layer_depth,
                     self.uncolored_override,
-                    self.group_overrides,
                     canvas,
                     state,
                     sink,
@@ -487,7 +442,6 @@ impl StreamState {
                     event,
                     sh.bounds,
                     self.page_to_device,
-                    self.group_overrides,
                     canvas,
                     state,
                     sink,
@@ -517,6 +471,7 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
+    check_cancelled(ctx.opts)?;
     if layer_depth > ctx.opts.limits.max_layer_depth {
         return Err(Error::Limit(LimitKind::LayerDepth));
     }
@@ -573,36 +528,4 @@ where
         .decompressed_left
         .saturating_sub(sub_summary.decompressed);
     Ok(sub_summary)
-}
-
-pub(crate) fn effective_fill_alpha(state: &State, ov: GroupOverrides) -> f32 {
-    if ov.active && !ov.ca_fill_set {
-        1.0
-    } else {
-        state.fill_alpha
-    }
-}
-
-pub(crate) fn effective_stroke_alpha(state: &State, ov: GroupOverrides) -> f32 {
-    if ov.active && !ov.ca_stroke_set {
-        1.0
-    } else {
-        state.stroke_alpha
-    }
-}
-
-pub(crate) fn effective_blend(state: &State, ov: GroupOverrides) -> BlendState {
-    if ov.active && !ov.bm_set {
-        BlendState::default()
-    } else {
-        state.blend_mode.clone()
-    }
-}
-
-pub(crate) fn effective_smask(state: &State, ov: GroupOverrides) -> SoftMask {
-    if ov.active && !ov.smask_set {
-        SoftMask::None
-    } else {
-        state.soft_mask
-    }
 }

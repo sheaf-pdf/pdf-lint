@@ -4,13 +4,10 @@
 
 use std::fmt;
 #[cfg(feature = "icc")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
-#[cfg(feature = "icc")]
-use pdf_objects::Stream;
-use pdf_objects::fault::Place;
-use pdf_objects::fault::Sink;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Rules, Span, Streams, Unreadable, Why};
+use pdf_objects::fault::{Place, Sink};
+use pdf_objects::{Object, ObjectId, Resolve, Rules, Span, Streams, Unreadable, Why};
 
 use crate::cmyk_lut::pdfium_cmyk_to_srgb;
 use crate::fault::Fault;
@@ -18,9 +15,10 @@ use crate::function::{Function, clamp_pair};
 use crate::limits::Limits;
 use crate::resources::Spaces;
 use crate::space::{
-    Cie, Colorant, DeviceN, Family, Icc, Indexed, Separation, Space, read_number_vec,
-    resolve_bounded,
+    Cie, Colorant, DeviceN, Family, Icc, Indexed, LookupError, Separation, Space, table_90_decode,
 };
+#[cfg(feature = "icc")]
+use crate::walk::{StreamDecodeErr, decode_stream_or_inline};
 
 const D65_WHITE: [f32; 3] = [0.950_47, 1.0, 1.088_83];
 
@@ -31,10 +29,10 @@ pub struct EvalOptions<'o> {
     /// Reading/evaluation policy:
     /// - [`Rules::Iso`]: applies `/DefaultGray`, `/DefaultRGB`, `/DefaultCMYK` (§8.6.5.6),
     ///   optional destination `/OutputIntents` ICC profile (§14.11.5), `CalGray` `/Gamma` +
-    ///   `/WhitePoint`, ISO §10.3.5 unprofiled CMYK (`1 - min(1, C + K)`), and `Separation /All`
+    ///   `/WhitePoint`, ISO §10.4.2.5 unprofiled CMYK (`1 - min(1, C + K)`), and `Separation /All`
     ///   neutral tint `1 - t`.
     /// - [`Rules::Pdfium`]: reproduces PDFium as of chromium/8152 (`AdobeCMYK_to_sRGB`, direct
-    ///   `CalGray` passthrough, ignoring `/Default*` unless explicitly requested, and running
+    ///   `CalGray` passthrough, ignoring `/Default*` and `/OutputIntents`, and running
     ///   `Separation /All`'s tint transform).
     pub rules: Rules,
     /// Optional `/DefaultGray` space from the active `/Resources` `/ColorSpace` dictionary.
@@ -141,10 +139,22 @@ fn quantize_srgb8(rgb: [f32; 3]) -> [u8; 3] {
     [ch(rgb[0]), ch(rgb[1]), ch(rgb[2])]
 }
 
+#[inline]
+fn quantize_u8(v: f32) -> u8 {
+    if v.is_finite() {
+        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    } else {
+        0
+    }
+}
+
 /// A compiled, thread-safe (`Send + Sync + Clone`) color space evaluator.
 ///
 /// Decodes lookup tables, tint-transform functions, and (with `feature = "icc"`) ICC profiles once
-/// at preparation time so per-pixel / per-scanline evaluation performs zero object lookups.
+/// at preparation time so per-pixel / per-scanline evaluation performs zero object lookups and
+/// requires no [`Limits`] parameter. When the `icc` feature is disabled, `ICCBased` spaces
+/// silently evaluate through their `/Alternate` (or `/N` device space) without emitting
+/// [`Fault::IccProfile`].
 #[derive(Clone)]
 pub struct PreparedSpace {
     family: Family,
@@ -161,7 +171,9 @@ enum PreparedKind {
         rules: Rules,
     },
     Defaulted {
+        rules: Rules,
         target: Box<PreparedSpace>,
+        unprofiled: Box<PreparedSpace>,
     },
     CalGray {
         rules: Rules,
@@ -182,6 +194,8 @@ enum PreparedKind {
     Icc {
         n: u32,
         is_lab_pcs_input: bool,
+        only_iso: bool,
+        rules: Rules,
         range: Vec<(f32, f32)>,
         transform: Arc<moxcms::TransformF32Executor>,
         fallback: Box<PreparedSpace>,
@@ -196,8 +210,12 @@ enum PreparedKind {
         base: Box<PreparedSpace>,
     },
     SeparationNone,
-    SeparationAllIso,
+    SeparationAll {
+        rules: Rules,
+        tint_fallback: Option<(Function, Box<PreparedSpace>)>,
+    },
     Tint {
+        rules: Rules,
         all_none: bool,
         tint: Function,
         alternate: Box<PreparedSpace>,
@@ -267,6 +285,61 @@ impl PreparedSpace {
         .build(space, 0, true)
     }
 
+    /// Prepares an `ICCBased` space directly from raw ICC profile bytes and channel count `n`
+    /// (`1`, `3`, or `4`), without requiring an indirect PDF stream [`ObjectId`].
+    ///
+    /// Used for ICC profiles embedded inside image containers (such as JP2 `colr` boxes). When
+    /// `profile` is invalid or the `icc` feature is disabled, falls back to the unprofiled device
+    /// space for `n` (emitting [`Fault::IccProfile`] when `icc` is enabled and `profile` fails to
+    /// parse). Returns `None` if `n` is not `1`, `3`, or `4`.
+    pub fn from_icc_bytes<S: Sink<Fault> + ?Sized>(
+        profile: &[u8],
+        n: u32,
+        options: &EvalOptions<'_>,
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Option<PreparedSpace> {
+        if !matches!(n, 1 | 3 | 4) {
+            return None;
+        }
+        let decode_ranges = Some(vec![(0.0, 1.0); n as usize]);
+        let fallback = unprofiled_device_space(n, options.rules);
+
+        #[cfg(feature = "icc")]
+        {
+            if let Some((transform, is_lab)) = open_icc_transform(profile, n, limits) {
+                return Some(PreparedSpace {
+                    family: Family::ICCBased,
+                    components: n,
+                    decode_ranges,
+                    kind: PreparedKind::Icc {
+                        n,
+                        is_lab_pcs_input: is_lab,
+                        only_iso: false,
+                        rules: options.rules,
+                        range: vec![(0.0, 1.0); n as usize],
+                        transform,
+                        fallback: Box::new(fallback),
+                    },
+                });
+            }
+            if sink.wants() {
+                sink.fault(Place::new(None, None), Fault::IccProfile);
+            }
+        }
+        #[cfg(not(feature = "icc"))]
+        let _ = (profile, limits, sink);
+
+        Some(PreparedSpace {
+            family: Family::ICCBased,
+            components: n,
+            decode_ranges,
+            kind: PreparedKind::IccFallback {
+                fallback: Box::new(fallback),
+            },
+        })
+    }
+
     /// The prepared space's [`Family`].
     #[must_use]
     pub const fn family(&self) -> Family {
@@ -289,44 +362,39 @@ impl PreparedSpace {
         }
     }
 
+    /// Component `(min, max)` decode ranges for non-`Indexed` spaces, or `None` for `Indexed`.
+    #[must_use]
+    pub fn decode_ranges(&self) -> Option<&[(f64, f64)]> {
+        self.decode_ranges.as_deref()
+    }
+
     /// Pre-resolved default `/Decode` intervals `(min, max)` for an image of
     /// `bits_per_component` (`1..=32`) in this space (ISO 32000-2, Table 90).
     #[must_use]
     pub fn default_decode(&self, bits_per_component: u8) -> Option<Vec<(f64, f64)>> {
-        if !(1..=32).contains(&bits_per_component) {
-            return None;
-        }
-        if self.family == Family::Indexed {
-            let hi = ((1_u64 << bits_per_component) - 1) as f64;
-            return Some(vec![(0.0, hi)]);
-        }
-        self.decode_ranges.clone()
+        table_90_decode(
+            self.family,
+            Some(self.components),
+            bits_per_component,
+            self.decode_ranges.as_deref(),
+        )
     }
 
     /// Evaluates `components` (`len >= self.components()`) to [`Paint`].
     #[must_use]
-    pub fn eval(&self, components: &[f32], limits: &Limits) -> Option<Paint> {
-        self.eval_inner(components, None, limits)
+    pub fn eval(&self, components: &[f32]) -> Option<Paint> {
+        self.eval_inner(components, None)
     }
 
     /// Evaluates `components` (`len >= self.components()`) to [`Paint`], overriding the active
-    /// [`Rules`] (`Rules::Iso` vs `Rules::Pdfium`) on device, CIE, and base/alternate spaces.
+    /// [`Rules`] (`Rules::Iso` vs `Rules::Pdfium`) across device defaults, `/OutputIntents`, CIE
+    /// spaces, `Separation /All`, `DeviceN /None`, and `Type 4` PostScript tint transforms.
     #[must_use]
-    pub fn eval_with_rules(
-        &self,
-        components: &[f32],
-        rules: Rules,
-        limits: &Limits,
-    ) -> Option<Paint> {
-        self.eval_inner(components, Some(rules), limits)
+    pub fn eval_with_rules(&self, components: &[f32], rules: Rules) -> Option<Paint> {
+        self.eval_inner(components, Some(rules))
     }
 
-    fn eval_inner(
-        &self,
-        components: &[f32],
-        rules_override: Option<Rules>,
-        limits: &Limits,
-    ) -> Option<Paint> {
+    fn eval_inner(&self, components: &[f32], rules_override: Option<Rules>) -> Option<Paint> {
         let need = self.components as usize;
         if components.len() < need {
             return None;
@@ -353,7 +421,18 @@ impl PreparedSpace {
                 };
                 Some(Paint::Srgb(rgb))
             }
-            PreparedKind::Defaulted { target } => target.eval_inner(c, rules_override, limits),
+            PreparedKind::Defaulted {
+                rules,
+                target,
+                unprofiled,
+            } => {
+                let active = rules_override.unwrap_or(*rules);
+                if active == Rules::Iso {
+                    target.eval_inner(c, rules_override)
+                } else {
+                    unprofiled.eval_inner(c, rules_override)
+                }
+            }
             PreparedKind::CalGray {
                 rules,
                 white,
@@ -434,34 +513,18 @@ impl PreparedSpace {
             PreparedKind::Icc {
                 n,
                 is_lab_pcs_input,
+                only_iso,
+                rules,
                 range,
                 transform,
                 fallback,
             } => {
-                let mut src = [0.0_f32; 4];
-                if *is_lab_pcs_input && *n == 3 {
-                    let l = clamp_pair(c[0], range[0].0, range[0].1);
-                    let a = clamp_pair(c[1], range[1].0, range[1].1);
-                    let b = clamp_pair(c[2], range[2].0, range[2].1);
-                    src[0] = (l / 100.0).clamp(0.0, 1.0);
-                    src[1] = ((a + 128.0) / 255.0).clamp(0.0, 1.0);
-                    src[2] = ((b + 128.0) / 255.0).clamp(0.0, 1.0);
-                } else {
-                    for (i, &(r0, r1)) in range.iter().enumerate() {
-                        let clamped = clamp_pair(c[i], r0, r1);
-                        let span = r1 - r0;
-                        src[i] = if span == 0.0 {
-                            0.0
-                        } else {
-                            let v = (clamped - r0) / span;
-                            if v.is_finite() {
-                                v.clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            }
-                        };
-                    }
+                let active = rules_override.unwrap_or(*rules);
+                if *only_iso && active != Rules::Iso {
+                    return fallback.eval_inner(c, rules_override);
                 }
+                let mut src = [0.0_f32; 4];
+                normalize_icc_input(c, *n, *is_lab_pcs_input, range, &mut src);
                 let mut dst = [0.0_f32; 3];
                 if moxcms::TransformExecutor::transform(
                     transform.as_ref(),
@@ -476,12 +539,10 @@ impl PreparedSpace {
                         clamp01(dst[2]),
                     ]))
                 } else {
-                    fallback.eval_inner(c, rules_override, limits)
+                    fallback.eval_inner(c, rules_override)
                 }
             }
-            PreparedKind::IccFallback { fallback } => {
-                fallback.eval_inner(c, rules_override, limits)
-            }
+            PreparedKind::IccFallback { fallback } => fallback.eval_inner(c, rules_override),
             PreparedKind::Indexed {
                 hival,
                 base_ranges,
@@ -506,35 +567,35 @@ impl PreparedSpace {
                     let (lo, hi) = base_ranges.get(j).copied().unwrap_or((0.0, 1.0));
                     *slot = lo + t * (hi - lo);
                 }
-                base.eval_inner(dst, rules_override, limits)
+                base.eval_inner(dst, rules_override)
             }
             PreparedKind::SeparationNone => Some(Paint::None),
-            PreparedKind::SeparationAllIso => {
-                let g = 1.0 - clamp01(c[0]);
-                Some(Paint::Srgb([g, g, g]))
+            PreparedKind::SeparationAll {
+                rules,
+                tint_fallback,
+            } => {
+                let active = rules_override.unwrap_or(*rules);
+                if active == Rules::Iso {
+                    let g = 1.0 - clamp01(c[0]);
+                    Some(Paint::Srgb([g, g, g]))
+                } else if let Some((tint, alternate)) = tint_fallback {
+                    eval_tint_transform(c, tint, alternate, rules_override)
+                } else {
+                    let g = 1.0 - clamp01(c[0]);
+                    Some(Paint::Srgb([g, g, g]))
+                }
             }
             PreparedKind::Tint {
+                rules,
                 all_none,
                 tint,
                 alternate,
             } => {
-                if *all_none && rules_override.unwrap_or(Rules::Iso) == Rules::Iso {
+                let active = rules_override.unwrap_or(*rules);
+                if *all_none && active == Rules::Iso {
                     return Some(Paint::None);
                 }
-                let alt_n = alternate.components() as usize;
-                let func_n = (tint.outputs() as usize).max(alt_n);
-                let mut buf = [0.0_f32; 16];
-                let mut heap = Vec::new();
-                let func_out: &mut [f32] = if func_n <= buf.len() {
-                    &mut buf[..func_n]
-                } else {
-                    heap.resize(func_n, 0.0);
-                    &mut heap
-                };
-                if !tint.eval(c, func_out, limits) {
-                    return None;
-                }
-                alternate.eval_inner(&func_out[..alt_n], rules_override, limits)
+                eval_tint_transform(c, tint, alternate, rules_override)
             }
         }
     }
@@ -542,15 +603,15 @@ impl PreparedSpace {
     /// Evaluates `components` directly to normalized sRGB (`[f32; 3]`), returning `None` if
     /// evaluation fails or produces [`Paint::None`].
     #[must_use]
-    pub fn eval_srgb(&self, components: &[f32], limits: &Limits) -> Option<[f32; 3]> {
-        self.eval(components, limits)?.srgb()
+    pub fn eval_srgb(&self, components: &[f32]) -> Option<[f32; 3]> {
+        self.eval(components)?.srgb()
     }
 
     /// Evaluates `components` directly to quantized `sRGB8` (`[u8; 3]`), returning `None` if
     /// evaluation fails or produces [`Paint::None`].
     #[must_use]
-    pub fn eval_srgb8(&self, components: &[f32], limits: &Limits) -> Option<[u8; 3]> {
-        self.eval(components, limits)?.srgb8()
+    pub fn eval_srgb8(&self, components: &[f32]) -> Option<[u8; 3]> {
+        self.eval(components)?.srgb8()
     }
 
     /// Batch-converts `out.len()` packed pixel component tuples from `samples`
@@ -558,12 +619,35 @@ impl PreparedSpace {
     /// [`Paint::None`] pixels.
     ///
     /// Returns `false` if `samples` is too short or any pixel fails to evaluate.
+    #[must_use]
     pub fn eval_pixels_srgb8(
         &self,
         samples: &[f32],
         out: &mut [[u8; 3]],
         backdrop: [u8; 3],
-        limits: &Limits,
+    ) -> bool {
+        self.eval_pixels_srgb8_inner(samples, out, backdrop, None)
+    }
+
+    /// Like [`Self::eval_pixels_srgb8`], overriding the active [`Rules`] across all nested/default
+    /// spaces.
+    #[must_use]
+    pub fn eval_pixels_srgb8_with_rules(
+        &self,
+        samples: &[f32],
+        out: &mut [[u8; 3]],
+        backdrop: [u8; 3],
+        rules: Rules,
+    ) -> bool {
+        self.eval_pixels_srgb8_inner(samples, out, backdrop, Some(rules))
+    }
+
+    fn eval_pixels_srgb8_inner(
+        &self,
+        samples: &[f32],
+        out: &mut [[u8; 3]],
+        backdrop: [u8; 3],
+        rules_override: Option<Rules>,
     ) -> bool {
         let stride = self.components as usize;
         let Some(needed) = out.len().checked_mul(stride) else {
@@ -572,14 +656,224 @@ impl PreparedSpace {
         if samples.len() < needed {
             return false;
         }
+        if out.is_empty() {
+            return true;
+        }
+
+        match &self.kind {
+            PreparedKind::DeviceGray => {
+                for (dst, &s) in out.iter_mut().zip(&samples[..needed]) {
+                    let g = quantize_u8(s);
+                    *dst = [g, g, g];
+                }
+                return true;
+            }
+            PreparedKind::DeviceRGB => {
+                let triples = samples[..needed].as_chunks::<3>().0;
+                for (dst, &[r, g, b]) in out.iter_mut().zip(triples) {
+                    *dst = [quantize_u8(r), quantize_u8(g), quantize_u8(b)];
+                }
+                return true;
+            }
+            PreparedKind::DeviceCMYK { rules } => {
+                let quads = samples[..needed].as_chunks::<4>().0;
+                if rules_override.unwrap_or(*rules) == Rules::Iso {
+                    for (dst, &[c, m, y, k]) in out.iter_mut().zip(quads) {
+                        let (cy, mg, yl, bk) = (clamp01(c), clamp01(m), clamp01(y), clamp01(k));
+                        *dst = quantize_srgb8([
+                            1.0 - (cy + bk).min(1.0),
+                            1.0 - (mg + bk).min(1.0),
+                            1.0 - (yl + bk).min(1.0),
+                        ]);
+                    }
+                } else {
+                    for (dst, &[c, m, y, k]) in out.iter_mut().zip(quads) {
+                        *dst = quantize_srgb8(pdfium_cmyk_to_srgb(
+                            clamp01(c),
+                            clamp01(m),
+                            clamp01(y),
+                            clamp01(k),
+                        ));
+                    }
+                }
+                return true;
+            }
+            PreparedKind::Defaulted {
+                rules,
+                target,
+                unprofiled,
+            } => {
+                if rules_override.unwrap_or(*rules) == Rules::Iso {
+                    return target.eval_pixels_srgb8_inner(samples, out, backdrop, rules_override);
+                }
+                return unprofiled.eval_pixels_srgb8_inner(samples, out, backdrop, rules_override);
+            }
+            PreparedKind::IccFallback { fallback } => {
+                return fallback.eval_pixels_srgb8_inner(samples, out, backdrop, rules_override);
+            }
+            PreparedKind::SeparationNone => {
+                out.fill(backdrop);
+                return true;
+            }
+            #[cfg(feature = "icc")]
+            PreparedKind::Icc {
+                n,
+                is_lab_pcs_input,
+                only_iso,
+                rules,
+                range,
+                transform,
+                fallback,
+            } => {
+                if *only_iso && rules_override.unwrap_or(*rules) != Rules::Iso {
+                    return fallback.eval_pixels_srgb8_inner(
+                        samples,
+                        out,
+                        backdrop,
+                        rules_override,
+                    );
+                }
+                let ch = *n as usize;
+                let mut src_chunk = [0.0_f32; 64 * 4];
+                let mut dst_chunk = [0.0_f32; 64 * 3];
+                let mut pixel_idx = 0_usize;
+                while pixel_idx < out.len() {
+                    let count = (out.len() - pixel_idx).min(64);
+                    for k in 0..count {
+                        let c_off = (pixel_idx + k) * ch;
+                        normalize_icc_input(
+                            &samples[c_off..c_off + ch],
+                            *n,
+                            *is_lab_pcs_input,
+                            range,
+                            &mut src_chunk[k * ch..(k + 1) * ch],
+                        );
+                    }
+                    if moxcms::TransformExecutor::transform(
+                        transform.as_ref(),
+                        &src_chunk[..count * ch],
+                        &mut dst_chunk[..count * 3],
+                    )
+                    .is_ok()
+                    {
+                        for k in 0..count {
+                            let d = &dst_chunk[k * 3..k * 3 + 3];
+                            out[pixel_idx + k] =
+                                [quantize_u8(d[0]), quantize_u8(d[1]), quantize_u8(d[2])];
+                        }
+                    } else if !fallback.eval_pixels_srgb8_inner(
+                        &samples[pixel_idx * ch..(pixel_idx + count) * ch],
+                        &mut out[pixel_idx..pixel_idx + count],
+                        backdrop,
+                        rules_override,
+                    ) {
+                        return false;
+                    }
+                    pixel_idx += count;
+                }
+                return true;
+            }
+            PreparedKind::Indexed { hival, .. } if out.len() >= 16 => {
+                let mut lut: [Option<[u8; 3]>; 256] = [None; 256];
+                let hi = *hival;
+                for (dst, &raw) in out.iter_mut().zip(&samples[..needed]) {
+                    let r = if raw.is_finite() { raw.round() } else { 0.0 };
+                    let idx = (r.clamp(0.0, f32::from(hi)) as usize).min(hi as usize);
+                    if let Some(rgb) = lut[idx] {
+                        *dst = rgb;
+                    } else {
+                        let Some(paint) = self.eval_inner(&[idx as f32], rules_override) else {
+                            return false;
+                        };
+                        let rgb = paint.srgb8_over(backdrop);
+                        lut[idx] = Some(rgb);
+                        *dst = rgb;
+                    }
+                }
+                return true;
+            }
+            _ => {}
+        }
+
         for (i, dst) in out.iter_mut().enumerate() {
             let start = i * stride;
-            let Some(paint) = self.eval(&samples[start..start + stride], limits) else {
+            let Some(paint) = self.eval_inner(&samples[start..start + stride], rules_override)
+            else {
                 return false;
             };
             *dst = paint.srgb8_over(backdrop);
         }
         true
+    }
+}
+
+fn eval_tint_transform(
+    c: &[f32],
+    tint: &Function,
+    alternate: &PreparedSpace,
+    rules_override: Option<Rules>,
+) -> Option<Paint> {
+    let alt_n = alternate.components() as usize;
+    let func_n = (tint.outputs() as usize).max(alt_n);
+    let mut buf = [0.0_f32; 16];
+    let mut heap = Vec::new();
+    let func_out: &mut [f32] = if func_n <= buf.len() {
+        &mut buf[..func_n]
+    } else {
+        heap.resize(func_n, 0.0);
+        &mut heap
+    };
+    if !tint.eval_with_rules(c, func_out, rules_override) {
+        return None;
+    }
+    alternate.eval_inner(&func_out[..alt_n], rules_override)
+}
+
+#[cfg(feature = "icc")]
+#[inline]
+fn normalize_icc_input(
+    c: &[f32],
+    n: u32,
+    is_lab_pcs_input: bool,
+    range: &[(f32, f32)],
+    src: &mut [f32],
+) {
+    if is_lab_pcs_input && n == 3 {
+        let l = clamp_pair(c[0], range[0].0, range[0].1);
+        let a = clamp_pair(c[1], range[1].0, range[1].1);
+        let b = clamp_pair(c[2], range[2].0, range[2].1);
+        src[0] = (l / 100.0).clamp(0.0, 1.0);
+        src[1] = ((a + 128.0) / 255.0).clamp(0.0, 1.0);
+        src[2] = ((b + 128.0) / 255.0).clamp(0.0, 1.0);
+    } else {
+        for (i, &(r0, r1)) in range.iter().enumerate() {
+            let clamped = clamp_pair(c[i], r0, r1);
+            let span = r1 - r0;
+            src[i] = if span == 0.0 {
+                0.0
+            } else {
+                let v = (clamped - r0) / span;
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            };
+        }
+    }
+}
+
+fn unprofiled_device_space(n: u32, rules: Rules) -> PreparedSpace {
+    let (family, components, kind) = match n {
+        1 => (Family::DeviceGray, 1, PreparedKind::DeviceGray),
+        3 => (Family::DeviceRGB, 3, PreparedKind::DeviceRGB),
+        _ => (Family::DeviceCMYK, 4, PreparedKind::DeviceCMYK { rules }),
+    };
+    PreparedSpace {
+        family,
+        components,
+        decode_ranges: Some(vec![(0.0, 1.0); components as usize]),
+        kind,
     }
 }
 
@@ -672,12 +966,20 @@ where
             && def_space.components() == Some(components)
             && let Some(target) = self.build(&def_space, depth + 1, false)?
         {
+            let unprofiled = PreparedSpace {
+                family,
+                components,
+                decode_ranges: decode_ranges.clone(),
+                kind: native_kind,
+            };
             return Ok(Some(PreparedSpace {
                 family,
                 components,
                 decode_ranges,
                 kind: PreparedKind::Defaulted {
+                    rules: self.options.rules,
                     target: Box::new(target),
+                    unprofiled: Box::new(unprofiled),
                 },
             }));
         }
@@ -702,6 +1004,8 @@ where
                 kind: PreparedKind::Icc {
                     n: components,
                     is_lab_pcs_input: is_lab,
+                    only_iso: true,
+                    rules: self.options.rules,
                     range: vec![(0.0, 1.0); components as usize],
                     transform,
                     fallback: Box::new(fallback),
@@ -717,29 +1021,11 @@ where
         }))
     }
 
-    fn unprofiled_device_fallback(&self, n: u32) -> PreparedSpace {
-        let (family, components, kind) = match n {
-            1 => (Family::DeviceGray, 1, PreparedKind::DeviceGray),
-            3 => (Family::DeviceRGB, 3, PreparedKind::DeviceRGB),
-            _ => (
-                Family::DeviceCMYK,
-                4,
-                PreparedKind::DeviceCMYK {
-                    rules: self.options.rules,
-                },
-            ),
-        };
-        PreparedSpace {
-            family,
-            components,
-            decode_ranges: Some(vec![(0.0, 1.0); components as usize]),
-            kind,
-        }
-    }
-
     fn prepare_cal_gray(&self, cie: &Cie<'o>) -> Result<PreparedSpace, Unreadable> {
         let white = valid_white(cie.white_point);
-        let gamma = read_cal_gray_gamma(&self.objects, cie.dict, self.limits)?.unwrap_or(1.0);
+        let gamma = cie
+            .cal_gray_gamma(&self.objects, self.limits)?
+            .unwrap_or(1.0);
         Ok(PreparedSpace {
             family: Family::CalGray,
             components: 1,
@@ -754,11 +1040,7 @@ where
 
     fn prepare_cal_rgb(&self, cie: &Cie<'o>) -> Result<PreparedSpace, Unreadable> {
         let white = valid_white(cie.white_point);
-        let gamma = read_fixed_f32::<3, _>(&self.objects, cie.dict, b"Gamma", self.limits)?
-            .filter(|g| g.iter().all(|&v| v > 0.0))
-            .unwrap_or([1.0, 1.0, 1.0]);
-        let matrix = read_fixed_f32::<9, _>(&self.objects, cie.dict, b"Matrix", self.limits)?
-            .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        let (gamma, matrix) = cie.cal_rgb_params(&self.objects, self.limits)?;
         Ok(PreparedSpace {
             family: Family::CalRGB,
             components: 3,
@@ -806,13 +1088,13 @@ where
         {
             prep
         } else {
-            self.unprofiled_device_fallback(n)
+            unprofiled_device_space(n, self.options.rules)
         };
 
         #[cfg(feature = "icc")]
         if let Some(stream) = icc.stream {
-            match decode_icc_stream(&self.objects, stream, icc.id, self.limits.stream_bytes)? {
-                Some(bytes) => match open_icc_transform(&bytes, n, self.limits) {
+            match decode_stream_or_inline(&self.objects, stream, icc.id, self.limits.stream_bytes) {
+                Ok(bytes) => match open_icc_transform(&bytes, n, self.limits) {
                     Some((transform, is_lab)) => {
                         let range_f32 =
                             range64.iter().map(|&(a, b)| (a as f32, b as f32)).collect();
@@ -823,6 +1105,8 @@ where
                             kind: PreparedKind::Icc {
                                 n,
                                 is_lab_pcs_input: is_lab,
+                                only_iso: false,
+                                rules: self.options.rules,
                                 range: range_f32,
                                 transform,
                                 fallback: Box::new(fallback),
@@ -831,7 +1115,10 @@ where
                     }
                     None => self.say(icc.id, None, Fault::IccProfile),
                 },
-                None => self.say(icc.id, None, Fault::IccProfile),
+                Err(StreamDecodeErr::Limit | StreamDecodeErr::Corrupt) => {
+                    self.say(icc.id, None, Fault::IccProfile);
+                }
+                Err(StreamDecodeErr::Unreadable(e)) => return Err(e),
             }
         }
 
@@ -861,8 +1148,8 @@ where
         };
         let bytes = match idx.lookup_bytes(&self.objects, self.limits.stream_bytes) {
             Ok(Some(b)) => b,
-            Ok(None) => return Ok(None),
-            Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => {
+            Ok(None) | Err(LookupError::Locked) => return Ok(None),
+            Err(LookupError::Limit) => {
                 let lookup_id = match &idx.lookup {
                     Some(crate::space::Lookup::Stream { id, .. }) => *id,
                     _ => None,
@@ -870,7 +1157,15 @@ where
                 self.say(lookup_id, None, Fault::LookupLength);
                 return Ok(None);
             }
-            Err(e) => return Err(e),
+            Err(LookupError::Unreadable(e)) if matches!(e.why, Why::Damaged | Why::Filter) => {
+                let lookup_id = match &idx.lookup {
+                    Some(crate::space::Lookup::Stream { id, .. }) => *id,
+                    _ => None,
+                };
+                self.say(lookup_id, None, Fault::LookupLength);
+                return Ok(None);
+            }
+            Err(LookupError::Unreadable(e)) => return Err(e),
         };
         let base_ranges = base
             .decode_ranges
@@ -906,11 +1201,34 @@ where
             }));
         }
         if colorant == Some(Colorant::All) && self.options.rules == Rules::Iso {
+            // Prepare the optional tint transform quietly so `eval_with_rules(..., Rules::Pdfium)`
+            // reproduces PDFium without requiring a second `PreparedSpace::prepare` pass.
+            let tint_fallback = if let (Some(alt_space), Some(tint_obj)) =
+                (sep.alternate.as_deref(), sep.tint)
+                && let Some(alternate) = (PrepCtx {
+                    objects: self.objects,
+                    options: self.options,
+                    limits: self.limits,
+                    sink: &mut (),
+                })
+                .build(alt_space, depth + 1, true)?
+                && let Some(tint) =
+                    Function::read(self.objects, tint_obj, Rules::Pdfium, self.limits, &mut ())?
+                && tint.inputs() == 1
+                && tint.outputs() >= alternate.components()
+            {
+                Some((tint, Box::new(alternate)))
+            } else {
+                None
+            };
             return Ok(Some(PreparedSpace {
                 family: Family::Separation,
                 components: 1,
                 decode_ranges: Some(vec![(0.0, 1.0)]),
-                kind: PreparedKind::SeparationAllIso,
+                kind: PreparedKind::SeparationAll {
+                    rules: self.options.rules,
+                    tint_fallback,
+                },
             }));
         }
         let (Some(alt_space), Some(tint_obj)) = (sep.alternate.as_deref(), sep.tint) else {
@@ -932,15 +1250,24 @@ where
         if tint.inputs() != 1 || tint.outputs() < alternate.components() {
             return Ok(None);
         }
+        let kind = if colorant == Some(Colorant::All) {
+            PreparedKind::SeparationAll {
+                rules: self.options.rules,
+                tint_fallback: Some((tint, Box::new(alternate))),
+            }
+        } else {
+            PreparedKind::Tint {
+                rules: self.options.rules,
+                all_none: false,
+                tint,
+                alternate: Box::new(alternate),
+            }
+        };
         Ok(Some(PreparedSpace {
             family: Family::Separation,
             components: 1,
             decode_ranges: Some(vec![(0.0, 1.0)]),
-            kind: PreparedKind::Tint {
-                all_none: false,
-                tint,
-                alternate: Box::new(alternate),
-            },
+            kind,
         }))
     }
 
@@ -970,8 +1297,7 @@ where
         if tint.inputs() != m || tint.outputs() < alternate.components() {
             return Ok(None);
         }
-        let all_none = self.options.rules == Rules::Iso
-            && dn.names.len() == m as usize
+        let all_none = dn.names.len() == m as usize
             && dn
                 .names
                 .iter()
@@ -981,6 +1307,7 @@ where
             components: m,
             decode_ranges: Some(vec![(0.0, 1.0); m as usize]),
             kind: PreparedKind::Tint {
+                rules: self.options.rules,
                 all_none,
                 tint,
                 alternate: Box::new(alternate),
@@ -990,27 +1317,29 @@ where
 }
 
 #[cfg(feature = "icc")]
-fn decode_icc_stream<'o, S: Streams>(
-    streams: &S,
-    stream: &'o Stream,
-    id: Option<ObjectId>,
-    limit: usize,
-) -> Result<Option<std::borrow::Cow<'o, [u8]>>, Unreadable> {
-    if let Some(id) = id {
-        match streams.decoded(id, limit) {
-            Ok(b) => Ok(Some(std::borrow::Cow::Owned(b.into_owned()))),
-            Err(e) if matches!(e.why, Why::Damaged | Why::Filter | Why::Limit) => Ok(None),
-            Err(e) => Err(e),
-        }
-    } else if !stream.dict.has(b"Filter") {
-        Ok(stream
-            .data
-            .bytes()
-            .filter(|b| b.len() <= limit)
-            .map(std::borrow::Cow::Borrowed))
-    } else {
-        Ok(None)
-    }
+const ICC_MEMO_MAX_BYTES: usize = 64 * 1024;
+#[cfg(feature = "icc")]
+const ICC_MEMO_SLOTS: usize = 4;
+
+#[cfg(feature = "icc")]
+struct IccMemoEntry {
+    n: u32,
+    bytes: Vec<u8>,
+    transform: Arc<moxcms::TransformF32Executor>,
+    is_lab: bool,
+}
+
+#[cfg(feature = "icc")]
+#[derive(Default)]
+struct IccMemo {
+    slots: [Option<IccMemoEntry>; ICC_MEMO_SLOTS],
+    next: usize,
+}
+
+#[cfg(feature = "icc")]
+fn icc_memo() -> &'static Mutex<IccMemo> {
+    static MEMO: OnceLock<Mutex<IccMemo>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(IccMemo::default()))
 }
 
 #[cfg(feature = "icc")]
@@ -1020,6 +1349,20 @@ fn open_icc_transform(
     limits: &Limits,
 ) -> Option<(Arc<moxcms::TransformF32Executor>, bool)> {
     use moxcms::{ColorProfile, DataColorSpace, Layout, ParsingOptions, TransformOptions};
+
+    if bytes.len() > limits.stream_bytes {
+        return None;
+    }
+
+    if bytes.len() <= ICC_MEMO_MAX_BYTES
+        && let Ok(guard) = icc_memo().lock()
+    {
+        for entry in guard.slots.iter().flatten() {
+            if entry.n == n && entry.bytes.as_slice() == bytes {
+                return Some((Arc::clone(&entry.transform), entry.is_lab));
+            }
+        }
+    }
 
     let parse_opts = ParsingOptions {
         max_profile_size: limits.stream_bytes.saturating_add(1),
@@ -1048,6 +1391,20 @@ fn open_icc_transform(
     let transform = profile
         .create_transform_f32(src_layout, &dst, Layout::Rgb, TransformOptions::default())
         .ok()?;
+
+    if bytes.len() <= ICC_MEMO_MAX_BYTES
+        && let Ok(mut guard) = icc_memo().lock()
+    {
+        let idx = guard.next % ICC_MEMO_SLOTS;
+        guard.next = guard.next.wrapping_add(1);
+        guard.slots[idx] = Some(IccMemoEntry {
+            n,
+            bytes: bytes.to_vec(),
+            transform: Arc::clone(&transform),
+            is_lab,
+        });
+    }
+
     Some((transform, is_lab))
 }
 
@@ -1056,43 +1413,6 @@ fn valid_white(wp: Option<[f64; 3]>) -> [f32; 3] {
         Some([x, y, z]) if x > 0.0 && y > 0.0 && z > 0.0 => [x as f32, y as f32, z as f32],
         _ => D65_WHITE,
     }
-}
-
-fn read_cal_gray_gamma<'o, R: Resolve<'o>>(
-    objects: &R,
-    dict: Option<&'o Dict>,
-    limits: &Limits,
-) -> Result<Option<f32>, Unreadable> {
-    let Some(entry) = dict.and_then(|d| d.get(b"Gamma")).filter(|v| !v.is_null()) else {
-        return Ok(None);
-    };
-    let mut visits = 0;
-    let Some((obj, _)) = resolve_bounded(objects, entry, &mut visits, limits)? else {
-        return Ok(None);
-    };
-    Ok(obj
-        .as_number()
-        .filter(|&g| g.is_finite() && g > 0.0)
-        .map(|g| g as f32))
-}
-
-fn read_fixed_f32<'o, const N: usize, R: Resolve<'o>>(
-    objects: &R,
-    dict: Option<&'o Dict>,
-    key: &[u8],
-    limits: &Limits,
-) -> Result<Option<[f32; N]>, Unreadable> {
-    let Some(entry) = dict.and_then(|d| d.get(key)).filter(|v| !v.is_null()) else {
-        return Ok(None);
-    };
-    let Some(nums) = read_number_vec(objects, entry, N, limits)? else {
-        return Ok(None);
-    };
-    let mut out = [0.0_f32; N];
-    for (dst, src) in out.iter_mut().zip(nums) {
-        *dst = src as f32;
-    }
-    Ok(Some(out))
 }
 
 #[inline]

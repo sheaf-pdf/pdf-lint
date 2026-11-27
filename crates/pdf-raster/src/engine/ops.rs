@@ -1,7 +1,9 @@
 //! Path, text, Type 3 `/CharProcs`, Image XObject / inline image, and `sh`
 //! painting operations.
 
+use std::borrow::Cow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 use pdf_content_streams::{Concat, FillRule, TextMode};
 use pdf_fonts::{Font, FontKind};
@@ -18,10 +20,8 @@ use vello_cpu::kurbo::BezPath;
 use crate::builtin_glyphs::emit_builtin_glyph;
 use crate::canvas2d::{Canvas2d, outline_verbs_to_bez_path, segs_to_bez_path};
 use crate::engine::sinks::ImageSinkAdapter;
-use crate::engine::stream::{
-    GroupOverrides, effective_blend, effective_fill_alpha, render_stream_into,
-};
-use crate::engine::{RenderCtx, RenderState, clamp_device_rect, rect_to_segs};
+use crate::engine::stream::render_stream_into;
+use crate::engine::{RenderCtx, RenderState, check_cancelled, clamp_device_rect, rect_to_segs};
 use crate::error::Error;
 use crate::fallback::FontQuery;
 use crate::fault::Fault;
@@ -29,6 +29,19 @@ use crate::paint::{
     ResolvedPaint, configure_paint_on_canvas, eval_solid_color, evaluate_shading_rect,
     lookup_resource_entry, resolve_active_paint,
 };
+use crate::phases::phase;
+
+#[inline]
+fn note_blend_mode<S: Sink<Fault> + ?Sized>(
+    mode: &BlendState,
+    state: &mut RenderState,
+    sink: &mut S,
+) {
+    if matches!(mode, BlendState::Other(_)) {
+        sink.fault(Place::new(None, None), Fault::UnsupportedBlendMode);
+        state.approximated = true;
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path<'o, 'a, 'e, O, S>(
@@ -39,7 +52,6 @@ pub(crate) fn paint_path<'o, 'a, 'e, O, S>(
     page_to_device: Matrix,
     layer_depth: usize,
     uncolored_override: Option<[u8; 4]>,
-    ov: GroupOverrides,
     canvas: &mut Canvas2d,
     state: &mut RenderState,
     sink: &mut S,
@@ -65,10 +77,10 @@ where
         u32::from(canvas.width()),
         u32::from(canvas.height()),
     );
-    let eff_blend = effective_blend(event.state, ov);
+    note_blend_mode(&event.state.blend_mode, state, sink);
 
     canvas.set_anti_alias(ctx.opts.anti_alias.paths);
-    canvas.set_blend_mode(&eff_blend);
+    canvas.set_blend_mode(&event.state.blend_mode);
 
     if let Some(rule) = fills {
         let paint = resolve_active_paint(
@@ -80,7 +92,6 @@ where
             page_to_device,
             layer_depth,
             uncolored_override,
-            ov,
             state,
             sink,
         )?;
@@ -102,14 +113,13 @@ where
             page_to_device,
             layer_depth,
             uncolored_override,
-            ov,
             state,
             sink,
         )?;
         canvas.set_transform(user_to_device);
         if configure_paint_on_canvas(canvas, &paint, user_to_device) {
             let (stroke_bez, extent) = segs_to_bez_path(drawn.user_segments);
-            canvas.set_stroke_style(
+            if canvas.set_stroke_style(
                 event.state.line_width,
                 event.state.line_cap,
                 event.state.line_join,
@@ -117,7 +127,10 @@ where
                 &event.state.dash,
                 user_to_device,
                 extent,
-            );
+            ) {
+                sink.fault(Place::new(None, None), Fault::DenseDash);
+                state.approximated = true;
+            }
             canvas.stroke_bez_path(&stroke_bez);
         }
     }
@@ -165,6 +178,9 @@ where
             return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Glyphs)));
         }
         state.glyphs_left -= 1;
+        if state.glyphs_left & 63 == 0 {
+            check_cancelled(ctx.opts)?;
+        }
         verbs.clear();
         let h_stretch = resolve_glyph_outline(
             ctx,
@@ -172,7 +188,9 @@ where
             glyph.code,
             glyph.text().and_then(|s| s.chars().next()),
             hint_ppem,
+            false,
             state,
+            &mut (),
             &mut verbs,
         );
         if verbs.is_empty() {
@@ -202,15 +220,21 @@ where
 /// contour **only** when `font` has no readable embedded program
 /// (`OutlineOutcome::NoProgram`), never when an embedded program simply omits a
 /// glyph (`NoGlyph`, matching PDFium) or hit its per-glyph cap (`BudgetExceeded`).
-fn resolve_glyph_outline<'o, 'a, O>(
+#[allow(clippy::too_many_arguments)]
+fn resolve_glyph_outline<'o, 'a, O, S>(
     ctx: &RenderCtx<'o, 'a, O>,
     font: &Font,
     code: u32,
     decoded_char: Option<char>,
     hint_ppem: Option<f32>,
+    visible_paint: bool,
     state: &mut RenderState,
+    sink: &mut S,
     verbs: &mut Vec<pdf_fonts::OutlineVerb>,
-) -> f32 {
+) -> f32
+where
+    S: Sink<Fault> + ?Sized,
+{
     use pdf_fonts::OutlineOutcome;
 
     let mut h_stretch = 1.0_f32;
@@ -224,7 +248,7 @@ fn resolve_glyph_outline<'o, 'a, O>(
             state.approximated = true;
             let target_w = font.width(code);
             let used_external = if let (Some(fb), Some(ch)) = (ctx.fallback, decoded_char) {
-                let query = FontQuery::from_font(font);
+                let query = FontQuery::from_font(font).with_sample_char(Some(ch));
                 if let Some(prog) =
                     ctx.cache
                         .fallback_program(fb, query, &ctx.opts.limits.gfx.fonts)
@@ -245,6 +269,13 @@ fn resolve_glyph_outline<'o, 'a, O>(
             };
 
             if !used_external {
+                if visible_paint
+                    && state
+                        .warned_builtin_fonts
+                        .insert(std::ptr::from_ref(font) as usize)
+                {
+                    sink.fault(Place::new(font.id(), None), Fault::SubstitutedFont);
+                }
                 emit_builtin_glyph(
                     decoded_char,
                     code,
@@ -269,7 +300,6 @@ pub(crate) fn paint_text<'o, 'a, 'e, O, S>(
     page_to_device: Matrix,
     layer_depth: usize,
     uncolored_override: Option<[u8; 4]>,
-    ov: GroupOverrides,
     canvas: &mut Canvas2d,
     state: &mut RenderState,
     sink: &mut S,
@@ -314,7 +344,6 @@ where
             page_to_device,
             layer_depth,
             uncolored_override,
-            ov,
             canvas,
             state,
             sink,
@@ -341,6 +370,9 @@ where
             return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Glyphs)));
         }
         state.glyphs_left -= 1;
+        if state.glyphs_left & 63 == 0 {
+            check_cancelled(ctx.opts)?;
+        }
         verbs.clear();
         let h_stretch = resolve_glyph_outline(
             ctx,
@@ -348,7 +380,9 @@ where
             glyph.code,
             glyph.text().and_then(|s| s.chars().next()),
             hint_ppem,
+            fills || strokes,
             state,
+            sink,
             &mut verbs,
         );
 
@@ -400,9 +434,9 @@ where
             u32::from(canvas.height()),
         )
     });
-    let eff_blend = effective_blend(event.state, ov);
+    note_blend_mode(&event.state.blend_mode, state, sink);
     canvas.set_anti_alias(ctx.opts.anti_alias.text);
-    canvas.set_blend_mode(&eff_blend);
+    canvas.set_blend_mode(&event.state.blend_mode);
 
     if fills && !run_bez.is_empty() {
         let paint = resolve_active_paint(
@@ -414,7 +448,6 @@ where
             page_to_device,
             layer_depth,
             uncolored_override,
-            ov,
             state,
             sink,
         )?;
@@ -436,13 +469,12 @@ where
             page_to_device,
             layer_depth,
             uncolored_override,
-            ov,
             state,
             sink,
         )?;
         canvas.set_transform(user_to_device);
         if configure_paint_on_canvas(canvas, &paint, user_to_device) {
-            canvas.set_stroke_style(
+            if canvas.set_stroke_style(
                 event.state.line_width,
                 event.state.line_cap,
                 event.state.line_join,
@@ -450,7 +482,10 @@ where
                 &event.state.dash,
                 user_to_device,
                 stroke_extent,
-            );
+            ) {
+                sink.fault(Place::new(None, None), Fault::DenseDash);
+                state.approximated = true;
+            }
             canvas.stroke_bez_path(&user_bez);
         }
     }
@@ -467,7 +502,6 @@ fn paint_type3_text<'o, 'a, 'e, O, S>(
     page_to_device: Matrix,
     layer_depth: usize,
     uncolored_override: Option<[u8; 4]>,
-    ov: GroupOverrides,
     canvas: &mut Canvas2d,
     state: &mut RenderState,
     sink: &mut S,
@@ -486,7 +520,9 @@ where
         return Ok(());
     };
     let font_matrix = Matrix::from_array(fm_arr);
-    let type3_res = font.type3_resources().or_else(|| event.at.resources());
+    let type3_res = font
+        .type3_resources_in(objects)
+        .or_else(|| event.at.resources());
     let text_scale = event.state.text.scale;
     let rise = event.state.text.rise;
 
@@ -496,14 +532,16 @@ where
             ctx,
             &event.state.fill_color_space,
             event.state.fill_color.as_slice(),
-            effective_fill_alpha(event.state, ov),
+            event.state.fill_alpha,
             event.at.resources(),
             event.at.page_resources(),
+            state,
             sink,
         )?,
     };
 
     for glyph in show.glyphs() {
+        check_cancelled(ctx.opts)?;
         if state.glyphs_left == 0 {
             return Err(Error::Gfx(pdf_gfx::Error::Limit(pdf_gfx::Cap::Glyphs)));
         }
@@ -514,18 +552,30 @@ where
         if state.active_streams.contains(&t3.stream) {
             continue;
         }
-        let data = match objects.decoded(t3.stream, state.decompressed_left) {
-            Ok(b) => {
-                state.decompressed_left = state.decompressed_left.saturating_sub(b.len());
-                b
+        let data: Arc<[u8]> = if let Some(cached) = state.type3_stream_cache.get(&t3.stream) {
+            cached.clone()
+        } else {
+            match objects.decoded(t3.stream, state.decompressed_left) {
+                Ok(b) => {
+                    state.decompressed_left = state.decompressed_left.saturating_sub(b.len());
+                    let arc: Arc<[u8]> = Arc::from(b.into_owned());
+                    if state.note_cached_bytes(arc.len(), ctx.opts.limits.max_scene_bytes) {
+                        state.type3_stream_cache.insert(t3.stream, arc.clone());
+                    }
+                    arc
+                }
+                Err(e) if e.why == Why::Limit => {
+                    return Err(Error::Gfx(pdf_gfx::Error::Limit(
+                        pdf_gfx::Cap::Decompressed,
+                    )));
+                }
+                Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => {
+                    sink.fault(Place::new(Some(t3.stream), None), Fault::SkippedStream);
+                    state.approximated = true;
+                    continue;
+                }
+                Err(e) => return Err(Error::Unreadable(e)),
             }
-            Err(e) if e.why == Why::Limit => {
-                return Err(Error::Gfx(pdf_gfx::Error::Limit(
-                    pdf_gfx::Cap::Decompressed,
-                )));
-            }
-            Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => continue,
-            Err(e) => return Err(Error::Unreadable(e)),
         };
         let glyph_to_page = font_matrix
             .then(Matrix::scale(show.size * text_scale, show.size))
@@ -573,7 +623,6 @@ pub(crate) fn paint_image<'o, 'a, 'e, O, S>(
     page_to_device: Matrix,
     layer_depth: usize,
     uncolored_override: Option<[u8; 4]>,
-    ov: GroupOverrides,
     canvas: &mut Canvas2d,
     state: &mut RenderState,
     sink: &mut S,
@@ -584,6 +633,7 @@ where
 {
     let objects = ctx.objects;
     let opts = ctx.opts;
+    check_cancelled(opts)?;
     if let (Some(oc), Some(oid)) = (ctx.oc_state, img.oc) {
         let oc_obj = Object::from(oid);
         if !oc.is_visible(objects, &oc_obj)? {
@@ -596,7 +646,7 @@ where
         return Ok(());
     }
 
-    let fill_alpha = effective_fill_alpha(event.state, ov);
+    let fill_alpha = event.state.fill_alpha;
     // Only evaluate active fill paint when `/ImageMask` is `true`! Non-stencil
     // images carry their own `/ColorSpace` and ignore `state.fill_color`.
     let stencil_paint = if img.stencil {
@@ -614,7 +664,6 @@ where
             page_to_device,
             layer_depth,
             uncolored_override,
-            ov,
             state,
             sink,
         )?;
@@ -641,21 +690,52 @@ where
         255,
     ];
 
-    let mut img_sink = ImageSinkAdapter(sink);
-    let decoded = match &img.of {
-        ImageOf::XObject(id) => pdf_images::decode_xobject_with(
-            objects,
-            *id,
-            active_res,
-            &dec_opts,
-            &opts.limits.images,
-            &mut img_sink,
-        ),
+    let rgba_arc: Arc<pdf_images::RgbaImage> = match &img.of {
+        ImageOf::XObject(id) => {
+            let cache_key = (*id, img.stencil.then_some(dec_opts.stencil_color));
+            if let Some(cached) = state.image_cache.get(&cache_key).cloned() {
+                cached
+            } else {
+                let mut img_sink = ImageSinkAdapter(sink);
+                match pdf_images::decode_xobject_with(
+                    objects,
+                    *id,
+                    active_res,
+                    &dec_opts,
+                    &opts.limits.images,
+                    &mut img_sink,
+                ) {
+                    Ok(im) => {
+                        let arc = Arc::new(im);
+                        if state
+                            .note_cached_bytes(arc.as_bytes().len(), opts.limits.max_scene_bytes)
+                        {
+                            state.image_cache.insert(cache_key, arc.clone());
+                        }
+                        arc
+                    }
+                    Err(pdf_images::Error::Unreadable(u))
+                        if matches!(
+                            u.why,
+                            Why::Locked | Why::Capped | Why::Source | Why::Detached
+                        ) =>
+                    {
+                        return Err(Error::Unreadable(u));
+                    }
+                    Err(_) => {
+                        sink.fault(Place::new(Some(*id), None), Fault::SkippedImage);
+                        state.approximated = true;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         ImageOf::Inline { .. } => {
             let Some(inline) = event.at.inline_image() else {
                 return Ok(());
             };
-            pdf_images::decode_inline_with(
+            let mut img_sink = ImageSinkAdapter(sink);
+            match pdf_images::decode_inline_with(
                 objects,
                 &inline,
                 event.at.content(),
@@ -663,36 +743,35 @@ where
                 &dec_opts,
                 &opts.limits.images,
                 &mut img_sink,
-            )
+            ) {
+                Ok(im) => Arc::new(im),
+                Err(pdf_images::Error::Unreadable(u))
+                    if matches!(
+                        u.why,
+                        Why::Locked | Why::Capped | Why::Source | Why::Detached
+                    ) =>
+                {
+                    return Err(Error::Unreadable(u));
+                }
+                Err(_) => {
+                    sink.fault(Place::new(None, None), Fault::SkippedImage);
+                    state.approximated = true;
+                    return Ok(());
+                }
+            }
         }
         _ => return Ok(()),
     };
 
-    let rgba_img = match decoded {
-        Ok(im) => im,
-        Err(pdf_images::Error::Unreadable(u))
-            if matches!(
-                u.why,
-                Why::Locked | Why::Capped | Why::Source | Why::Detached
-            ) =>
-        {
-            return Err(Error::Unreadable(u));
-        }
-        Err(_) => {
-            let obj_id = match img.of {
-                ImageOf::XObject(id) => Some(id),
-                _ => None,
-            };
-            sink.fault(Place::new(obj_id, None), Fault::SkippedImage);
-            state.approximated = true;
-            return Ok(());
-        }
-    };
-
-    let (w, h) = (rgba_img.width(), rgba_img.height());
-    let mut bytes = rgba_img.into_bytes();
-    let eff_blend = effective_blend(event.state, ov);
+    let (w, h) = (rgba_arc.width(), rgba_arc.height());
+    phase!(DEBUG, "draw_image", width = w, height = h);
+    note_blend_mode(&event.state.blend_mode, state, sink);
     let interpolate = img.interpolate && opts.anti_alias.images;
+    let smooth_downscale = opts.anti_alias.images;
+    let obj_place = match img.of {
+        ImageOf::XObject(id) => Place::new(Some(id), None),
+        _ => Place::new(None, None),
+    };
 
     // Pattern- or shading-filled `/ImageMask true` stencil: rasterize the
     // stencil into an alpha mask and fill the unit quad with the pattern/shading!
@@ -700,17 +779,28 @@ where
         stencil_paint
     {
         let (vp_w, vp_h) = (u32::from(canvas.width()), u32::from(canvas.height()));
-        state.charge_offscreen_pixels(vp_w, vp_h)?;
+        state.charge_offscreen_pixels(vp_w, vp_h, opts.limits.max_scene_bytes)?;
         let mut mask_canvas = Canvas2d::new(vp_w, vp_h)?;
-        mask_canvas.draw_rgba_image(
-            bytes,
+        if !mask_canvas.draw_rgba_image(
+            Cow::Borrowed(rgba_arc.as_bytes()),
             w,
             h,
             unit_to_device,
             interpolate,
+            smooth_downscale,
             1.0,
             &BlendState::default(),
-        );
+        ) {
+            sink.fault(
+                obj_place,
+                Fault::OversizedImage {
+                    width: w,
+                    height: h,
+                },
+            );
+            state.approximated = true;
+            return Ok(());
+        }
         let mask_pix = mask_canvas.render_to_vello_pixmap(None)?;
         let stencil_mask = catch_unwind(AssertUnwindSafe(|| Mask::new_alpha(&mask_pix)))
             .map_err(|_| Error::RasterizerPanic)?;
@@ -732,7 +822,7 @@ where
         let (quad_bez, _) = segs_to_bez_path(&quad_segs);
 
         canvas.set_anti_alias(opts.anti_alias.paths);
-        canvas.push_group_layer(None, &eff_blend, 1.0, Some(stencil_mask));
+        canvas.push_group_layer(None, &event.state.blend_mode, 1.0, Some(stencil_mask));
         canvas.set_blend_mode(&BlendState::default());
         canvas.set_transform(Matrix::IDENTITY);
         if configure_paint_on_canvas(canvas, &paint, Matrix::IDENTITY) {
@@ -744,30 +834,48 @@ where
         return Ok(());
     }
 
-    let opacity = if img.stencil {
-        f32::from(solid_stencil_rgba[3]) / 255.0
+    let (cow_bytes, opacity) = if img.stencil {
+        (
+            Cow::Borrowed(rgba_arc.as_bytes()),
+            f32::from(solid_stencil_rgba[3]) / 255.0,
+        )
     } else if let Some([ur, ug, ub, ua]) = uncolored_override {
+        let mut bytes = rgba_arc.as_bytes().to_vec();
         for px in bytes.as_chunks_mut::<4>().0 {
             px[0] = ur;
             px[1] = ug;
             px[2] = ub;
             px[3] = ((u16::from(px[3]) * u16::from(ua) + 127) / 255) as u8;
         }
-        fill_alpha
+        (Cow::Owned(bytes), fill_alpha)
     } else {
-        fill_alpha
+        match Arc::try_unwrap(rgba_arc) {
+            Ok(owned) => (Cow::Owned(owned.into_bytes()), fill_alpha),
+            Err(shared) => (Cow::Owned(shared.as_bytes().to_vec()), fill_alpha),
+        }
     };
 
     canvas.set_anti_alias(opts.anti_alias.paths);
-    canvas.draw_rgba_image(
-        bytes,
+    if !canvas.draw_rgba_image(
+        cow_bytes,
         w,
         h,
         unit_to_device,
         interpolate,
+        smooth_downscale,
         opacity,
-        &eff_blend,
-    );
+        &event.state.blend_mode,
+    ) {
+        sink.fault(
+            obj_place,
+            Fault::OversizedImage {
+                width: w,
+                height: h,
+            },
+        );
+        state.approximated = true;
+        return Ok(());
+    }
     state.images_drawn += 1;
     Ok(())
 }
@@ -778,7 +886,6 @@ pub(crate) fn paint_shading_operator<'o, 'a, 'e, O, S>(
     event: &Event<'e>,
     bounds_in_page: Option<Rect>,
     page_to_device: Matrix,
-    ov: GroupOverrides,
     canvas: &mut Canvas2d,
     state: &mut RenderState,
     sink: &mut S,
@@ -796,7 +903,8 @@ where
         event.at.page_resources(),
         b"Shading",
         &name,
-    ) else {
+    )?
+    else {
         return Ok(());
     };
 
@@ -810,7 +918,7 @@ where
     };
 
     let shading_to_device = event.state.ctm.then(page_to_device);
-    let alpha = effective_fill_alpha(event.state, ov);
+    let alpha = event.state.fill_alpha;
     // ISO 32000-2 §8.7.4.3 Table 76: `/Background` is NOT applied when painting
     // directly with `sh` (`include_background = false`).
     let Some((pixmap, transform)) = evaluate_shading_rect(
@@ -829,9 +937,9 @@ where
         return Ok(());
     };
 
-    let eff_blend = effective_blend(event.state, ov);
+    note_blend_mode(&event.state.blend_mode, state, sink);
     canvas.set_anti_alias(ctx.opts.anti_alias.paths);
-    canvas.set_blend_mode(&eff_blend);
+    canvas.set_blend_mode(&event.state.blend_mode);
     canvas.set_transform(Matrix::IDENTITY);
     canvas.set_shading_paint(pixmap, transform);
     let (x0, y0, x1, y1) = dev_bounds;

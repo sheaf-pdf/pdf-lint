@@ -180,11 +180,6 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> ObjReader<'_, O, S> 
             .filter(|obj| obj.as_reference().is_none())
     }
 
-    pub(crate) fn quiet_dict_of_value(&self, value: &'o Object) -> Option<&'o Dict> {
-        let obj = self.quiet_hop(value)?;
-        own_dict(self.quiet_seen(obj)?)
-    }
-
     pub(crate) fn quiet_array_for(&self, dict: &'o Dict, key: &[u8]) -> Option<&'o [Object]> {
         self.quiet_seen(dict.get(key)?)?.as_array()
     }
@@ -196,18 +191,6 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> ObjReader<'_, O, S> 
             Value::Real(r) => Some(*r as f32),
             _ => None,
         }
-    }
-
-    pub(crate) fn quiet_bool_for(&self, dict: &'o Dict, key: &[u8]) -> Option<bool> {
-        match self.quiet_seen(dict.get(key)?)?.value() {
-            Value::Bool(b) => Some(*b),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn quiet_name_or_bytes_for(&self, dict: &'o Dict, key: &[u8]) -> Option<&'o [u8]> {
-        let seen = self.quiet_seen(dict.get(key)?)?;
-        seen.as_name().or_else(|| seen.as_bytes())
     }
 }
 

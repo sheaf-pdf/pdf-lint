@@ -10,12 +10,13 @@ use crate::limits::{LimitKind, Limits};
 #[non_exhaustive]
 pub enum PixelFormat {
     /// Straight (unpremultiplied) 8-bit `sRGB` `[R, G, B, A]` — ready for PNG
-    /// encoding, transparent stamp overlays, and perceptual visual comparison.
+    /// encoding ([`Pixmap::to_png`]), [`pdf_images::RgbaImage`] conversion,
+    /// transparent overlays, and perceptual visual comparison.
     #[default]
     Rgba8,
     /// Straight (unpremultiplied) 8-bit `sRGB` `[B, G, R, A]` — matching native
-    /// GPU textures and PDFium's `FPDFBitmap_BGRA` after straight-alpha
-    /// normalization.
+    /// `BGRA8Unorm` GPU texture upload layouts and PDFium's straight-alpha
+    /// `FPDFBitmap_BGRA` channel order.
     Bgra8,
     /// Premultiplied 8-bit `sRGB` `[R, G, B, A]` — zero-copy direct output from
     /// the 2D compositor.
@@ -74,9 +75,9 @@ impl Pixmap {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidViewport`] if dimensions are zero or `data.len()`
-    /// does not equal `width * height * 4`, or [`Error::Limit`] if `limits` is
-    /// exceeded.
+    /// Returns [`Error::InvalidViewport`] if dimensions are zero,
+    /// [`Error::Limit`] if `limits` is exceeded, or [`Error::BufferLength`] if
+    /// `data.len() != width * height * 4`.
     pub fn from_bytes(
         width: u32,
         height: u32,
@@ -86,7 +87,10 @@ impl Pixmap {
     ) -> Result<Self, Error> {
         let byte_len = check_pixmap_budget(width, height, limits)?;
         if data.len() != byte_len {
-            return Err(Error::InvalidViewport("pixmap buffer length mismatch"));
+            return Err(Error::BufferLength {
+                actual: data.len(),
+                expected: byte_len,
+            });
         }
         Ok(Self {
             width,
@@ -166,6 +170,64 @@ impl Pixmap {
                     *px = unpremul_rgba(*px);
                 }
                 out
+            }
+        }
+    }
+
+    /// Converts this [`Pixmap`] into a straight-alpha `sRGB`
+    /// [`pdf_images::RgbaImage`] under `limits`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`pdf_images::Error::Limit`] if `limits` refuses the image
+    /// dimensions or buffer size.
+    pub fn to_rgba_image(
+        &self,
+        limits: &pdf_images::Limits,
+    ) -> Result<pdf_images::RgbaImage, pdf_images::Error> {
+        pdf_images::RgbaImage::new(self.width, self.height, self.to_rgba8_vec(), limits)
+    }
+
+    /// Consumes this [`Pixmap`] into a straight-alpha `sRGB`
+    /// [`pdf_images::RgbaImage`] under `limits` (moving the underlying buffer
+    /// without copying when `self.format() == PixelFormat::Rgba8`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`pdf_images::Error::Limit`] if `limits` refuses the image
+    /// dimensions or buffer size.
+    pub fn into_rgba_image(
+        mut self,
+        limits: &pdf_images::Limits,
+    ) -> Result<pdf_images::RgbaImage, pdf_images::Error> {
+        match self.format {
+            PixelFormat::Rgba8 => {}
+            PixelFormat::Bgra8 => {
+                for px in self.data.as_chunks_mut::<4>().0 {
+                    *px = [px[2], px[1], px[0], px[3]];
+                }
+            }
+            PixelFormat::Rgba8Premul => {
+                for px in self.data.as_chunks_mut::<4>().0 {
+                    *px = unpremul_rgba(*px);
+                }
+            }
+        }
+        pdf_images::RgbaImage::new(self.width, self.height, self.data, limits)
+    }
+
+    /// Encodes this [`Pixmap`] as a standard 8-bit straight-alpha `RGBA` PNG
+    /// file in memory, with zero external PNG crate dependencies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`pdf_images::EncodeError`] if PNG encoding fails.
+    pub fn to_png(&self) -> Result<Vec<u8>, pdf_images::EncodeError> {
+        match self.format {
+            PixelFormat::Rgba8 => pdf_images::encode_png_rgba8(self.width, self.height, &self.data),
+            PixelFormat::Bgra8 | PixelFormat::Rgba8Premul => {
+                let rgba = self.to_rgba8_vec();
+                pdf_images::encode_png_rgba8(self.width, self.height, &rgba)
             }
         }
     }

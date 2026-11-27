@@ -1,7 +1,6 @@
 //! `/ExtGState` `/SMask` transparency group evaluation, caching, backdrop
 //! (`/BC`), transfer function (`/TR`), and CTM placement (ISO 32000-2 §11.6.5).
 
-use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use pdf_content_streams::{Concat, FillRule};
@@ -12,8 +11,8 @@ use pdf_objects::{Object, ObjectId, Resolve, Streams};
 use vello_cpu::Mask;
 
 use crate::canvas2d::{Canvas2d, segs_to_bez_path};
-use crate::engine::stream::{GroupOverrides, effective_smask, render_stream_into};
-use crate::engine::{RenderCtx, RenderState, rect_to_segs};
+use crate::engine::stream::render_stream_into;
+use crate::engine::{RenderCtx, RenderState, check_cancelled, rect_to_segs};
 use crate::error::Error;
 use crate::fault::Fault;
 use crate::paint::{dict_float4, dict_matrix};
@@ -25,8 +24,9 @@ enum TransferKey {
     InlinePtr(usize),
 }
 
-/// Complete identity of an active soft mask, including `/BC`, `/TR`, and the
-/// CTM in effect when `gs` established the soft mask (`ISO 32000-2`, §11.6.5.1).
+/// Complete identity of an active soft mask, including target canvas size,
+/// `/BC`, `/TR`, and the CTM in effect when `gs` established the soft mask
+/// (`ISO 32000-2`, §11.6.5.1).
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub(crate) enum SoftMaskKey {
     #[default]
@@ -39,6 +39,7 @@ pub(crate) enum SoftMaskKey {
 pub(crate) struct SoftMaskCacheKey {
     group_id: ObjectId,
     kind_tag: u8,
+    vp_size: (u32, u32),
     ctm_bits: [u32; 6],
     backdrop_bits: Vec<u32>,
     transfer: TransferKey,
@@ -59,7 +60,11 @@ fn matrix_bits(m: Matrix) -> [u32; 6] {
     ]
 }
 
-fn make_smask_key(smask: SoftMask, params: Option<&SoftMaskParams>) -> SoftMaskKey {
+fn make_smask_key(
+    smask: SoftMask,
+    params: Option<&SoftMaskParams>,
+    vp_size: (u32, u32),
+) -> SoftMaskKey {
     match smask {
         SoftMask::None => SoftMaskKey::None,
         SoftMask::Mask { kind, group } => {
@@ -88,6 +93,7 @@ fn make_smask_key(smask: SoftMask, params: Option<&SoftMaskParams>) -> SoftMaskK
             SoftMaskKey::Mask(SoftMaskCacheKey {
                 group_id,
                 kind_tag,
+                vp_size,
                 ctm_bits,
                 backdrop_bits,
                 transfer,
@@ -101,7 +107,6 @@ fn make_smask_key(smask: SoftMask, params: Option<&SoftMaskParams>) -> SoftMaskK
 pub(crate) fn sync_soft_mask<'o, 'a, O, S>(
     ctx: &RenderCtx<'o, 'a, O>,
     gstate: &State,
-    ov: GroupOverrides,
     page_to_device: Matrix,
     layer_depth: usize,
     canvas: &mut Canvas2d,
@@ -109,18 +114,18 @@ pub(crate) fn sync_soft_mask<'o, 'a, O, S>(
     sink: &mut S,
     current_mask: &mut Option<Mask>,
     current_smask_key: &mut SoftMaskKey,
-    smask_cache: &mut HashMap<SoftMaskCacheKey, Option<Mask>>,
 ) -> Result<(), Error>
 where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    let desired = effective_smask(gstate, ov);
+    let desired = gstate.soft_mask;
     let params = match desired {
         SoftMask::None => None,
         _ => gstate.soft_mask_params.as_ref(),
     };
-    let desired_key = make_smask_key(desired, params);
+    let vp_size = (u32::from(canvas.width()), u32::from(canvas.height()));
+    let desired_key = make_smask_key(desired, params, vp_size);
     if desired_key == *current_smask_key {
         return Ok(());
     }
@@ -133,6 +138,7 @@ where
         }
         (SoftMask::Mask { group, .. }, SoftMaskKey::Invalid) => {
             sink.fault(Place::new(group, None), Fault::InvalidSoftMask);
+            state.approximated = true;
             *current_mask = None;
             canvas.set_mask(None);
         }
@@ -150,7 +156,7 @@ where
                 canvas.set_mask(None);
                 return Ok(());
             }
-            if let Some(cached) = smask_cache.get(&cache_key) {
+            if let Some(cached) = state.smask_cache.get(&cache_key) {
                 *current_mask = cached.clone();
                 canvas.set_mask(current_mask.clone());
                 return Ok(());
@@ -161,13 +167,16 @@ where
                 group_id,
                 kind,
                 params,
-                (u32::from(canvas.width()), u32::from(canvas.height())),
+                vp_size,
                 page_to_device,
                 layer_depth + 1,
                 state,
                 sink,
             )?;
-            smask_cache.insert(cache_key, built.clone());
+            let mask_bytes = (vp_size.0 as usize) * (vp_size.1 as usize);
+            if state.note_cached_bytes(mask_bytes, ctx.opts.limits.max_scene_bytes) {
+                state.smask_cache.insert(cache_key, built.clone());
+            }
             *current_mask = built;
             canvas.set_mask(current_mask.clone());
         }
@@ -197,12 +206,15 @@ where
 {
     let objects = ctx.objects;
     let opts = ctx.opts;
+    check_cancelled(opts)?;
     if state.active_streams.contains(&group_id) {
         sink.fault(Place::new(Some(group_id), None), Fault::InvalidSoftMask);
+        state.approximated = true;
         return Ok(None);
     }
     let Some(group_obj) = objects.try_resolve(group_id)? else {
         sink.fault(Place::new(Some(group_id), None), Fault::InvalidSoftMask);
+        state.approximated = true;
         return Ok(None);
     };
     let Some(stream) = group_obj.as_stream() else {
@@ -210,6 +222,7 @@ where
             Place::new(Some(group_id), group_obj.at()),
             Fault::InvalidSoftMask,
         );
+        state.approximated = true;
         return Ok(None);
     };
     let dict = &stream.dict;
@@ -225,12 +238,13 @@ where
         }
         Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => {
             sink.fault(Place::new(Some(group_id), None), Fault::InvalidSoftMask);
+            state.approximated = true;
             return Ok(None);
         }
         Err(e) => return Err(Error::Unreadable(e)),
     };
 
-    let form_matrix = dict_matrix(objects, dict, b"Matrix").unwrap_or(Matrix::IDENTITY);
+    let form_matrix = dict_matrix(objects, dict, b"Matrix")?.unwrap_or(Matrix::IDENTITY);
     let smask_ctm = params.map_or(Matrix::IDENTITY, |p| p.ctm);
     // ISO 32000-2 §11.6.5.1: the soft-mask transparency group's coordinate
     // space maps via its `/Matrix` into the user space active when `gs` set the
@@ -240,7 +254,7 @@ where
         return Ok(None);
     }
 
-    let form_bbox = dict_float4(objects, dict, b"BBox").map(|[a, b, c, d]| Rect::new(a, b, c, d));
+    let form_bbox = dict_float4(objects, dict, b"BBox")?.map(|[a, b, c, d]| Rect::new(a, b, c, d));
     let form_res = dict.get(b"Resources");
     let group_meta = TransparencyGroup::from_dict(objects, dict);
     let backdrop = params
@@ -270,7 +284,7 @@ where
                             .flatten()
                         })
                         .and_then(|prep| {
-                            prep.eval_with_rules(bc_vals, opts.rules, &opts.limits.color)
+                            prep.eval_with_rules(bc_vals, opts.rules)
                                 .and_then(pdf_color::Paint::srgb8)
                         })
                         .unwrap_or([0, 0, 0]);
@@ -297,7 +311,7 @@ where
         _ => None,
     };
 
-    state.charge_offscreen_pixels(vp_w, vp_h)?;
+    state.charge_offscreen_pixels(vp_w, vp_h, opts.limits.max_scene_bytes)?;
     let mut mask_canvas = Canvas2d::new(vp_w, vp_h)?;
     if let Some(bbox) = form_bbox {
         let segs = rect_to_segs(bbox);
@@ -339,8 +353,8 @@ where
         let mut lut = [0u8; 256];
         for (i, slot) in lut.iter_mut().enumerate() {
             let x = (i as f32) / 255.0;
-            let mut y = [0.0f32; 1];
-            func.eval(&[x], &mut y, &opts.limits.color);
+            let mut y = [x];
+            let _ = func.eval(&[x], &mut y);
             *slot = (y[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         }
         let alphas: Vec<u8> = vello_pix

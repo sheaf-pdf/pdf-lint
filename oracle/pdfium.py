@@ -2164,10 +2164,15 @@ def pin_named(folder):
 
 def extra_crate_pins(crates_dir, checked_crates, build):
     """Hold every other workspace crate's `as of chromium/N` mentions in
-    README.md, src/, and tests/ (including pdf-raster-oracle) to `build`."""
+    README.md, src/, and tests/ (including pdf-raster-oracle) to `build`, and
+    require crates that emulate or score against PDFium (`pdf-images`,
+    `pdf-raster`, `pdf-raster-oracle`, `pdfs`) to name `as of chromium/<build>`
+    explicitly so a pin bump cannot leave them stale."""
     wrong = []
     if not os.path.isdir(crates_dir):
         return wrong
+    must_name_readme = {"pdf-images", "pdf-raster", "pdfs"}
+    must_name_any = {"pdf-raster-oracle"}
     for entry in sorted(os.listdir(crates_dir)):
         crate = os.path.join(crates_dir, entry)
         if not os.path.isdir(crate) or os.path.abspath(crate) in checked_crates:
@@ -2181,6 +2186,8 @@ def extra_crate_pins(crates_dir, checked_crates, build):
             if os.path.isdir(sub_dir):
                 for root, _, files in os.walk(sub_dir):
                     paths += [os.path.join(root, f) for f in sorted(files) if f.endswith(".rs")]
+        named_in_readme = False
+        named_anywhere = False
         for path in paths:
             with open(path, encoding="utf-8") as f:
                 text = f.read()
@@ -2189,6 +2196,14 @@ def extra_crate_pins(crates_dir, checked_crates, build):
                 if n != build:
                     wrong.append("%s: %s names chromium/%s, where the pin is chromium/%s"
                                  % (crate, os.path.relpath(path, crate), n, build))
+                else:
+                    named_anywhere = True
+                    if path == readme:
+                        named_in_readme = True
+        if entry in must_name_readme and not named_in_readme:
+            wrong.append("%s: README.md doesn't say it reads as of chromium/%s" % (crate, build))
+        if entry in must_name_any and not named_anywhere:
+            wrong.append("%s: doesn't name as of chromium/%s" % (crate, build))
     return wrong
 
 

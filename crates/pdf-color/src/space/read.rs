@@ -12,21 +12,12 @@ use crate::count::{Hop, Walk, float};
 use crate::fault::Fault;
 use crate::function;
 use crate::limits::Limits;
+use crate::walk::{Reached, through_refs};
 
 use super::{
     Attributes, Cie, Colorant, ColorantSpace, DeviceN, Family, Icc, Indexed, Lookup, Process,
     Separation, Space, Subtype,
 };
-
-/// A value after its references.
-enum Reached<'o> {
-    /// What they lead to, itself no reference.
-    At(&'o Object),
-    /// Nothing: a reference to an object the file hasn't got.
-    Nothing,
-    /// A loop, a cap or a damaged object, each told.
-    Stopped,
-}
 
 /// An array of names: each element's, by its position, and how many elements it
 /// has, whatever they are.
@@ -93,6 +84,23 @@ fn entry_of<'o>(dict: &'o Dict, key: &[u8]) -> Option<&'o Object> {
     dict.get(key).filter(|value| !value.is_null())
 }
 
+fn direct_positive_f32(dict: &Dict, key: &[u8]) -> Option<f32> {
+    entry_of(dict, key)?
+        .as_number()
+        .filter(|&v| v.is_finite() && v > 0.0)
+        .map(|v| v as f32)
+}
+
+fn direct_f32_array<const N: usize>(dict: &Dict, key: &[u8]) -> Option<[f32; N]> {
+    let items = entry_of(dict, key)?.as_array().filter(|a| a.len() == N)?;
+    let mut out = [0.0_f32; N];
+    for (dst, item) in out.iter_mut().zip(items) {
+        let n = item.as_number().filter(|v| v.is_finite())?;
+        *dst = n as f32;
+    }
+    Some(out)
+}
+
 impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
     pub(super) fn new(objects: R, limits: &'l Limits, sink: &'l mut S) -> Reader<'l, R, S> {
         Reader {
@@ -137,39 +145,22 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
 
     /// `written` after its references, each put on the path.
     fn through(&mut self, written: &'o Object) -> Result<Reached<'o>, Unreadable> {
-        let mut object = written;
-        let mut followed = 0;
-        while let Some(id) = object.as_reference() {
-            followed += 1;
-            if followed == 2 {
-                // In the object that's a reference, which is on the path by now.
-                self.say(object.at(), Fault::Chained);
-            }
-            if self.path.contains(&id) {
-                self.say(object.at(), Fault::Loop);
-                return Ok(Reached::Stopped);
-            }
-            if self.path.len() > self.limits.space_depth {
-                self.say(object.at(), Fault::TooDeep);
-                return Ok(Reached::Stopped);
-            }
-            if !self.spend(object.at()) {
-                return Ok(Reached::Stopped);
-            }
-            match self.objects.try_resolve(id) {
-                Ok(Some(next)) => {
-                    self.path.push(id);
-                    object = next;
-                }
-                Ok(None) => return Ok(Reached::Nothing),
-                Err(unreadable) if unreadable.why == Why::Damaged => {
-                    self.say(object.at(), Fault::Damaged { id });
-                    return Ok(Reached::Stopped);
-                }
-                Err(unreadable) => return Err(unreadable),
-            }
-        }
-        Ok(Reached::At(object))
+        let (spent, told) = if self.checking {
+            (&mut self.checks, &mut self.checks_told)
+        } else {
+            (&mut self.visits, &mut self.visits_told)
+        };
+        through_refs(
+            &self.objects,
+            written,
+            false,
+            self.limits.space_depth,
+            self.limits.space_visits,
+            spent,
+            told,
+            &mut self.path,
+            self.sink,
+        )
     }
 
     /// `read`, of what `written` leads to, with its references on the path, so a
@@ -363,6 +354,9 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
         let none = Cie {
             dict: None,
             white_point: None,
+            direct_cal_gray_gamma: None,
+            direct_cal_rgb_gamma: None,
+            direct_cal_rgb_matrix: None,
         };
         let Some(written) = self.element(parts, 1, at) else {
             return Ok(none);
@@ -380,10 +374,23 @@ impl<'l, 'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'l, R, S> {
                 }
             };
             let white_point = reader.white_point(dict, object.at())?;
+            let direct_cal_gray_gamma = (family == Family::CalGray)
+                .then(|| direct_positive_f32(dict, b"Gamma"))
+                .flatten();
+            let direct_cal_rgb_gamma = (family == Family::CalRGB)
+                .then(|| direct_f32_array::<3>(dict, b"Gamma"))
+                .flatten()
+                .filter(|g| g.iter().all(|&v| v > 0.0));
+            let direct_cal_rgb_matrix = (family == Family::CalRGB)
+                .then(|| direct_f32_array::<9>(dict, b"Matrix"))
+                .flatten();
             reader.check(|reader| reader.check_cie(family, dict));
             Ok(Some(Cie {
                 dict: Some(dict),
                 white_point,
+                direct_cal_gray_gamma,
+                direct_cal_rgb_gamma,
+                direct_cal_rgb_matrix,
             }))
         })?;
         Ok(read.unwrap_or(none))

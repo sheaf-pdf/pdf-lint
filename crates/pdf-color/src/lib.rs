@@ -42,11 +42,12 @@ pub use count::{Counted, components, counted};
 pub use eval::{EvalOptions, Paint, PreparedSpace};
 pub use fault::Fault;
 pub use function::{Function, FunctionKind};
+pub use intent::RenderingIntent;
 pub use limits::Limits;
 pub use resources::{Components, Iter, Named, Spaces};
 pub use space::{
     Attributes, Cie, Colorant, ColorantSpace, Colorants, DeviceN, Family, Icc, Indexed, Lookup,
-    Process, Separation, Space, Subtype,
+    LookupError, Process, Separation, Space, Subtype,
 };
 
 mod cmyk_lut;
@@ -57,9 +58,11 @@ mod function;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+mod intent;
 mod limits;
 mod resources;
 mod space;
+mod walk;
 
 #[cfg(test)]
 mod tests {

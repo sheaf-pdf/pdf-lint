@@ -1,5 +1,6 @@
 //! Image dictionary metadata, codec kinds, mask specifications, and rendering intents.
 
+pub use pdf_color::RenderingIntent;
 use pdf_color::{Family, PreparedSpace, Spaces};
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Span};
@@ -50,46 +51,6 @@ pub enum SMaskInData {
     Premultiplied,
 }
 
-/// PDF rendering intent (`/Intent`; ISO 32000-2, §8.6.5.8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum RenderingIntent {
-    /// `/AbsoluteColorimetric`
-    AbsoluteColorimetric,
-    /// `/RelativeColorimetric`
-    RelativeColorimetric,
-    /// `/Saturation`
-    Saturation,
-    /// `/Perceptual`
-    Perceptual,
-    /// Any other custom intent name (redacted in `Debug` to avoid printing raw file names).
-    Custom,
-}
-
-impl RenderingIntent {
-    pub(crate) fn from_name(name: &[u8]) -> Self {
-        match name {
-            b"AbsoluteColorimetric" => Self::AbsoluteColorimetric,
-            b"RelativeColorimetric" => Self::RelativeColorimetric,
-            b"Saturation" => Self::Saturation,
-            b"Perceptual" => Self::Perceptual,
-            _ => Self::Custom,
-        }
-    }
-
-    /// Canonical PDF name for standard intents, or `None` for [`RenderingIntent::Custom`].
-    #[must_use]
-    pub const fn as_pdf_name(self) -> Option<&'static str> {
-        match self {
-            Self::AbsoluteColorimetric => Some("AbsoluteColorimetric"),
-            Self::RelativeColorimetric => Some("RelativeColorimetric"),
-            Self::Saturation => Some("Saturation"),
-            Self::Perceptual => Some("Perceptual"),
-            Self::Custom => None,
-        }
-    }
-}
-
 /// Parsed metadata for an Image XObject or inline image (`BI..ID..EI`).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -124,6 +85,55 @@ pub struct ImageMeta {
 }
 
 impl ImageMeta {
+    /// Constructs [`ImageMeta`] with standard defaults (`interpolate = false`,
+    /// [`MaskSpec::None`], `smask = None`, [`SMaskInData::None`], `intent = None`, `oc = None`,
+    /// and standard Table 90 `/Decode` intervals for `color_space` and `bits_per_component`).
+    ///
+    /// All fields on [`ImageMeta`] are `pub`, so callers can customize `decode`, `mask`, `smask`,
+    /// `interpolate`, `intent`, or `oc` on the returned struct before calling
+    /// [`RawImage::from_parts`](crate::RawImage::from_parts).
+    #[must_use]
+    pub fn new(
+        width: u32,
+        height: u32,
+        bits_per_component: u8,
+        components: u8,
+        color_space: Option<Family>,
+        stencil: bool,
+    ) -> Self {
+        let decode = if stencil {
+            vec![(0.0, 1.0)]
+        } else {
+            match color_space {
+                Some(Family::Indexed) => {
+                    let hi = if (1..=32).contains(&bits_per_component) {
+                        ((1_u64 << bits_per_component) - 1) as f64
+                    } else {
+                        255.0
+                    };
+                    vec![(0.0, hi)]
+                }
+                Some(Family::Lab) => vec![(0.0, 100.0), (-100.0, 100.0), (-100.0, 100.0)],
+                _ => vec![(0.0, 1.0); usize::from(components)],
+            }
+        };
+        Self {
+            width,
+            height,
+            bits_per_component,
+            components,
+            color_space,
+            stencil,
+            interpolate: false,
+            decode,
+            mask: MaskSpec::None,
+            smask: None,
+            smask_in_data: SMaskInData::None,
+            intent: None,
+            oc: None,
+        }
+    }
+
     /// Whether `/Decode` equals the default intervals for this image's color space and bit depth.
     #[must_use]
     pub fn has_default_decode(&self, space: Option<&PreparedSpace>) -> bool {

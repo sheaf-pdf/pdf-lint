@@ -14,16 +14,17 @@ use pdf_raster::{BackendError, Pixmap, RenderBackend, RenderOpts};
 mod image;
 mod score;
 
-pub use image::{MAX_PIXELS, RgbaImage};
+pub use image::{MAX_PIXELS, RgbaImage, RgbaImageExt};
 pub use score::{
-    BaselineRow, CaseEvaluation, CaseOutcome, DriftReport, Grade, RubricCategories, RubricConfig,
-    RubricProfile, VisualScore, evaluate_case, format_baseline_tsv, parse_baseline_tsv,
-    render_diff_strip, score_images,
+    BaselineRow, CaseEvaluation, CaseOutcome, DriftReport, Grade, ParseError, RubricCategories,
+    RubricConfig, RubricProfile, VisualScore, evaluate_case, format_baseline_tsv,
+    parse_baseline_tsv, render_diff_strip, score_images, score_non_uniform_images,
 };
 
-/// Errors produced by [`RgbaImage`], [`score_images`], [`score_pixmaps`],
+/// Errors produced by [`RgbaImageExt`], [`score_images`],
+/// [`score_non_uniform_images`], [`score_pixmaps`], [`compare_backends`],
 /// [`evaluate_case`], or [`render_diff_strip`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// Requested image dimensions were zero or exceeded [`MAX_PIXELS`].
@@ -49,18 +50,20 @@ pub enum Error {
         /// Reference height.
         ref_h: u32,
     },
-}
-
-impl RgbaImage {
-    /// Converts any [`Pixmap`] (`Rgba8`, `Bgra8`, or `Rgba8Premul`) into an
-    /// unpremultiplied straight-alpha sRGB [`RgbaImage`] for rubric scoring.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidDimensions`] if `pixmap` exceeds [`MAX_PIXELS`].
-    pub fn from_pixmap(pixmap: &Pixmap) -> Result<Self, Error> {
-        Self::from_rgba(pixmap.width(), pixmap.height(), pixmap.to_rgba8_vec())
-    }
+    /// Reference image was completely uniform (all pixels identical), guarding
+    /// against vacuous `100.0 Exact` scores on blank renders.
+    #[error("reference image is uniform (blank render guard)")]
+    UniformReference,
+    /// Visual comparison score fell below the required floor.
+    #[error("visual score {score:.2} ({grade}) fell below floor {floor:.2}")]
+    BelowFloor {
+        /// Measured visual score (`0.0..=100.0`).
+        score: f32,
+        /// Qualitative grade band.
+        grade: Grade,
+        /// Required minimum score.
+        floor: f32,
+    },
 }
 
 /// Evaluates the `0.0..=100.0` perceptual [`VisualScore`] directly between two
@@ -75,14 +78,20 @@ pub fn score_pixmaps(candidate: &Pixmap, reference: &Pixmap) -> Result<VisualSco
     score_images(&cand, &refr)
 }
 
-/// Renders `page_index` of `bytes` through both `candidate` (e.g.
-/// `pdfs::RustBackend`) and `oracle` (e.g. `PdfiumBackend`) under `opts`, and
-/// evaluates the pair against `rubric`.
+/// Renders `page_index` of `bytes` once through `candidate` (e.g.
+/// `pdfs::RustBackend`) and once through `oracle` (e.g. `PdfiumBackend`) under
+/// `opts`, scores the pair directly via [`score_images`], and requires
+/// `score.score >= visual_floor`.
+///
+/// Unlike [`evaluate_case`], this function evaluates only direct visual parity
+/// between the two [`RenderBackend`]s (since `RenderBackend::render_page` does
+/// not run a separate `Rules::Iso` pass or collect ISO read faults).
 ///
 /// # Errors
 ///
 /// Returns [`BackendError`] if either backend fails to open or render the page,
-/// or if the resulting bitmaps cannot be scored.
+/// if dimensions mismatch, or if `score.score < visual_floor`
+/// ([`Error::BelowFloor`]).
 pub fn compare_backends(
     candidate: &dyn RenderBackend,
     oracle: &dyn RenderBackend,
@@ -90,8 +99,8 @@ pub fn compare_backends(
     password: Option<&str>,
     page_index: usize,
     opts: &RenderOpts,
-    rubric: &RubricConfig,
-) -> Result<CaseOutcome, BackendError> {
+    visual_floor: f32,
+) -> Result<VisualScore, BackendError> {
     let cand_doc = candidate.open_bytes(bytes.clone(), password)?;
     let orac_doc = oracle.open_bytes(bytes, password)?;
     let (cand_pix, _) = cand_doc.render_page(page_index, opts)?;
@@ -100,16 +109,13 @@ pub fn compare_backends(
     let cand_rgba = RgbaImage::from_pixmap(&cand_pix).map_err(BackendError::custom)?;
     let orac_rgba = RgbaImage::from_pixmap(&orac_pix).map_err(BackendError::custom)?;
 
-    evaluate_case(
-        rubric,
-        &CaseEvaluation {
-            candidate_pdfium: Some(&cand_rgba),
-            candidate_iso: Some(&cand_rgba),
-            pdfium_reference: Some(&orac_rgba),
-            iso_reference: Some(&orac_rgba),
-            iso_fault_count: 0,
-            write_lint_errors: 0,
-        },
-    )
-    .map_err(BackendError::custom)
+    let score = score_images(&cand_rgba, &orac_rgba).map_err(BackendError::custom)?;
+    if score.score < visual_floor {
+        return Err(BackendError::custom(Error::BelowFloor {
+            score: score.score,
+            grade: score.grade,
+            floor: visual_floor,
+        }));
+    }
+    Ok(score)
 }

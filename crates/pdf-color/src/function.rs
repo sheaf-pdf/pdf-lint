@@ -3,17 +3,17 @@
 //! ([`Function`], [`FunctionKind`]) for `Type 0` (sampled), `Type 2` (exponential), `Type 3`
 //! (stitching), and `Type 4` (PostScript calculator) functions.
 
-use std::borrow::Cow;
 use std::fmt;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{
-    Dict, Object, ObjectId, Resolve, Rules, Span, Stream, Streams, Unreadable, Value, Why,
+    Dict, Object, ObjectId, Resolve, Rules, Span, Stream, Streams, Unreadable, Value,
 };
 
-use crate::count::{Hop, Walk, float};
+use crate::count::{Hop, Walk, float, integer};
 use crate::fault::Fault;
 use crate::limits::Limits;
+use crate::walk::{Reached, StreamDecodeErr, decode_stream_or_inline, through_refs};
 
 use ps::{Program, PsParseError};
 
@@ -42,6 +42,31 @@ pub(crate) fn shape<'o, R: Resolve<'o>>(
 /// A count of an array's elements or pairs, as PDFium holds it in 32 bits.
 fn count(elements: usize) -> Option<u32> {
     u32::try_from(elements).ok()
+}
+
+/// Computes `(bps * outputs * prod(sizes) + 7) / 8` in 32-bit unsigned arithmetic, matching
+/// PDFium's `CPDF_SampledFunc::v_Init`.
+fn sampled_bytes_u32(bps: u32, outputs: u32, sizes: impl IntoIterator<Item = u32>) -> Option<u32> {
+    let mut total = bps.checked_mul(outputs)?;
+    for s in sizes {
+        total = total.checked_mul(s)?;
+    }
+    total.checked_add(7).map(|n| n / 8)
+}
+
+/// Determines per-input base output count for a `Type 2` exponential function from `/Range`,
+/// `/C0`, and `/C1`.
+fn exponential_base_outputs(
+    range_len: Option<usize>,
+    c0_len: Option<usize>,
+    c1_len: Option<usize>,
+) -> usize {
+    match (range_len, c0_len, c1_len) {
+        (Some(r), _, _) if r > 0 => r,
+        (_, Some(c0), _) if c0 > 0 => c0,
+        (_, _, Some(c1)) if c1 > 0 => c1,
+        _ => 1,
+    }
 }
 
 /// What every kind asks: a dictionary or a stream's, whose `/FunctionType`,
@@ -102,15 +127,15 @@ fn sampled<'o, R: Resolve<'o>>(
     if !matches!(bits, 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32) {
         return Ok(None);
     }
-    let mut total = (bits as u32).checked_mul(outputs);
+    let mut sizes = Vec::with_capacity(inputs as usize);
     for input in 0..inputs as usize {
         let samples = walk.integer(size.get(input))?;
         if samples <= 0 {
             return Ok(None);
         }
-        total = total.and_then(|total| total.checked_mul(samples as u32));
+        sizes.push(samples as u32);
     }
-    let bytes = total.and_then(|total| total.checked_add(7)).map(|n| n / 8);
+    let bytes = sampled_bytes_u32(bits as u32, outputs, sizes);
     Ok(bytes.filter(|bytes| *bytes > 0).map(|_| ()))
 }
 
@@ -128,14 +153,12 @@ fn exponential<'o, R: Resolve<'o>>(
         return Ok(None);
     }
     let start = walk.array(dict.get(b"C0"))?;
-    let outputs = match outputs {
-        0 => start
-            .and_then(|start| count(start.len()))
-            .unwrap_or(0)
-            .max(1),
-        outputs => outputs,
-    };
-    Ok(outputs.checked_mul(inputs))
+    let base = exponential_base_outputs(
+        (outputs > 0).then_some(outputs as usize),
+        start.map(<[Object]>::len),
+        None,
+    );
+    Ok(count(base).and_then(|n| n.checked_mul(inputs)))
 }
 
 /// A stitching function's dictionary (7.10.4): one input, at least one
@@ -188,10 +211,6 @@ fn stitching<'o, R: Resolve<'o>>(
     Ok(alike)
 }
 
-// ---------------------------------------------------------------------------
-// Public bounded §7.10 Function reader and evaluator
-// ---------------------------------------------------------------------------
-
 /// The kind of a PDF function (`/FunctionType`; ISO 32000-2, §7.10.1, Table 38).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -208,8 +227,10 @@ pub enum FunctionKind {
 
 /// A parsed, ready-to-evaluate ISO 32000-2 §7.10 PDF function.
 ///
-/// Constructed via [`Function::read`] under explicit [`Limits`] and [`Rules`], and evaluated via
-/// [`Function::eval`] or [`Function::eval_vec`] with zero panics on any input.
+/// Constructed via [`Function::read`] (or [`Function::read_at`]) under explicit [`Limits`] and
+/// [`Rules`], and evaluated via [`Function::eval`] or [`Function::eval_vec`] with zero panics on
+/// any input. Execution bounds (`postscript_ops`, `postscript_stack`, `space_depth`) and active
+/// [`Rules`] are captured when the function is read so evaluation requires no `&Limits` parameter.
 #[derive(Clone, PartialEq)]
 pub struct Function {
     domain: Vec<(f32, f32)>,
@@ -278,6 +299,15 @@ impl fmt::Debug for Function {
 impl Function {
     /// Reads and prepares the PDF function at `value` (`Type 0`, `Type 2`, `Type 3`, or `Type 4`).
     ///
+    /// For indirect stream functions (`Type 0` and `Type 4`) compressed with stream filters, pass
+    /// the indirect reference `Object` (e.g. `dict.get(b"Function")`) so `objects.decoded` can
+    /// decompress the numbered stream; if you have already resolved a numbered `Stream` object,
+    /// use [`Function::read_at`] to supply its [`ObjectId`]. Unnumbered direct in-memory `Stream`
+    /// values are supported when unfiltered.
+    ///
+    /// Note that `Type 0` sampled functions with `/Order 3` (cubic spline) are accepted without
+    /// fault and evaluated using multilinear (`/Order 1`) interpolation, matching PDFium.
+    ///
     /// Returns `Ok(None)` when `value` cannot be loaded as a function under `rules` and `limits`,
     /// reporting spec departures to `sink` when `sink.wants()` is `true`. Passing `&mut ()`
     /// produces the exact same `Result<Option<Function>, Unreadable>` without constructing fault
@@ -299,7 +329,29 @@ impl Function {
         O: Resolve<'o> + Streams,
         S: Sink<Fault> + ?Sized,
     {
-        FuncReader::new(objects, rules, limits, sink).func(value, 0)
+        FuncReader::new(objects, rules, limits, sink).func(value, None, 0)
+    }
+
+    /// Like [`Function::read`], but supplies an explicit `direct_id` when `value` is an already-
+    /// resolved indirect [`Object`] (so filtered `Type 0` and `Type 4` streams can be decoded via
+    /// [`Streams::decoded`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Function::read`] fails.
+    pub fn read_at<'o, O, S>(
+        objects: O,
+        value: &'o Object,
+        direct_id: Option<ObjectId>,
+        rules: Rules,
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Result<Option<Function>, Unreadable>
+    where
+        O: Resolve<'o> + Streams,
+        S: Sink<Fault> + ?Sized,
+    {
+        FuncReader::new(objects, rules, limits, sink).func(value, direct_id, 0)
     }
 
     /// Function type (`Sampled`, `Exponential`, `Stitching`, or `PostScript`).
@@ -313,13 +365,13 @@ impl Function {
         }
     }
 
-    /// Number of input variables $m \ge 1$.
+    /// Number of input variables (`m >= 1`).
     #[must_use]
     pub fn inputs(&self) -> u32 {
         self.domain.len() as u32
     }
 
-    /// Number of output values $n \ge 1$.
+    /// Number of output values (`n >= 1`).
     #[must_use]
     pub const fn outputs(&self) -> u32 {
         self.outputs
@@ -341,9 +393,19 @@ impl Function {
     /// `outputs[..self.outputs()]`.
     ///
     /// Returns `false` if `inputs` or `outputs` is shorter than required, or if a `Type 4`
-    /// calculator program fails at runtime (stack underflow/overflow, division by zero, or
-    /// exceeding `limits.postscript_ops`).
-    pub fn eval(&self, inputs: &[f32], outputs: &mut [f32], limits: &Limits) -> bool {
+    /// calculator program fails at runtime (stack underflow/overflow, type error, division by
+    /// zero, or exceeding the step/depth caps captured at [`Function::read`]).
+    #[must_use]
+    pub fn eval(&self, inputs: &[f32], outputs: &mut [f32]) -> bool {
+        self.eval_with_rules(inputs, outputs, None)
+    }
+
+    pub(crate) fn eval_with_rules(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        rules_override: Option<Rules>,
+    ) -> bool {
         let m = self.domain.len();
         let n = self.outputs as usize;
         if inputs.len() < m || outputs.len() < n {
@@ -374,9 +436,9 @@ impl Function {
                 true
             }
             FunctionInner::Stitching(data) => {
-                eval_stitching(data, self.domain[0], x[0], out, limits)
+                eval_stitching(data, self.domain[0], x[0], out, rules_override)
             }
-            FunctionInner::PostScript(prog) => prog.exec(x, out, limits),
+            FunctionInner::PostScript(prog) => prog.exec(x, out, rules_override),
         };
         if !ok {
             return false;
@@ -393,9 +455,9 @@ impl Function {
     /// Evaluates the function on `inputs` and returns a `Vec<f32>` of length [`Self::outputs`],
     /// or `None` if evaluation fails.
     #[must_use]
-    pub fn eval_vec(&self, inputs: &[f32], limits: &Limits) -> Option<Vec<f32>> {
+    pub fn eval_vec(&self, inputs: &[f32]) -> Option<Vec<f32>> {
         let mut out = vec![0.0_f32; self.outputs as usize];
-        self.eval(inputs, &mut out, limits).then_some(out)
+        self.eval(inputs, &mut out).then_some(out)
     }
 }
 
@@ -449,7 +511,7 @@ fn eval_stitching(
     domain0: (f32, f32),
     x: f32,
     out: &mut [f32],
-    limits: &Limits,
+    rules_override: Option<Rules>,
 ) -> bool {
     let k = data.functions.len();
     if k == 0 {
@@ -472,7 +534,7 @@ fn eval_stitching(
     };
     let (e0, e1) = data.encode[idx];
     let mapped = interpolate(x, sub_lo, sub_hi, e0, e1);
-    data.functions[idx].eval(&[mapped], out, limits)
+    data.functions[idx].eval_with_rules(&[mapped], out, rules_override)
 }
 
 struct FuncReader<'l, O, S: ?Sized> {
@@ -484,12 +546,6 @@ struct FuncReader<'l, O, S: ?Sized> {
     visits_told: bool,
     samples_used: usize,
     path: Vec<ObjectId>,
-}
-
-enum Reached<'o> {
-    At(&'o Object),
-    Nothing,
-    Stopped,
 }
 
 impl<'l, 'o, O, S> FuncReader<'l, O, S>
@@ -529,41 +585,17 @@ where
     }
 
     fn through(&mut self, written: &'o Object) -> Result<Reached<'o>, Unreadable> {
-        let mut object = written;
-        let mut followed = 0;
-        while let Some(id) = object.as_reference() {
-            followed += 1;
-            if followed == 2 {
-                self.say(object.at(), Fault::Chained);
-                if self.rules == Rules::Pdfium {
-                    return Ok(Reached::Nothing);
-                }
-            }
-            if self.path.contains(&id) {
-                self.say(object.at(), Fault::Loop);
-                return Ok(Reached::Stopped);
-            }
-            if self.path.len() > self.limits.space_depth {
-                self.say(object.at(), Fault::TooDeep);
-                return Ok(Reached::Stopped);
-            }
-            if !self.spend(object.at()) {
-                return Ok(Reached::Stopped);
-            }
-            match self.objects.try_resolve(id) {
-                Ok(Some(next)) => {
-                    self.path.push(id);
-                    object = next;
-                }
-                Ok(None) => return Ok(Reached::Nothing),
-                Err(e) if e.why == Why::Damaged => {
-                    self.say(object.at(), Fault::Damaged { id });
-                    return Ok(Reached::Stopped);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(Reached::At(object))
+        through_refs(
+            &self.objects,
+            written,
+            self.rules == Rules::Pdfium,
+            self.limits.space_depth,
+            self.limits.space_visits,
+            &mut self.visits,
+            &mut self.visits_told,
+            &mut self.path,
+            self.sink,
+        )
     }
 
     fn entered<T>(
@@ -647,53 +679,21 @@ where
         })
     }
 
-    fn stream_bytes(
+    fn func(
         &mut self,
-        stream: &'o Stream,
-        stream_id: Option<ObjectId>,
-        at: Option<Span>,
-        cap_fault: Fault,
-        corrupt_fault: Fault,
-    ) -> Result<Option<Cow<'o, [u8]>>, Unreadable> {
-        let limit = self.limits.stream_bytes;
-        if let Some(id) = stream_id {
-            let res = self.objects.decoded(id, limit).map(|b| b.into_owned());
-            match res {
-                Ok(bytes) => Ok(Some(Cow::Owned(bytes))),
-                Err(e) if e.why == Why::Limit => {
-                    self.say(at, cap_fault);
-                    Ok(None)
-                }
-                Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => {
-                    self.say(at, corrupt_fault);
-                    Ok(None)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            if stream.dict.has(b"Filter") {
-                self.say(at, corrupt_fault);
-                return Ok(None);
-            }
-            let Some(bytes) = stream.data.bytes() else {
-                self.say(at, corrupt_fault);
-                return Ok(None);
-            };
-            if bytes.len() > limit {
-                self.say(at, cap_fault);
-                return Ok(None);
-            }
-            Ok(Some(Cow::Borrowed(bytes)))
-        }
-    }
-
-    fn func(&mut self, written: &'o Object, depth: usize) -> Result<Option<Function>, Unreadable> {
+        written: &'o Object,
+        direct_id: Option<ObjectId>,
+        depth: usize,
+    ) -> Result<Option<Function>, Unreadable> {
         if depth > self.limits.space_depth {
             self.say(written.at(), Fault::TooDeep);
             return Ok(None);
         }
         self.entered(written, Some(Fault::NotAFunction), |reader, obj| {
-            let stream_id = written.as_reference().and(reader.path.last().copied());
+            let stream_id = written
+                .as_reference()
+                .and(reader.path.last().copied())
+                .or(direct_id);
             let (dict, stream) = match obj.value() {
                 Value::Stream(s) => (&s.dict, Some(s)),
                 Value::Dict(d) => (d, None),
@@ -715,7 +715,7 @@ where
                                 }
                             },
                             _ => {
-                                let k = pdfium_int(ko);
+                                let k = integer(ko);
                                 if !matches!(k, 0 | 2 | 3 | 4) {
                                     r.say(ko.at(), Fault::FunctionType);
                                     Ok(None)
@@ -858,7 +858,7 @@ where
                 let val = r.entered(item, Some(Fault::SampleSize), |r2, io| {
                     let v = match r2.rules {
                         Rules::Iso => io.as_integer().and_then(|v| usize::try_from(v).ok()),
-                        _ => usize::try_from(pdfium_int(io)).ok(),
+                        _ => usize::try_from(integer(io)).ok(),
                     };
                     match v.filter(|&s| s >= 1) {
                         Some(s) => Ok(Some(s)),
@@ -886,7 +886,7 @@ where
         let Some(bps) = self.entered(bps_obj, Some(Fault::BitsPerSample), |r, bo| {
             let b = match r.rules {
                 Rules::Iso => bo.as_integer(),
-                _ => Some(i64::from(pdfium_int(bo))),
+                _ => Some(i64::from(integer(bo))),
             };
             match b {
                 Some(b @ (1 | 2 | 4 | 8 | 12 | 16 | 24 | 32)) => Ok(Some(b as u32)),
@@ -933,13 +933,14 @@ where
             return Ok(None);
         };
         if self.rules != Rules::Iso {
-            // Match PDFium (`CPDF_SampledFunc::v_Init`): total sample bits (`bps * outputs * prod(sizes)`)
-            // and `(total_bits + 7)` must fit in 32-bit unsigned arithmetic.
-            let mut bits32 = u32::try_from(n).ok().and_then(|no| bps.checked_mul(no));
-            for &s in &sizes {
-                bits32 = bits32.and_then(|acc| u32::try_from(s).ok()?.checked_mul(acc));
-            }
-            if bits32.and_then(|b| b.checked_add(7)).is_none() {
+            let sizes_u32 = sizes
+                .iter()
+                .map(|&s| u32::try_from(s).ok())
+                .collect::<Option<Vec<u32>>>();
+            let ok32 = sizes_u32
+                .zip(u32::try_from(n).ok())
+                .and_then(|(su, no)| sampled_bytes_u32(bps, no, su));
+            if ok32.is_none() {
                 self.say(at, Fault::TooManySamples);
                 return Ok(None);
             }
@@ -970,23 +971,31 @@ where
             None => range.to_vec(),
         };
 
-        let Some(raw) = self.stream_bytes(
+        let samples = match decode_stream_or_inline(
+            &self.objects,
             stream,
             stream_id,
-            at,
-            Fault::TooManySamples,
-            Fault::SampleDataLength,
-        )?
-        else {
-            return Ok(None);
+            self.limits.stream_bytes,
+        ) {
+            Ok(raw) => {
+                if raw.len() < needed_bytes {
+                    self.say(at, Fault::SampleDataLength);
+                    return Ok(None);
+                }
+                unpack_samples(&raw, total_samples, bps, n, &decode)
+            }
+            Err(StreamDecodeErr::Limit) => {
+                self.say(at, Fault::TooManySamples);
+                return Ok(None);
+            }
+            Err(StreamDecodeErr::Corrupt) => {
+                self.say(at, Fault::SampleDataLength);
+                return Ok(None);
+            }
+            Err(StreamDecodeErr::Unreadable(e)) => return Err(e),
         };
-        if raw.len() < needed_bytes {
-            self.say(at, Fault::SampleDataLength);
-            return Ok(None);
-        }
 
         self.samples_used = new_samples_used;
-        let samples = unpack_samples(&raw, total_samples, bps, n, &decode);
         Ok(Some(SampledData {
             sizes,
             encode,
@@ -1062,24 +1071,23 @@ where
             }
         }
 
-        let base_n = match (&range, &c0_opt, &c1_opt) {
-            (Some(r), _, _) => {
-                if let Some(c0) = &c0_opt
-                    && c0.len() != r.len()
-                {
-                    self.say(at, Fault::ExponentialEndpoints);
-                }
-                if let Some(c1) = &c1_opt
-                    && c1.len() != r.len()
-                {
-                    self.say(at, Fault::ExponentialEndpoints);
-                }
-                r.len()
+        if let Some(r) = &range {
+            if let Some(c0) = &c0_opt
+                && c0.len() != r.len()
+            {
+                self.say(at, Fault::ExponentialEndpoints);
             }
-            (None, Some(c0), _) => c0.len(),
-            (None, None, Some(c1)) => c1.len(),
-            (None, None, None) => 1,
-        };
+            if let Some(c1) = &c1_opt
+                && c1.len() != r.len()
+            {
+                self.say(at, Fault::ExponentialEndpoints);
+            }
+        }
+        let base_n = exponential_base_outputs(
+            range.as_ref().map(Vec::len),
+            c0_opt.as_ref().map(Vec::len),
+            c1_opt.as_ref().map(Vec::len),
+        );
 
         let mut c0 = c0_opt.unwrap_or_else(|| vec![0.0; base_n]);
         c0.resize(base_n, 0.0);
@@ -1134,7 +1142,7 @@ where
                 if item.as_reference().is_none() && !r.spend(item.at()) {
                     return Ok(None);
                 }
-                let Some(sub) = r.func(item, depth + 1)? else {
+                let Some(sub) = r.func(item, None, depth + 1)? else {
                     r.say(item.at(), Fault::StitchFunctions);
                     return Ok(None);
                 };
@@ -1226,17 +1234,24 @@ where
         stream_id: Option<ObjectId>,
         at: Option<Span>,
     ) -> Result<Option<Program>, Unreadable> {
-        let Some(bytes) = self.stream_bytes(
+        let parsed = match decode_stream_or_inline(
+            &self.objects,
             stream,
             stream_id,
-            at,
-            Fault::TooManyOps,
-            Fault::PostScriptSyntax,
-        )?
-        else {
-            return Ok(None);
+            self.limits.stream_bytes,
+        ) {
+            Ok(bytes) => Program::parse(&bytes, self.rules, self.limits),
+            Err(StreamDecodeErr::Limit) => {
+                self.say(at, Fault::TooManyOps);
+                return Ok(None);
+            }
+            Err(StreamDecodeErr::Corrupt) => {
+                self.say(at, Fault::PostScriptSyntax);
+                return Ok(None);
+            }
+            Err(StreamDecodeErr::Unreadable(e)) => return Err(e),
         };
-        match Program::parse(&bytes, self.limits) {
+        match parsed {
             Ok(prog) => Ok(Some(prog)),
             Err(PsParseError::TooDeep) => {
                 self.say(at, Fault::TooDeep);
@@ -1254,21 +1269,6 @@ where
     }
 }
 
-fn pdfium_int(obj: &Object) -> i32 {
-    match obj.value() {
-        Value::Integer(n) => {
-            if let Ok(u) = u32::try_from(*n) {
-                u as i32
-            } else {
-                i32::try_from(*n).unwrap_or(0)
-            }
-        }
-        Value::Real(r) => *r as f32 as i32,
-        Value::Bool(true) => 1,
-        _ => 0,
-    }
-}
-
 fn unpack_samples(
     bytes: &[u8],
     total_samples: usize,
@@ -1277,16 +1277,16 @@ fn unpack_samples(
     decode: &[(f32, f32)],
 ) -> Vec<f32> {
     let mut out = Vec::with_capacity(total_samples);
-    let max_val = if bps == 32 {
-        f64::from(u32::MAX)
+    let inv_max = if bps == 32 {
+        1.0 / f64::from(u32::MAX)
     } else {
-        ((1_u64 << bps) - 1) as f64
+        1.0 / (((1_u64 << bps) - 1) as f64)
     };
     let mut bit_pos = 0_usize;
     for idx in 0..total_samples {
         let raw = read_bits_msb(bytes, bit_pos, bps);
         bit_pos += bps as usize;
-        let t = (f64::from(raw) / max_val) as f32;
+        let t = (f64::from(raw) * inv_max) as f32;
         let (d0, d1) = decode[idx % n_outputs];
         out.push(d0 + t * (d1 - d0));
     }
@@ -1295,35 +1295,27 @@ fn unpack_samples(
 
 #[inline]
 fn read_bits_msb(bytes: &[u8], bit_offset: usize, bps: u32) -> u32 {
+    let i = bit_offset >> 3;
     match bps {
-        8 => u32::from(bytes[bit_offset >> 3]),
-        16 => {
-            let i = bit_offset >> 3;
-            u32::from(u16::from_be_bytes([bytes[i], bytes[i + 1]]))
+        1 => u32::from((bytes[i] >> (7 - (bit_offset & 7))) & 1),
+        2 => u32::from((bytes[i] >> (6 - (bit_offset & 6))) & 0b11),
+        4 => u32::from((bytes[i] >> (4 - (bit_offset & 4))) & 0x0F),
+        8 => u32::from(bytes[i]),
+        12 => {
+            if (bit_offset & 7) == 0 {
+                (u32::from(bytes[i]) << 4) | (u32::from(bytes[i + 1]) >> 4)
+            } else {
+                ((u32::from(bytes[i]) & 0x0F) << 8) | u32::from(bytes[i + 1])
+            }
         }
+        16 => u32::from(u16::from_be_bytes([bytes[i], bytes[i + 1]])),
         24 => {
-            let i = bit_offset >> 3;
             (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2])
         }
-        32 => {
-            let i = bit_offset >> 3;
-            u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
-        }
-        _ => {
-            // 1, 2, 4, or 12 bits packed MSB-first.
-            let mut acc = 0_u32;
-            for b in 0..bps as usize {
-                let pos = bit_offset + b;
-                let byte = bytes[pos >> 3];
-                let shift = 7 - (pos & 7);
-                acc = (acc << 1) | u32::from((byte >> shift) & 1);
-            }
-            acc
-        }
+        _ => u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]),
     }
 }
 
-// Complete `Function::eval` sampled interpolation with `self.domain`:
 impl SampledData {
     fn eval_with_domain(&self, domain: &[(f32, f32)], x: &[f32], out: &mut [f32]) {
         let m = self.sizes.len();

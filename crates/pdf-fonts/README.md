@@ -73,7 +73,7 @@ assert_eq!(budget, 1 << 20);
 
 ## Cargo Features
 
-- **`programs`** *(default)*: Parses embedded TrueType, CFF, and Type 1 font programs via [skrifa](https://crates.io/crates/skrifa) for glyph outline boxes (`Font::char_box`), fallback heights, and program-derived character mappings (`Font::read_for_text` and `Fonts::for_text` skip program parsing even when enabled).
+- **`programs`** *(default)*: Parses embedded TrueType, CFF, and Type 1 font programs via [skrifa](https://crates.io/crates/skrifa) for glyph outline boxes (`Font::char_box`), vector glyph contours (`Font::outline`, `Font::outline_status`, `FallbackProgram`), fallback heights, and program-derived character mappings (`Font::read_for_text` and `Fonts::for_text` skip program parsing even when enabled, and `Fonts::for_rendering` retains simple-font faces for contour extraction).
 - **`predefined-cmaps`** *(optional)*: Bundles Adobe's predefined CJK CMaps via [hayro-cmap](https://crates.io/crates/hayro-cmap). Without it, predefined CMaps fall back to approximate code widths and report `Fault::PredefinedNotBuilt`.
 - **`tracing`** *(optional)*: Emits numeric [tracing](https://crates.io/crates/tracing) spans around font reads, program/CMap/CharProc parsing, `shown` walks, and (with `embed`) font writes.
 - **`embed`** *(optional)*: Enables the `embed` module: opens TrueType programs via [skrifa](https://crates.io/crates/skrifa), subsets them to the glyphs drawn via [subsetter](https://crates.io/crates/subsetter) (without its `variable-fonts` feature, so variable fonts are embedded at their default instance), and writes them as Type 0 fonts. Independent of `programs`, which is for reading.

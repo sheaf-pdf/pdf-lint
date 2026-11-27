@@ -159,10 +159,13 @@ pub enum Space<'o> {
     Pattern(Option<Box<Space<'o>>>),
 }
 
-/// A CalGray, CalRGB or Lab space's parameters (8.6.5.2 to 8.6.5.4). Only the
-/// white point is read to be held: `/BlackPoint`, `/Gamma`, `/Matrix` and
-/// `/Range` are checked for a sink that wants faults, and left in the dictionary,
-/// as nothing here converts.
+/// A CalGray, CalRGB or Lab space's parameters (8.6.5.2 to 8.6.5.4).
+///
+/// Direct `/WhitePoint` (plus direct `CalGray` `/Gamma` and `CalRGB` `/Gamma` /
+/// `/Matrix`) values are captured when the dictionary is read; indirect
+/// `/BlackPoint`, `/Gamma`, `/Matrix` and `/Range` entries are checked on a
+/// separate budget when `sink.wants()` is `true` (or resolved on demand during
+/// [`PreparedSpace`](crate::PreparedSpace) preparation).
 ///
 /// `#[non_exhaustive]`, as each struct of a space's parameters is: read by
 /// its fields and made only by this crate, so a parameter more can be held
@@ -174,6 +177,9 @@ pub struct Cie<'o> {
     pub dict: Option<&'o Dict>,
     /// `/WhitePoint`, where it's three numbers, whatever they are.
     pub white_point: Option<[f64; 3]>,
+    pub(crate) direct_cal_gray_gamma: Option<f32>,
+    pub(crate) direct_cal_rgb_gamma: Option<[f32; 3]>,
+    pub(crate) direct_cal_rgb_matrix: Option<[f32; 9]>,
 }
 
 /// An ICCBased space's parameters (8.6.5.5). Its profile isn't opened.
@@ -243,8 +249,9 @@ pub struct Separation<'o> {
     pub name: Option<&'o [u8]>,
     /// Its alternate space.
     pub alternate: Option<Box<Space<'o>>>,
-    /// Its tint transform, as written: it's looked at only for a sink that wants
-    /// faults, and nothing here evaluates it.
+    /// Its tint transform, as written: `Space::read` checks its shape when `sink.wants()` is
+    /// `true`, while [`Function::read`](crate::Function::read) and
+    /// [`PreparedSpace`](crate::PreparedSpace) load and evaluate it.
     pub tint: Option<&'o Object>,
 }
 
@@ -264,8 +271,9 @@ pub struct DeviceN<'o> {
     pub components: Option<u32>,
     /// Its alternate space.
     pub alternate: Option<Box<Space<'o>>>,
-    /// Its tint transform, as written: it's looked at only for a sink that wants
-    /// faults, and nothing here evaluates it.
+    /// Its tint transform, as written: `Space::read` checks its shape when `sink.wants()` is
+    /// `true`, while [`Function::read`](crate::Function::read) and
+    /// [`PreparedSpace`](crate::PreparedSpace) load and evaluate it.
     pub tint: Option<&'o Object>,
     /// Its attributes dictionary, read.
     pub attributes: Option<Attributes<'o>>,
@@ -566,34 +574,128 @@ impl<'o> Space<'o> {
         if !(1..=32).contains(&bits_per_component) {
             return Ok(None);
         }
-        Ok(match self {
-            Space::DeviceGray | Space::CalGray(_) | Space::Separation(_) => Some(vec![(0.0, 1.0)]),
-            Space::DeviceRGB | Space::CalRGB(_) => Some(vec![(0.0, 1.0); 3]),
-            Space::DeviceCMYK => Some(vec![(0.0, 1.0); 4]),
+        let custom = match self {
             Space::Lab(cie) => {
                 let [amin, amax, bmin, bmax] = cie.lab_range(objects, limits)?;
                 Some(vec![(0.0, 100.0), (amin, amax), (bmin, bmax)])
             }
-            Space::ICCBased(icc) => {
-                let Some(n) = icc.n else {
-                    return Ok(None);
-                };
-                match icc.range(objects, limits)? {
-                    Some(pairs) => Some(pairs),
-                    None => Some(vec![(0.0, 1.0); n as usize]),
-                }
+            Space::ICCBased(icc) => icc.range(objects, limits)?,
+            _ => None,
+        };
+        Ok(table_90_decode(
+            self.family(),
+            self.components(),
+            bits_per_component,
+            custom.as_deref(),
+        ))
+    }
+}
+
+pub(crate) fn table_90_decode(
+    family: Family,
+    components: Option<u32>,
+    bits_per_component: u8,
+    custom_ranges: Option<&[(f64, f64)]>,
+) -> Option<Vec<(f64, f64)>> {
+    if !(1..=32).contains(&bits_per_component) {
+        return None;
+    }
+    match family {
+        Family::Pattern => None,
+        Family::Indexed => {
+            let hi = ((1_u64 << bits_per_component) - 1) as f64;
+            Some(vec![(0.0, hi)])
+        }
+        Family::Lab => custom_ranges
+            .map(<[(f64, f64)]>::to_vec)
+            .or_else(|| Some(vec![(0.0, 100.0), (-100.0, 100.0), (-100.0, 100.0)])),
+        Family::ICCBased => {
+            let n = components?;
+            match custom_ranges {
+                Some(pairs) => Some(pairs.to_vec()),
+                None => Some(vec![(0.0, 1.0); n as usize]),
             }
-            Space::Indexed(_) => {
-                let hi = ((1_u64 << bits_per_component) - 1) as f64;
-                Some(vec![(0.0, hi)])
-            }
-            Space::DeviceN(dn) => dn.components.map(|n| vec![(0.0, 1.0); n as usize]),
-            Space::Pattern(_) => None,
-        })
+        }
+        _ => components.map(|n| vec![(0.0, 1.0); n as usize]),
     }
 }
 
 impl<'o> Cie<'o> {
+    /// Resolves `CalGray` `/Gamma` (`> 0`), returning the pre-parsed direct value without
+    /// re-reading the dictionary when `/Gamma` was written inline.
+    pub(crate) fn cal_gray_gamma<R: Resolve<'o>>(
+        &self,
+        objects: &R,
+        limits: &Limits,
+    ) -> Result<Option<f32>, Unreadable> {
+        if let Some(g) = self.direct_cal_gray_gamma {
+            return Ok(Some(g));
+        }
+        let Some(entry) = self
+            .dict
+            .and_then(|d| d.get(b"Gamma"))
+            .filter(|v| v.as_reference().is_some())
+        else {
+            return Ok(None);
+        };
+        let mut visits = 0;
+        let Some((obj, _)) = resolve_bounded(objects, entry, &mut visits, limits)? else {
+            return Ok(None);
+        };
+        Ok(obj
+            .as_number()
+            .filter(|&g| g.is_finite() && g > 0.0)
+            .map(|g| g as f32))
+    }
+
+    /// Resolves `CalRGB` `(/Gamma, /Matrix)`, returning pre-parsed direct arrays when inline and
+    /// resolving indirect references only when needed.
+    pub(crate) fn cal_rgb_params<R: Resolve<'o>>(
+        &self,
+        objects: &R,
+        limits: &Limits,
+    ) -> Result<([f32; 3], [f32; 9]), Unreadable> {
+        let gamma = if let Some(g) = self.direct_cal_rgb_gamma {
+            g
+        } else if let Some(entry) = self
+            .dict
+            .and_then(|d| d.get(b"Gamma"))
+            .filter(|v| !v.is_null())
+        {
+            match read_number_vec(objects, entry, 3, limits)? {
+                Some(nums) if nums.iter().all(|&v| v > 0.0) => {
+                    [nums[0] as f32, nums[1] as f32, nums[2] as f32]
+                }
+                _ => [1.0, 1.0, 1.0],
+            }
+        } else {
+            [1.0, 1.0, 1.0]
+        };
+
+        let matrix = if let Some(m) = self.direct_cal_rgb_matrix {
+            m
+        } else if let Some(entry) = self
+            .dict
+            .and_then(|d| d.get(b"Matrix"))
+            .filter(|v| !v.is_null())
+        {
+            match read_number_vec(objects, entry, 9, limits)? {
+                Some(nums) => {
+                    let mut out = [0.0_f32; 9];
+                    for (dst, src) in out.iter_mut().zip(nums) {
+                        *dst = src as f32;
+                    }
+                    out
+                }
+                None => [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            }
+        } else {
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        };
+
+        Ok((gamma, matrix))
+    }
+
     /// Reads `[amin, amax, bmin, bmax]` from a `Lab` dictionary's `/Range`, falling back to
     /// `[-100.0, 100.0, -100.0, 100.0]` when absent or invalid (ISO 32000-2, Table 64).
     ///
@@ -657,20 +759,35 @@ impl<'o> Icc<'o> {
     }
 }
 
+/// Errors returned by [`Lookup::bytes`] and [`Indexed::lookup_bytes`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LookupError {
+    /// The lookup table exceeded the caller's `limit` byte cap.
+    #[error("Indexed lookup table exceeds byte limit")]
+    Limit,
+    /// The lookup string is encrypted and has not been unlocked.
+    #[error("Indexed lookup string is encrypted")]
+    Locked,
+    /// Underlying indirect stream read/decode failed.
+    #[error(transparent)]
+    Unreadable(#[from] Unreadable),
+}
+
 impl<'o> Indexed<'o> {
     /// Extracts the raw palette bytes of this `Indexed` space's lookup table up to `limit` bytes,
     /// whether stored as a string or an indirect/inline stream (§8.6.6.3).
     ///
     /// # Errors
     ///
-    /// Returns [`Unreadable`] when the string is still encrypted ([`Why::Locked`]), when the table
-    /// exceeds `limit` ([`Why::Limit`]), or when stream decoding fails for a reason other than
-    /// [`Why::Damaged`].
+    /// Returns [`LookupError::Locked`] when the string is still encrypted, [`LookupError::Limit`]
+    /// when the table exceeds `limit`, or [`LookupError::Unreadable`] when indirect stream
+    /// decoding fails for a reason other than [`Why::Damaged`].
     pub fn lookup_bytes<'a, S: Streams + ?Sized>(
         &'a self,
         streams: &'a S,
         limit: usize,
-    ) -> Result<Option<Cow<'a, [u8]>>, Unreadable>
+    ) -> Result<Option<Cow<'a, [u8]>>, LookupError>
     where
         'o: 'a,
     {
@@ -686,37 +803,30 @@ impl<'o> Lookup<'o> {
     ///
     /// # Errors
     ///
-    /// Returns [`Unreadable`] with [`Why::Locked`] for an un-decrypted string, [`Why::Limit`] if
-    /// the byte length exceeds `limit`, or any non-[`Why::Damaged`] error from `streams.decoded`.
+    /// Returns [`LookupError::Locked`] for an un-decrypted string, [`LookupError::Limit`] if the
+    /// byte length exceeds `limit`, or [`LookupError::Unreadable`] for any non-[`Why::Damaged`]
+    /// error from `streams.decoded`.
     pub fn bytes<'a, S: Streams + ?Sized>(
         &'a self,
         streams: &'a S,
         limit: usize,
-    ) -> Result<Option<Cow<'a, [u8]>>, Unreadable>
+    ) -> Result<Option<Cow<'a, [u8]>>, LookupError>
     where
         'o: 'a,
     {
-        let zero = ObjectId::new(0, 0);
         match self {
             Lookup::String(Str::Bytes(bytes)) => {
                 if bytes.len() > limit {
-                    return Err(Unreadable::new(
-                        zero,
-                        Why::Limit,
-                        "Indexed lookup string exceeds byte limit",
-                    ));
+                    return Err(LookupError::Limit);
                 }
                 Ok(Some(Cow::Borrowed(bytes)))
             }
-            Lookup::String(Str::Encrypted(_)) => Err(Unreadable::new(
-                zero,
-                Why::Locked,
-                "Indexed lookup string is encrypted",
-            )),
+            Lookup::String(Str::Encrypted(_)) => Err(LookupError::Locked),
             Lookup::Stream { id: Some(id), .. } => match streams.decoded(*id, limit) {
                 Ok(data) => Ok(Some(data)),
                 Err(e) if e.why == Why::Damaged => Ok(None),
-                Err(e) => Err(e),
+                Err(e) if e.why == Why::Limit => Err(LookupError::Limit),
+                Err(e) => Err(LookupError::Unreadable(e)),
             },
             Lookup::Stream { stream, id: None } => {
                 if stream.dict.has(b"Filter") {
@@ -726,11 +836,7 @@ impl<'o> Lookup<'o> {
                     return Ok(None);
                 };
                 if bytes.len() > limit {
-                    return Err(Unreadable::new(
-                        zero,
-                        Why::Limit,
-                        "inline Indexed lookup stream exceeds byte limit",
-                    ));
+                    return Err(LookupError::Limit);
                 }
                 Ok(Some(Cow::Borrowed(bytes)))
             }
@@ -740,27 +846,26 @@ impl<'o> Lookup<'o> {
 
 pub(crate) fn resolve_bounded<'o, R: Resolve<'o>>(
     objects: &R,
-    mut obj: &'o Object,
+    obj: &'o Object,
     visits: &mut usize,
     limits: &Limits,
 ) -> Result<Option<(&'o Object, Option<ObjectId>)>, Unreadable> {
+    let mut told = false;
     let mut path = Vec::new();
-    while let Some(id) = obj.as_reference() {
-        if path.contains(&id) || path.len() > limits.space_depth || *visits >= limits.space_visits {
-            return Ok(None);
-        }
-        *visits += 1;
-        match objects.try_resolve(id) {
-            Ok(Some(next)) => {
-                path.push(id);
-                obj = next;
-            }
-            Ok(None) => return Ok(None),
-            Err(e) if e.why == Why::Damaged => return Ok(None),
-            Err(e) => return Err(e),
-        }
+    match crate::walk::through_refs(
+        objects,
+        obj,
+        false,
+        limits.space_depth,
+        limits.space_visits,
+        visits,
+        &mut told,
+        &mut path,
+        &mut (),
+    )? {
+        crate::walk::Reached::At(target) => Ok(Some((target, path.last().copied()))),
+        crate::walk::Reached::Nothing | crate::walk::Reached::Stopped => Ok(None),
     }
-    Ok(Some((obj, path.last().copied())))
 }
 
 pub(crate) fn read_number_vec<'o, R: Resolve<'o>>(

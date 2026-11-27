@@ -155,6 +155,35 @@ assert_eq!(texts, ["First", "Second"]);
 
 `save_update(path)` verifies file identity before appending so it will never corrupt a file modified since it was opened. Full saves refuse to overwrite the same file handle a positional `pdfs::open` is actively reading; to overwrite a file in place, load it into memory first with `pdfs::from_bytes(std::fs::read(path)?)`.
 
+## Rendering Pages and Extracting Images
+
+With the default `raster` and `images` features, `Page::render_pixmap` (or `Page::render` when you also want `RenderSummary`) rasterizes pages or tiles into a `Pixmap` and encodes PNG bytes via `Pixmap::to_png()`, `Page::images` lists drawn Image XObjects and inline images, `Page::decode_image` decodes any Image XObject into `RgbaImage`, and `RenderBackend` lets applications swap at runtime between pure-Rust `RustBackend` and dynamic-library `PdfiumBackend` (`pdfium` feature):
+
+```rust
+use std::sync::Arc;
+use pdfs::prelude::*;
+
+let mut doc = Document::new();
+let p = doc.add_page(Rect::new(0.0, 0.0, 144.0, 72.0));
+p.fill_color(Color::rgb8([24, 112, 200]));
+p.rect(0.0, 0.0, 144.0, 72.0);
+p.paint(Paint::Fill);
+let bytes = doc.to_bytes().unwrap();
+
+let pdf = pdfs::from_bytes(&bytes[..]).unwrap();
+let page = pdf.pages().unwrap().get(0).unwrap();
+let pixmap = page.render_pixmap(&RenderOpts::dpi(72.0)).unwrap();
+assert_eq!((pixmap.width(), pixmap.height()), (144, 72));
+assert_eq!(pixmap.pixel_rgba8(72, 36), Some([24, 112, 200, 255]));
+let png_bytes = pixmap.to_png().unwrap();
+assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+// Or drive rendering through the object-safe `RenderBackend` trait:
+let backend: &dyn RenderBackend = &RustBackend::new();
+let rendered = backend.open_bytes(Arc::from(bytes), None).unwrap();
+assert_eq!(rendered.page_count(), 1);
+```
+
 ## Architecture & Re-exported Crates
 
 Every high-level method on `Pdf`, `Page`, and `Document` is also available as a standalone function in `pdfs::file`, `pdfs::page`, and `pdfs::build` over lower-level traits. When you need finer control, drop down to the re-exported crates directly through `pdfs`, each under its short name (`pdfs::gfx`) and its crate name (`pdfs::pdf_gfx`) alike:
@@ -185,8 +214,8 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 
 ## Cargo Features
 
-- **`images`** *(default)* — Enable `pdfs::images` (`pdf-images`) and `Page::decode_image`.
-- **`raster`** *(default; implies `images`)* — Enable `pdfs::raster` (`pdf-raster`), `Page::render`, `RenderedDoc` on `Pdf`, and `RustBackend`.
+- **`images`** *(default)* — Enable `pdfs::images` (`pdf-images`) and `Page::decode_image` / `Page::decode_image_raw`.
+- **`raster`** *(default; implies `images`)* — Enable `pdfs::raster` (`pdf-raster`), `Page::render` / `Page::render_pixmap`, `RenderedDoc` on `Pdf`, and `RustBackend`.
 - **`programs`** *(default)* — Parse embedded font programs via `skrifa` for glyph bounding boxes, heights, and fallback character mappings.
 - **`text-layout`** *(default)* — Enable `Page::text_page`, `Page::search`, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas::text_box` layout via `pdf-gfx/text-layout`.
 - **`clock`** *(default)* — Enable `Date::now` and `Date::from_unix` in `pdf-semantics`.
@@ -195,12 +224,13 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 - **`image-ends`** — Find inline DCT (JPEG) and CCITTFax image boundaries by decoding image data, matching PDFium.
 - **`predefined-cmaps`** — Bundle Adobe predefined CJK CMaps (via `hayro-cmap`) for CJK fonts without `/ToUnicode`.
 - **`simd`** — Enable runtime SIMD dispatch in `pdf-content-streams`, `pdf-images`, and `pdf-raster`.
-- **`pdfium`** *(implies `raster`)* — Enable `pdfs::PdfiumBackend` (`pdfs::raster::pdfium`), a thin dynamic-library `RenderBackend` adapter over `pdfium-render` (`0.9.6`, `thread_safe`; semver-tied to `pdfium-render` `0.9`, loading `libpdfium` from an explicit path, `$PDF_RASTER_PDFIUM`, `$PDFIUM_LIB_DIR`, or the system dynamic loader) for runtime renderer switching alongside `Pdf` / `RustBackend`.
+- **`pdfium`** *(implies `raster`)* — Enable `pdfs::PdfiumBackend` (`pdfs::raster::pdfium::PdfiumBackend`), a `#![forbid(unsafe_code)]` dynamic-library `RenderBackend` adapter over `pdfium-render` (`=0.9.6`, `thread_safe`, `pdfium_8125` ABI, verified against `chromium/8152`). `libpdfium` is not bundled: `PdfiumBackend::bind_to_library` loads an explicit path, while `PdfiumBackend::from_env` checks `$PDF_RASTER_PDFIUM`, `$PDFIUM_LIB_DIR`, and the system dynamic loader.
 - **`tracing`** — Emit `debug`-level `tracing` spans (numeric metadata only) around major read/write operations.
 - **`insecure-test-writer`** — Deterministic seeded encryption keys/IVs for reproducible tests and fuzzing only (**never** enable in production builds).
 
 ## Scope & Limitations
 
+- **Pure-Rust renderer approximations & external `libpdfium`:** In `pdfs::raster` (`Page::render`), Gouraud and patch mesh shadings (`ShadingType 4–7`) fall back to `/Background` when present, non-separable blend modes (`Hue`, `Saturation`, `Color`, `Luminosity`) fall back to `Normal`, non-isolated or knockout transparency `/Group`s composite as isolated `sRGB` layers, and unembedded fonts without a `FontFallback` provider draw built-in legibility contours—each flagged via `RenderSummary::approximated` and `pdfs::raster::Fault` under `_with`. `PdfiumBackend` (`pdfium` feature) requires an external `libpdfium` shared library at runtime (`Viewport::Custom` with `draw.forms == true` is refused as `BackendError::Unsupported`).
 - **Annotation & Type 3 text extraction:** `Page::text` and `Page::text_page` walk page `/Contents` and drawn Form XObjects; Type 3 glyph streams and annotation `/AP` streams are not walked automatically during text extraction (`Page::render` renders all of them visually).
 - **No digital signing:** Rewriting a signed PDF whole or linearized invalidates existing byte-range signatures (use incremental updates carefully if preserving prior bytes).
 - **Font embedding is TrueType only, without shaping:** `Document::embed_font` takes programs with TrueType (`glyf`) outlines; CFF- and CFF2-outline OpenType fonts (most `.otf` files and CJK `.ttc` collections) and bitmap-only fonts are refused, as are fonts whose licence restricts embedding unless the caller says it has the right. Text is drawn one glyph per character in the order given (no ligatures, kerning, or right-to-left reordering), and justified `text_box` lines in an embedded font are laid out flush left, since PDF word spacing applies only to single-byte codes.

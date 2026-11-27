@@ -7,7 +7,7 @@ use pdf_images::{
     DecodeOptions, Fault, JpegColorSpace, Limits, decode_xobject, decode_xobject_with, encode_jpeg,
 };
 use pdf_raster_oracle::rubric::{
-    CaseEvaluation, RgbaImage as OracleRgbaImage, RubricProfile, evaluate_case,
+    CaseEvaluation, RgbaImage as OracleRgbaImage, RgbaImageExt, RubricProfile, evaluate_case,
 };
 use pdf_raster_oracle::{RenderOptions, require_pdfium};
 use pdf_structure::read::{Options, Reading};

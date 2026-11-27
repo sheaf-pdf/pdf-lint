@@ -3,9 +3,9 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use hayro_jpeg2000::{ColorSpace as JpxColorSpace, DecodeSettings, DecoderContext, Image};
-use pdf_color::{EvalOptions, Family, PreparedSpace};
+use pdf_color::{EvalOptions, Family, PreparedSpace, Space};
 use pdf_objects::fault::{Place, Sink};
-use pdf_objects::{Object, ObjectId, Stream, Unreadable, Why, WithStreams, dict, resolve_fn};
+use pdf_objects::{Unreadable, Why, WithStreams, resolve_fn};
 
 use crate::error::Error;
 use crate::fault::Fault;
@@ -322,58 +322,41 @@ where
     S: Sink<Fault> + ?Sized,
 {
     let mut color_sink = ColorFaultForwarder { inner: sink };
+    let mut local_opts = EvalOptions::from_spaces(eval_opts.rules, None);
+    local_opts.output_intent_profile = eval_opts.output_intent_profile;
+
     if let JpxColorSpace::Icc {
         profile,
         num_channels,
     } = jpx_cs
-    {
-        let icc_id = ObjectId::new(1, 0);
-        let mut stream_dict = dict! { "N" => i64::from(*num_channels) };
-        match num_channels {
-            1 => stream_dict.set("Alternate", Object::name("DeviceGray")),
-            3 => stream_dict.set("Alternate", Object::name("DeviceRGB")),
-            4 => stream_dict.set("Alternate", Object::name("DeviceCMYK")),
-            _ => {}
-        }
-        let stream_obj = Object::from(Stream::new(stream_dict, profile.clone()));
-        let icc_array = Object::from(vec![Object::name("ICCBased"), Object::from(icc_id)]);
-        let resolver = resolve_fn(|id| (id == icc_id).then_some(&stream_obj));
-        let provider = WithStreams::new(resolver, |id, cap| {
-            if id != icc_id {
-                return Err(Unreadable::new(id, Why::Damaged, "no stream"));
-            }
-            if profile.len() > cap {
-                return Err(Unreadable::new(id, Why::Limit, "ICC profile past limit"));
-            }
-            Ok(profile.clone())
-        });
-        let mut local_opts = EvalOptions::from_spaces(eval_opts.rules, None);
-        local_opts.output_intent_profile = eval_opts.output_intent_profile;
-        if let Some(space) = PreparedSpace::prepare(
-            provider,
-            &icc_array,
+        && let Some(space) = PreparedSpace::from_icc_bytes(
+            profile,
+            u32::from(*num_channels),
             &local_opts,
             &limits.color,
             &mut color_sink,
-        )? {
-            return Ok(space);
-        }
+        )
+    {
+        return Ok(space);
     }
 
-    let fallback_name = match (jpx_cs, components) {
-        (JpxColorSpace::Gray, _) | (_, 1) => "DeviceGray",
-        (JpxColorSpace::RGB, _) | (_, 3) => "DeviceRGB",
-        (JpxColorSpace::CMYK, _) | (_, 4) => "DeviceCMYK",
+    let fallback_space = match (jpx_cs, components) {
+        (JpxColorSpace::Gray, _) | (_, 1) => Space::DeviceGray,
+        (JpxColorSpace::RGB, _) | (_, 3) => Space::DeviceRGB,
+        (JpxColorSpace::CMYK, _) | (_, 4) => Space::DeviceCMYK,
         _ => return Err(Error::MissingColorSpace),
     };
-    let cs_obj = Object::name(fallback_name);
     let empty = WithStreams::new(resolve_fn(|_| None), |id, _| {
         Err(Unreadable::new(id, Why::Damaged, "none"))
     });
-    let mut local_opts = EvalOptions::from_spaces(eval_opts.rules, None);
-    local_opts.output_intent_profile = eval_opts.output_intent_profile;
-    PreparedSpace::prepare(empty, &cs_obj, &local_opts, &limits.color, &mut color_sink)?
-        .ok_or(Error::MissingColorSpace)
+    PreparedSpace::from_space(
+        empty,
+        &fallback_space,
+        &local_opts,
+        &limits.color,
+        &mut color_sink,
+    )?
+    .ok_or(Error::MissingColorSpace)
 }
 
 pub(crate) struct ColorFaultForwarder<'a, S: ?Sized> {

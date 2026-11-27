@@ -12,7 +12,7 @@ use pdf_annots::{
 use pdf_content_streams::{Concat, FillRule, ResBody, ResourceNeeds};
 use pdf_gfx::{BlendState, Matrix, Rect, TransparencyGroup};
 use pdf_objects::Why;
-use pdf_objects::fault::Sink;
+use pdf_objects::fault::{Place, Sink};
 use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams};
 
 use crate::canvas2d::{Canvas2d, segs_to_bez_path};
@@ -22,11 +22,12 @@ use crate::engine::sinks::{
     AnnotSinkAdapter, EPHEMERAL_GEN, EphemeralOverlay, Narrow, alloc_ephemeral_block,
 };
 use crate::engine::stream::render_stream_into;
-use crate::engine::{RenderCtx, RenderState, rect_to_segs};
+use crate::engine::{RenderCtx, RenderState, check_cancelled, is_srgb_group_cs, rect_to_segs};
 use crate::error::Error;
 use crate::fault::Fault;
 use crate::limits::LimitKind;
 use crate::opts::{Appearances, RenderMedium};
+use crate::phases::phase;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_page_annotations<'o, 'a, O, S>(
@@ -45,6 +46,7 @@ where
 {
     let objects = ctx.objects;
     let opts = ctx.opts;
+    check_cancelled(opts)?;
     let annots = {
         let mut asink = AnnotSinkAdapter(sink);
         page_annots_with(
@@ -59,11 +61,13 @@ where
     if annots.len() > opts.limits.max_annots {
         return Err(Error::Limit(LimitKind::Annotations));
     }
+    phase!(DEBUG, "render_annots", count = annots.len());
 
     #[cfg(feature = "text-layout")]
     let mut lazy_form: Option<Option<pdf_forms::Form<'o>>> = None;
 
     for annot in &annots {
+        check_cancelled(opts)?;
         let visible = match opts.medium {
             RenderMedium::Display => annot.is_visible_on_screen(),
             RenderMedium::Print => annot.is_printable(),
@@ -221,7 +225,11 @@ where
                 pdf_gfx::Cap::Decompressed,
             )));
         }
-        Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => return Ok(false),
+        Err(e) if matches!(e.why, Why::Damaged | Why::Filter) => {
+            sink.fault(Place::new(Some(stream_id), None), Fault::SkippedStream);
+            state.approximated = true;
+            return Ok(false);
+        }
         Err(e) => return Err(Error::Unreadable(e)),
     };
 
@@ -232,6 +240,15 @@ where
     }
 
     let group = TransparencyGroup::from_dict(objects, &stream.dict);
+    if let Some(ref g) = group
+        && (!g.isolated
+            || g.knockout
+            || g.color_space
+                .is_some_and(|cs| !is_srgb_group_cs(objects, cs)))
+    {
+        sink.fault(Place::new(Some(stream_id), None), Fault::ApproximatedGroup);
+        state.approximated = true;
+    }
     let clip_segs = rect_to_segs(bbox);
     let (clip_bez, _) = segs_to_bez_path(&clip_segs);
     canvas.set_anti_alias(opts.anti_alias.paths);

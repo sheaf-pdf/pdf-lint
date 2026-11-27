@@ -15,7 +15,8 @@ use crate::pixmap::Pixmap;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BackendError {
-    /// Underlying rasterization, viewport, or resource-limit failure.
+    /// Underlying rasterization, viewport, cancellation, or resource-limit
+    /// failure.
     #[error(transparent)]
     Raster(#[from] Error),
     /// Document is encrypted and none of the supplied passwords opened it.
@@ -71,22 +72,25 @@ pub trait RenderedDoc: Send + Sync {
     ///
     /// - **Pure-Rust (`pdfs::Pdf` / `pdfs::RustBackend`):** Honors every field
     ///   of [`RenderOpts`] (`viewport`, `medium`, `background`, `format`, `draw`,
-    ///   `appearances`, `anti_alias`, `hint_fonts`), using the opened `Pdf`'s
-    ///   `rules` and narrower `limits`, and returns a populated
-    ///   [`RenderSummary`] with `reported == true`.
+    ///   `appearances`, `anti_alias`, `hint_fonts`, `stop`), using the opened
+    ///   `Pdf`'s `rules` and the element-wise narrower of `opts.limits` and the
+    ///   `Pdf`'s `limits`, and returns a populated [`RenderSummary`] with
+    ///   `reported == true`.
     /// - **`PdfiumBackend` (`pdfium` feature):** Honors `viewport`, `medium`
-    ///   (`FPDF_PRINTING`), `background`, `format`, `draw`, `anti_alias`, and
-    ///   the pixmap dimensions/byte caps in `limits`; ignores `appearances`,
-    ///   `hint_fonts`, `rules`, and interpreter/codec sub-limits; returns
-    ///   [`BackendError::Unsupported`] for `Viewport::Custom` when
-    ///   `draw.forms == true` (PDFium's matrix path cannot render form-fill
-    ///   widgets), and returns [`RenderSummary::unreported`] (`reported == false`).
+    ///   (`FPDF_PRINTING`), `background`, `format`, `draw`, `anti_alias`, `stop`
+    ///   (checked before entering FFI), and the pixmap dimensions/byte caps in
+    ///   `limits`; ignores `appearances`, `hint_fonts`, `rules`, and
+    ///   interpreter/codec sub-limits; returns [`BackendError::Unsupported`] for
+    ///   `Viewport::Custom` when `draw.forms == true` (PDFium's matrix path
+    ///   cannot render form-fill widgets), and returns
+    ///   [`RenderSummary::unreported`] (`reported == false`).
     ///
     /// # Errors
     ///
-    /// Returns [`BackendError`] on invalid viewports, unsupported backend
-    /// options, out-of-bounds `page_index`, exceeded [`crate::Limits`], or
-    /// unreadable content.
+    /// Returns [`BackendError`] on invalid viewports, cooperative cancellation
+    /// (`BackendError::Raster(Error::Cancelled)`), unsupported backend options,
+    /// out-of-bounds `page_index`, exceeded [`crate::Limits`], or unreadable
+    /// content.
     fn render_page(
         &self,
         page_index: usize,
@@ -112,4 +116,34 @@ pub trait RenderBackend: Send + Sync {
         bytes: Arc<[u8]>,
         password: Option<&str>,
     ) -> Result<Box<dyn RenderedDoc>, BackendError>;
+
+    /// Opens `bytes` trying the empty password first and then each candidate in
+    /// `passwords` in order until one unlocks the document.
+    ///
+    /// Backends that natively accept a slice of candidate passwords (such as
+    /// `pdfs::RustBackend`) override this to derive keys in a single open pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError::Locked`] if `bytes` is encrypted and none of
+    /// `passwords` unlocks it, or [`BackendError`] on a non-password failure.
+    fn open_bytes_with_passwords(
+        &self,
+        bytes: Arc<[u8]>,
+        passwords: &[&str],
+    ) -> Result<Box<dyn RenderedDoc>, BackendError> {
+        match self.open_bytes(bytes.clone(), None) {
+            Ok(doc) => return Ok(doc),
+            Err(BackendError::Locked) if !passwords.is_empty() => {}
+            Err(err) => return Err(err),
+        }
+        for &pw in passwords {
+            match self.open_bytes(bytes.clone(), Some(pw)) {
+                Ok(doc) => return Ok(doc),
+                Err(BackendError::Locked) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(BackendError::Locked)
+    }
 }

@@ -13,7 +13,8 @@ use crate::codecs::ccitt::decode_ccitt;
 use crate::codecs::dct::decode_dct;
 use crate::codecs::jbig2::decode_jbig2;
 use crate::codecs::jpx::{ColorFaultForwarder, decode_jpx};
-use crate::error::Error;
+use crate::encode::encode_png_rgba8;
+use crate::error::{EncodeError, Error};
 use crate::fault::Fault;
 use crate::header::{
     ImageCodec, ImageMeta, MaskSpec, RenderingIntent, SMaskInData, check_dimensions,
@@ -23,7 +24,7 @@ use crate::header::{
 use crate::inline_chain::decode_inline_standard;
 use crate::limits::{LimitKind, Limits};
 use crate::phases::phase;
-use crate::samples::{RawImage, decode_raw_samples};
+use crate::samples::{RawImage, SampleData, decode_raw_samples};
 
 /// Options controlling color-space evaluation, stencil coloring, and mask compositing.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,6 +122,26 @@ impl RgbaImage {
         })
     }
 
+    /// Allocates a `width × height` [`RgbaImage`] filled uniformly with `rgba` under `limits`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Limit`] if dimensions or buffer length exceed `limits`, or
+    /// [`Error::NotAnImage`] if `width` or `height` is `0`.
+    pub fn solid(width: u32, height: u32, rgba: [u8; 4], limits: &Limits) -> Result<Self, Error> {
+        let count = check_dimensions(width, height, limits)?;
+        let expected = check_sample_budget(count.saturating_mul(4), limits)?;
+        let mut pixels = Vec::with_capacity(expected);
+        for _ in 0..(count as usize) {
+            pixels.extend_from_slice(&rgba);
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
     /// Image width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
@@ -165,6 +186,15 @@ impl RgbaImage {
         ])
     }
 
+    /// Sets `[R, G, B, A]` at `(x, y)` if `(x, y)` is within bounds.
+    pub fn set_pixel(&mut self, x: u32, y: u32, rgba: [u8; 4]) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let idx = ((y as usize) * (self.width as usize) + (x as usize)) * 4;
+        self.pixels[idx..idx + 4].copy_from_slice(&rgba);
+    }
+
     /// Fills `[x .. x + w) × [y .. y + h)` in-place with `rgba`, clamped to image bounds.
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, rgba: [u8; 4]) {
         if w == 0 || h == 0 {
@@ -184,6 +214,31 @@ impl RgbaImage {
                 *px = rgba;
             }
         }
+    }
+
+    /// Returns `true` if every pixel has `alpha == 255`.
+    #[must_use]
+    pub fn is_opaque(&self) -> bool {
+        self.pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 255)
+    }
+
+    /// Returns `true` if every pixel in the image equals pixel `(0, 0)`.
+    #[must_use]
+    pub fn is_uniform(&self) -> bool {
+        let chunks = self.pixels.as_chunks::<4>().0;
+        let Some(&first) = chunks.first() else {
+            return true;
+        };
+        chunks[1..].iter().all(|&px| px == first)
+    }
+
+    /// Encodes this [`RgbaImage`] as a standard 8-bit `RGBA` PNG file in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError`] if dimensions are invalid or PNG deflate encoding fails.
+    pub fn to_png(&self) -> Result<Vec<u8>, EncodeError> {
+        encode_png_rgba8(self.width, self.height, &self.pixels)
     }
 }
 
@@ -336,6 +391,7 @@ where
         raw_bytes,
         stream_cap,
         filter_reading,
+        None,
         sink,
     )
     .map_err(|e| remap_inline_limit(e, limit_kind, stream_cap))?;
@@ -389,7 +445,7 @@ where
     S: Sink<Fault> + ?Sized,
 {
     let raw = decode_stream_raw_with(objects, stream, resources, options, limits, sink)?;
-    raw.to_rgba8_inner(objects, options, limits, 0, sink)
+    raw.to_rgba8_with(objects, options, limits, sink)
 }
 
 /// Decodes an inline image (`BI..ID..EI`) from a content stream into native-sample [`RawImage`]
@@ -458,20 +514,19 @@ where
         inner: objects,
         _marker: core::marker::PhantomData,
     };
-    let (stream_cap, limit_kind) = standard_filter_cap(narrowed, &dict, limits)?;
-    let decoded_stream =
-        decode_inline_standard(narrowed, &dict, raw_slice, stream_cap, filter_reading, sink)
-            .map_err(|e| remap_inline_limit(e, limit_kind, stream_cap))?;
     let place = Place::from(Span::new(None, at.start, at.end));
-    let mut local_opts = DecodeOptions {
-        color: EvalOptions::from_spaces(options.color.rules, None),
-        stencil_color: options.stencil_color,
-        apply_masks: options.apply_masks,
-    };
-    local_opts.color.default_gray = options.color.default_gray;
-    local_opts.color.default_rgb = options.color.default_rgb;
-    local_opts.color.default_cmyk = options.color.default_cmyk;
-    local_opts.color.output_intent_profile = options.color.output_intent_profile;
+    let (stream_cap, limit_kind) = standard_filter_cap(narrowed, &dict, limits)?;
+    let decoded_stream = decode_inline_standard(
+        narrowed,
+        &dict,
+        raw_slice,
+        stream_cap,
+        filter_reading,
+        Some(place),
+        sink,
+    )
+    .map_err(|e| remap_inline_limit(e, limit_kind, stream_cap))?;
+    let local_opts = *options;
     decode_from_dict_and_stream(
         narrowed,
         &dict,
@@ -556,7 +611,7 @@ where
     S: Sink<Fault> + ?Sized,
 {
     let raw = decode_xobject_raw_with(objects, id, resources, options, limits, sink)?;
-    raw.to_rgba8_inner(objects, options, limits, 0, sink)
+    raw.to_rgba8_with(objects, options, limits, sink)
 }
 
 /// Decodes an inline image (`BI..ID..EI`) into color-evaluated, mask-composited `RGBA8`
@@ -607,7 +662,7 @@ where
     S: Sink<Fault> + ?Sized,
 {
     let raw = decode_inline_raw_with(objects, inline, content, resources, options, limits, sink)?;
-    raw.to_rgba8_inner(objects, options, limits, 0, sink)
+    raw.to_rgba8_with(objects, options, limits, sink)
 }
 
 impl RawImage {
@@ -649,21 +704,6 @@ impl RawImage {
         O: Resolve<'o> + Streams + Copy,
         S: Sink<Fault> + ?Sized,
     {
-        self.to_rgba8_inner(objects, options, limits, 0, sink)
-    }
-
-    fn to_rgba8_inner<'o, O, S>(
-        &self,
-        objects: O,
-        options: &DecodeOptions<'o>,
-        limits: &Limits,
-        depth: u8,
-        sink: &mut S,
-    ) -> Result<RgbaImage, Error>
-    where
-        O: Resolve<'o> + Streams + Copy,
-        S: Sink<Fault> + ?Sized,
-    {
         let width = self.meta.width;
         let height = self.meta.height;
         phase!(
@@ -678,15 +718,36 @@ impl RawImage {
         // 1. Stencil mask (`/ImageMask true`).
         if self.meta.stencil {
             let mut out = vec![0_u8; rgba_len];
-            let mut comp = [0.0_f32; 1];
-            for y in 0..height {
-                for x in 0..width {
-                    let _ = self.pixel_decoded(x, y, &mut comp);
-                    // ISO 32000-2 §8.9.6.2: mapped value < 0.5 (`0`) paints stencil_color;
-                    // mapped value >= 0.5 (`1`) leaves backdrop transparent.
-                    if comp[0] < 0.5 {
-                        let idx = ((y as usize) * (width as usize) + (x as usize)) * 4;
-                        out[idx..idx + 4].copy_from_slice(&options.stencil_color);
+            let (d0, d1) = self.meta.decode[0];
+            let zero_marks = d0 < 0.5;
+            let one_marks = d1 < 0.5;
+            if let SampleData::Packed {
+                bpc: 1,
+                stride,
+                data,
+            } = &self.samples
+            {
+                let w_usize = width as usize;
+                for y in 0..(height as usize) {
+                    let row = &data[y * stride..(y + 1) * stride];
+                    let out_row = &mut out[y * w_usize * 4..(y + 1) * w_usize * 4];
+                    for x in 0..w_usize {
+                        let bit = (row[x >> 3] >> (7 - (x & 7))) & 1;
+                        let marks = if bit == 0 { zero_marks } else { one_marks };
+                        if marks {
+                            out_row[x * 4..x * 4 + 4].copy_from_slice(&options.stencil_color);
+                        }
+                    }
+                }
+            } else {
+                let mut comp = [0.0_f32; 1];
+                for y in 0..height {
+                    for x in 0..width {
+                        let _ = self.pixel_decoded(x, y, &mut comp);
+                        if comp[0] < 0.5 {
+                            let idx = ((y as usize) * (width as usize) + (x as usize)) * 4;
+                            out[idx..idx + 4].copy_from_slice(&options.stencil_color);
+                        }
                     }
                 }
             }
@@ -711,7 +772,7 @@ impl RawImage {
         let resolved_smask = if options.apply_masks {
             match self.meta.smask {
                 Some(smask_id) => {
-                    load_smask(objects, smask_id, matte_comps, options, limits, depth, sink)?
+                    load_smask(objects, smask_id, matte_comps, options, limits, sink)?
                 }
                 None => None,
             }
@@ -724,7 +785,7 @@ impl RawImage {
         let resolved_stencil_mask = if options.apply_masks && !has_soft_alpha {
             match &self.meta.mask {
                 MaskSpec::Stencil(mask_id) => {
-                    load_stencil_mask(objects, *mask_id, options, limits, depth, sink)?
+                    load_stencil_mask(objects, *mask_id, options, limits, sink)?
                 }
                 _ => None,
             }
@@ -741,18 +802,189 @@ impl RawImage {
             None
         };
 
+        let comps = usize::from(self.meta.components);
+        let bpc = self.meta.bits_per_component;
+        let denom = ((1_u32 << bpc) - 1) as f64;
+        let decode_factors: Vec<(f32, f32)> = self
+            .meta
+            .decode
+            .iter()
+            .map(|&(d_min, d_max)| (d_min as f32, ((d_max - d_min) / denom) as f32))
+            .collect();
+
+        // Fast path A: Unmasked images (`color_key`, `stencil_mask`, `smask`, and `embedded_alpha`
+        // all inactive).
+        if color_key.is_none() && resolved_stencil_mask.is_none() && !has_soft_alpha {
+            // A1: 1-component `<= 8`-bit images (`Indexed`, `DeviceGray`, `CalGray`, `Separation`,
+            // 1-ch `ICCBased`): evaluate a `<= 256`-entry RGBA table once!
+            if comps == 1 && bpc <= 8 {
+                let table_len = 1_usize << bpc;
+                let (base, step) = decode_factors[0];
+                let mut lut = [[0_u8; 4]; 256];
+                for (raw_val, slot) in lut[..table_len].iter_mut().enumerate() {
+                    let mapped = [base + (raw_val as f32) * step];
+                    if let Some(rgb) = space
+                        .eval_with_rules(&mapped, options.color.rules)
+                        .and_then(|p| p.srgb())
+                    {
+                        *slot = [
+                            quantize_u8(rgb[0]),
+                            quantize_u8(rgb[1]),
+                            quantize_u8(rgb[2]),
+                            255,
+                        ];
+                    }
+                }
+                let mut out = vec![0_u8; rgba_len];
+                match &self.samples {
+                    SampleData::U8(data) => {
+                        for (px, &s) in out.as_chunks_mut::<4>().0.iter_mut().zip(data) {
+                            *px = lut[usize::from(s)];
+                        }
+                    }
+                    SampleData::Packed { bpc, stride, data } => {
+                        let w_usize = width as usize;
+                        let bpc_usize = usize::from(*bpc);
+                        let mask = (1_usize << bpc_usize) - 1;
+                        for y in 0..(height as usize) {
+                            let row = &data[y * stride..(y + 1) * stride];
+                            let out_row = out[y * w_usize * 4..(y + 1) * w_usize * 4]
+                                .as_chunks_mut::<4>()
+                                .0;
+                            for (x, px) in out_row.iter_mut().enumerate() {
+                                let bit_idx = x * bpc_usize;
+                                let v = (usize::from(row[bit_idx >> 3])
+                                    >> (8 - bpc_usize - (bit_idx & 7)))
+                                    & mask;
+                                *px = lut[v];
+                            }
+                        }
+                    }
+                    SampleData::U16(_) => unreachable!(),
+                }
+                return Ok(RgbaImage {
+                    width,
+                    height,
+                    pixels: out,
+                });
+            }
+
+            // A2: Multi-component unmasked images with `comps <= 4` and no `Separation /None`:
+            // evaluate in 64-pixel chunks via `eval_pixels_srgb8_with_rules` (hitting `DeviceRGB`
+            // direct/chunked paths, `DeviceCMYK` LUT, and 64-pixel `moxcms` ICC transforms!).
+            if (1..=4).contains(&comps) && space.family() != Family::Separation {
+                let total_px = pixels as usize;
+                // Direct 8-bit default-decode unprofiled `DeviceRGB` copy (`Rules::Pdfium` or no
+                // `/DefaultRGB`/`/OutputIntents`).
+                if comps == 3
+                    && bpc == 8
+                    && space.family() == Family::DeviceRGB
+                    && self.meta.decode == [(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]
+                    && (options.color.rules != Rules::Iso
+                        || (options.color.default_rgb.is_none()
+                            && options.color.output_intent_profile.is_none()))
+                    && let SampleData::U8(src) = &self.samples
+                {
+                    let mut out = Vec::with_capacity(rgba_len);
+                    for &[r, g, b] in src.as_chunks::<3>().0 {
+                        out.extend_from_slice(&[r, g, b, 255]);
+                    }
+                    return Ok(RgbaImage {
+                        width,
+                        height,
+                        pixels: out,
+                    });
+                }
+
+                let mut out = vec![0_u8; rgba_len];
+                const CHUNK: usize = 64;
+                let mut f32_chunk = [0.0_f32; CHUNK * 4];
+                let mut rgb8_chunk = [[0_u8; 3]; CHUNK];
+                let mut raw_px = [0_u16; 4];
+                let w_usize = width as usize;
+
+                let mut px_idx = 0_usize;
+                while px_idx < total_px {
+                    let batch = (total_px - px_idx).min(CHUNK);
+                    if let SampleData::U8(src) = &self.samples {
+                        for i in 0..batch {
+                            let s_off = (px_idx + i) * comps;
+                            let d_off = i * comps;
+                            for c in 0..comps {
+                                let (base, step) = decode_factors[c];
+                                f32_chunk[d_off + c] = base + f32::from(src[s_off + c]) * step;
+                            }
+                        }
+                    } else {
+                        for i in 0..batch {
+                            let p = px_idx + i;
+                            let x = (p % w_usize) as u32;
+                            let y = (p / w_usize) as u32;
+                            let _ = self.pixel_raw(x, y, &mut raw_px[..comps]);
+                            let d_off = i * comps;
+                            for c in 0..comps {
+                                let (base, step) = decode_factors[c];
+                                f32_chunk[d_off + c] = base + f32::from(raw_px[c]) * step;
+                            }
+                        }
+                    }
+                    let _ = space.eval_pixels_srgb8_with_rules(
+                        &f32_chunk[..batch * comps],
+                        &mut rgb8_chunk[..batch],
+                        [0, 0, 0],
+                        options.color.rules,
+                    );
+                    let out_slice =
+                        &mut out[px_idx * 4..(px_idx + batch) * 4].as_chunks_mut::<4>().0;
+                    for (dst, &[r, g, b]) in out_slice.iter_mut().zip(&rgb8_chunk[..batch]) {
+                        *dst = [r, g, b, 255];
+                    }
+                    px_idx += batch;
+                }
+                return Ok(RgbaImage {
+                    width,
+                    height,
+                    pixels: out,
+                });
+            }
+        }
+
         // Pre-evaluate `/Matte` into sRGB using `matte_space` (the base space for `Indexed`).
         let matte_srgb: Option<[f32; 3]> = resolved_smask
             .as_ref()
             .and_then(|sm| sm.matte.as_deref())
-            .and_then(|m| matte_space.eval_with_rules(m, options.color.rules, &limits.color))
+            .and_then(|m| matte_space.eval_with_rules(m, options.color.rules))
             .and_then(|p| p.srgb());
 
-        let comps = usize::from(self.meta.components);
+        let use_iso_matte =
+            matches!(options.color.rules, Rules::Iso) && space.family() != Family::Indexed;
+
+        // Precompute a 256-entry sRGB LUT for 1-component `<= 8`-bit masked images whenever
+        // component-domain ISO `/Matte` is inactive (for example `Indexed` + `/SMask` + `/Matte`).
+        let masked_lut: Option<[Option<[f32; 3]>; 256]> = if comps == 1
+            && bpc <= 8
+            && !(use_iso_matte
+                && resolved_smask
+                    .as_ref()
+                    .and_then(|sm| sm.matte.as_ref())
+                    .is_some())
+        {
+            let mut table = [None; 256];
+            let (base, step) = decode_factors[0];
+            for (raw_val, slot) in table[..(1_usize << bpc)].iter_mut().enumerate() {
+                let mapped = [base + (raw_val as f32) * step];
+                *slot = space
+                    .eval_with_rules(&mapped, options.color.rules)
+                    .and_then(|p| p.srgb());
+            }
+            Some(table)
+        } else {
+            None
+        };
+
         let mut out = vec![0_u8; rgba_len];
         let mut raw_buf = vec![0_u16; comps];
         let mut dec_buf = vec![0.0_f32; comps];
-        let denom = ((1_u32 << self.meta.bits_per_component) - 1) as f64;
 
         for y in 0..height {
             for x in 0..width {
@@ -771,7 +1003,6 @@ impl RawImage {
                                 lo <= s && s <= hi
                             });
                     if all_match {
-                        // Transparent `[0, 0, 0, 0]`.
                         continue;
                     }
                 }
@@ -804,36 +1035,42 @@ impl RawImage {
                     continue;
                 }
 
-                for c in 0..comps {
-                    let (d_min, d_max) = self.meta.decode[c];
-                    dec_buf[c] = (d_min + (f64::from(raw_buf[c]) / denom) * (d_max - d_min)) as f32;
-                }
-
-                // Apply ISO §11.6.5.3 component-domain `/Matte` un-premultiplication when in ISO
-                // mode and not Indexed.
-                let use_iso_matte =
-                    matches!(options.color.rules, Rules::Iso) && space.family() != Family::Indexed;
-                if use_iso_matte
-                    && let Some(sm) = &resolved_smask
-                    && let Some(matte) = &sm.matte
-                    && alpha_u8 < 255
-                {
-                    let a = f32::from(alpha_u8) / 255.0;
+                let mut rgb = if let Some(table) = &masked_lut {
+                    let Some(c) = table[usize::from(raw_buf[0])] else {
+                        continue;
+                    };
+                    c
+                } else {
                     for c in 0..comps {
-                        let (lo, hi) =
-                            sorted_pair(self.meta.decode[c].0 as f32, self.meta.decode[c].1 as f32);
-                        dec_buf[c] = (matte[c] + (dec_buf[c] - matte[c]) / a).clamp(lo, hi);
+                        let (base, step) = decode_factors[c];
+                        dec_buf[c] = base + f32::from(raw_buf[c]) * step;
                     }
-                }
 
-                let Some(paint) =
-                    space.eval_with_rules(&dec_buf[..comps], options.color.rules, &limits.color)
-                else {
-                    continue;
-                };
-                let Some(mut rgb) = paint.srgb() else {
-                    // `Separation /None` marks nothing!
-                    continue;
+                    // Apply ISO §11.6.5.3 component-domain `/Matte` un-premultiplication when in
+                    // ISO mode and not Indexed.
+                    if use_iso_matte
+                        && let Some(sm) = &resolved_smask
+                        && let Some(matte) = &sm.matte
+                        && alpha_u8 < 255
+                    {
+                        let a = f32::from(alpha_u8) / 255.0;
+                        for c in 0..comps {
+                            let (lo, hi) = sorted_pair(
+                                self.meta.decode[c].0 as f32,
+                                self.meta.decode[c].1 as f32,
+                            );
+                            dec_buf[c] = (matte[c] + (dec_buf[c] - matte[c]) / a).clamp(lo, hi);
+                        }
+                    }
+
+                    let Some(paint) = space.eval_with_rules(&dec_buf[..comps], options.color.rules)
+                    else {
+                        continue;
+                    };
+                    let Some(c) = paint.srgb() else {
+                        continue;
+                    };
+                    c
                 };
 
                 if !use_iso_matte
@@ -967,7 +1204,6 @@ fn load_smask<'o, O, S>(
     parent_components: u8,
     options: &DecodeOptions<'o>,
     limits: &Limits,
-    depth: u8,
     sink: &mut S,
 ) -> Result<Option<LoadedSMask>, Error>
 where
@@ -975,10 +1211,6 @@ where
     S: Sink<Fault> + ?Sized,
 {
     let place = Place::new(Some(smask_id), None);
-    if depth >= limits.mask_depth {
-        sink.fault(place, Fault::InvalidSMask);
-        return Ok(None);
-    }
     let Some(smask_obj) = objects.try_resolve(smask_id)? else {
         sink.fault(place, Fault::InvalidSMask);
         return Ok(None);
@@ -990,13 +1222,12 @@ where
 
     let matte = parse_matte(objects, &smask_stream.dict, parent_components, place, sink)?;
 
-    let mut sub_sink = ();
     let sub_opts = DecodeOptions {
         color: EvalOptions::from_spaces(options.color.rules, None),
         stencil_color: [0, 0, 0, 255],
         apply_masks: false,
     };
-    match decode_xobject_raw_with(objects, smask_id, None, &sub_opts, limits, &mut sub_sink) {
+    match decode_xobject_raw_with(objects, smask_id, None, &sub_opts, limits, sink) {
         Ok(raw) if !raw.meta.stencil && raw.meta.components == 1 => {
             Ok(Some(LoadedSMask { image: raw, matte }))
         }
@@ -1014,13 +1245,6 @@ where
             ) =>
         {
             Err(Error::Unreadable(u))
-        }
-        Err(Error::Limit {
-            kind: LimitKind::SampleBytes | LimitKind::Pixels | LimitKind::Width | LimitKind::Height,
-            ..
-        }) => {
-            sink.fault(place, Fault::InvalidSMask);
-            Ok(None)
         }
         Err(_) => {
             sink.fault(place, Fault::InvalidSMask);
@@ -1073,7 +1297,6 @@ fn load_stencil_mask<'o, O, S>(
     mask_id: ObjectId,
     options: &DecodeOptions<'o>,
     limits: &Limits,
-    depth: u8,
     sink: &mut S,
 ) -> Result<Option<RawImage>, Error>
 where
@@ -1081,17 +1304,12 @@ where
     S: Sink<Fault> + ?Sized,
 {
     let place = Place::new(Some(mask_id), None);
-    if depth >= limits.mask_depth {
-        sink.fault(place, Fault::InvalidMask);
-        return Ok(None);
-    }
-    let mut sub_sink = ();
     let sub_opts = DecodeOptions {
         color: options.color,
         stencil_color: [0, 0, 0, 255],
         apply_masks: false,
     };
-    match decode_xobject_raw_with(objects, mask_id, None, &sub_opts, limits, &mut sub_sink) {
+    match decode_xobject_raw_with(objects, mask_id, None, &sub_opts, limits, sink) {
         Ok(raw) if raw.meta.stencil => Ok(Some(raw)),
         Ok(_) => {
             sink.fault(place, Fault::InvalidMask);
