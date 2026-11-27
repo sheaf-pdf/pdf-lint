@@ -219,7 +219,7 @@ Every high-level method on `Pdf`, `Page`, and `Document` is also available as a 
 ## Cargo Features
 
 - **`images`** *(default)* — Enable `pdfs::images` (`pdf-images`) and `Page::decode_image` / `Page::decode_image_raw`.
-- **`raster`** *(default; implies `images`)* — Enable `pdfs::raster` (`pdf-raster`), `Page::render` / `Page::render_pixmap`, `RenderedDoc` on `Pdf`, and `RustBackend`.
+- **`raster`** *(default; implies `images`)* — Enable `pdfs::raster` (`pdf-raster`), `Page::render` / `Page::render_pixmap`, `RenderedDoc` on `Pdf`, and `RustBackend`. `RustBackend` opens one buffer (`open_bytes`) or, with no copy of the whole, a source read by position or several shared buffers (`open_source`, `RenderSource`, `Parts`), and a failed open is `BackendError::Locked`, `BackendError::Refused` (with why) or the reader's own error.
 - **`programs`** *(default)* — Parse embedded font programs via `skrifa` for glyph bounding boxes, heights, and fallback character mappings.
 - **`text-layout`** *(default)* — Enable `Page::text_page`, `Page::search`, `unicode-bidi` RTL reordering, selection quads, and multiline `Canvas::text_box` layout via `pdf-gfx/text-layout`.
 - **`clock`** *(default)* — Enable `Date::now` and `Date::from_unix` in `pdf-semantics`.

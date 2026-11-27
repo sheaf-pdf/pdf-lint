@@ -1,12 +1,15 @@
 //! Safe [`RenderBackend`] adapter over [`pdfium_render`].
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use parking_lot::{FairMutex, FairMutexGuard};
 use pdf_gfx::{PageGeom, Rect, Rotation};
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfDocument, PdfMatrix, PdfPage, PdfPageIndex,
@@ -14,11 +17,71 @@ use pdfium_render::prelude::{
     PdfiumLibraryBindings, Pixels,
 };
 
-use crate::backend::{BackendError, RenderBackend, RenderedDoc};
+use crate::backend::{BackendError, Refusal, RenderBackend, RenderedDoc};
 use crate::engine::check_cancelled;
 use crate::limits::Limits;
 use crate::opts::{RenderMedium, RenderOpts, RenderSummary, Viewport};
 use crate::pixmap::{PixelFormat, Pixmap};
+use crate::source::RenderSource;
+
+/// Why PDFium refused a document on open: `FPDF_GetLastError`'s code after a
+/// failed load, named ([`Error::DocumentLoad`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum LoadFailure {
+    /// `FPDF_ERR_FILE`: the file wasn't found or its bytes didn't read.
+    File,
+    /// `FPDF_ERR_FORMAT`: not a PDF, or one too damaged for PDFium to read.
+    Format,
+    /// `FPDF_ERR_PASSWORD`: a password is needed, or the one given is wrong.
+    Password,
+    /// `FPDF_ERR_SECURITY`: a security handler PDFium doesn't support.
+    Security,
+    /// `FPDF_ERR_PAGE`: a page wasn't found, or its content didn't read.
+    Page,
+    /// `FPDF_ERR_UNKNOWN`: PDFium named no reason.
+    Unknown,
+}
+
+impl LoadFailure {
+    /// What `pdfium-render` read of `FPDF_GetLastError`, as this.
+    const fn of(err: &PdfiumInternalError) -> Self {
+        match err {
+            PdfiumInternalError::FileError => Self::File,
+            PdfiumInternalError::FormatError => Self::Format,
+            PdfiumInternalError::PasswordError => Self::Password,
+            PdfiumInternalError::SecurityError => Self::Security,
+            PdfiumInternalError::PageError => Self::Page,
+            PdfiumInternalError::Unknown => Self::Unknown,
+        }
+    }
+
+    /// The refusal a host sees in [`BackendError::Refused`]; none for a
+    /// password, which is [`BackendError::Locked`].
+    #[must_use]
+    pub const fn refusal(self) -> Option<Refusal> {
+        match self {
+            Self::Password => None,
+            Self::Format => Some(Refusal::Format),
+            Self::Security => Some(Refusal::Security),
+            Self::File => Some(Refusal::Source),
+            Self::Page | Self::Unknown => Some(Refusal::Unknown),
+        }
+    }
+}
+
+impl fmt::Display for LoadFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::File => "a file error (FPDF_ERR_FILE)",
+            Self::Format => "a format error (FPDF_ERR_FORMAT)",
+            Self::Password => "a password required or incorrect (FPDF_ERR_PASSWORD)",
+            Self::Security => "an unsupported security scheme (FPDF_ERR_SECURITY)",
+            Self::Page => "a page error (FPDF_ERR_PAGE)",
+            Self::Unknown => "an unknown error (FPDF_ERR_UNKNOWN)",
+        })
+    }
+}
 
 /// Errors produced by [`PdfiumBackend`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -41,13 +104,22 @@ pub enum Error {
         /// Diagnostic from `pdfium-render` / `libloading`.
         reason: String,
     },
-    /// PDFium rejected a document on open.
-    #[error("PDFium failed to load document ({detail})")]
+    /// PDFium refused a document on open, and why, as its
+    /// `FPDF_GetLastError` said. A host matching on [`BackendError`] sees
+    /// [`LoadFailure::Password`] as [`BackendError::Locked`] and the rest as
+    /// [`BackendError::Refused`], this its source.
+    #[error("PDFium refused the document: {reason}")]
     DocumentLoad {
-        /// Human-readable diagnostic from `pdfium-render`.
+        /// PDFium's reason.
+        reason: LoadFailure,
+    },
+    /// A document's open failed in `pdfium-render` before or apart from
+    /// PDFium's own verdict on the file: the adapter's failure, not the
+    /// file's.
+    #[error("pdfium-render failed to open the document: {detail}")]
+    Binding {
+        /// Diagnostic from `pdfium-render`.
         detail: String,
-        /// `true` when PDFium reported `FPDF_ERR_PASSWORD`.
-        locked: bool,
     },
     /// Requested page index failed to load.
     #[error("PDFium failed to load page {page_index}: {detail}")]
@@ -71,8 +143,72 @@ pub enum Error {
 }
 
 static INIT_LOCK: Mutex<()> = Mutex::new(());
-static OPEN_LOCK: Mutex<()> = Mutex::new(());
 static GLOBAL_PDFIUM: OnceLock<&'static RawPdfium> = OnceLock::new();
+
+/// The one lock over PDFium in the process ([`PdfiumBackend::lock`]): fair,
+/// so threads take it in the order they asked.
+static PDFIUM_LOCK: FairMutex<()> = parking_lot::const_fair_mutex(());
+
+/// What this thread holds of [`PDFIUM_LOCK`]: the guard, and how many
+/// [`PdfiumLock`]s share it, so the lock is released when the last is dropped
+/// in whatever order they are.
+struct Held {
+    depth: usize,
+    guard: Option<FairMutexGuard<'static, ()>>,
+}
+
+thread_local! {
+    static HELD: RefCell<Held> = const { RefCell::new(Held { depth: 0, guard: None }) };
+}
+
+/// The process-wide PDFium lock, held: [`PdfiumBackend::lock`] gives it, and
+/// dropping it gives the lock up.
+///
+/// It's held by a thread, so it isn't `Send`; a thread that holds one may
+/// take more (each of the adapter's own calls does), and the lock is free
+/// again once the thread has dropped them all.
+#[must_use = "the lock is given up when this is dropped"]
+pub struct PdfiumLock {
+    /// Held by the thread that took it: neither `Send` nor `Sync`.
+    _thread: PhantomData<*const ()>,
+}
+
+impl fmt::Debug for PdfiumLock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PdfiumLock").finish()
+    }
+}
+
+impl PdfiumLock {
+    /// The lock, taken: at once where this thread holds it already, else
+    /// after every thread that asked before.
+    fn take() -> Self {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            if held.depth == 0 {
+                held.guard = Some(PDFIUM_LOCK.lock());
+            }
+            held.depth += 1;
+        });
+        Self {
+            _thread: PhantomData,
+        }
+    }
+}
+
+impl Drop for PdfiumLock {
+    fn drop(&mut self) {
+        // A thread's locals are gone only once the thread is ending, and
+        // their own drop has given the lock up by then.
+        let _ = HELD.try_with(|held| {
+            let mut held = held.borrow_mut();
+            held.depth = held.depth.saturating_sub(1);
+            if held.depth == 0 {
+                held.guard = None;
+            }
+        });
+    }
+}
 
 fn try_init_global(
     bind: impl FnOnce() -> Result<Box<dyn PdfiumLibraryBindings>, Error>,
@@ -145,19 +281,73 @@ fn map_bind_err(path: PathBuf, err: PdfiumError) -> Error {
     }
 }
 
+/// A failed load, as the adapter's error says it.
 fn map_doc_err(err: PdfiumError) -> Error {
     match err {
         PdfiumError::CStringConversionError(_) => Error::InvalidPassword,
-        PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
-            Error::DocumentLoad {
-                detail: "password required or incorrect".to_string(),
-                locked: true,
-            }
-        }
-        other => Error::DocumentLoad {
-            detail: other.to_string(),
-            locked: false,
+        PdfiumError::PdfiumLibraryInternalError(internal) => Error::DocumentLoad {
+            reason: LoadFailure::of(&internal),
         },
+        other => Error::Binding {
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// A failed load, as a host matches on it: a password asked for, the file
+/// refused and why, or the adapter's own failure.
+fn open_err(err: Error) -> BackendError {
+    match err {
+        Error::DocumentLoad { reason } => match reason.refusal() {
+            None => BackendError::Locked,
+            Some(refusal) => BackendError::refused(refusal, err),
+        },
+        other => BackendError::custom(other),
+    }
+}
+
+/// A [`RenderSource`] as PDFium reads a file: by `Read` and `Seek`, each of
+/// its block requests one read, filled whole (PDFium takes a short count for
+/// a failed read).
+struct SourceReader {
+    source: Arc<dyn RenderSource>,
+    pos: u64,
+}
+
+impl Read for SourceReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let len = self.source.len();
+        let Ok(start) = usize::try_from(self.pos) else {
+            return Ok(0);
+        };
+        if start >= len || buf.is_empty() {
+            return Ok(0);
+        }
+        let n = buf.len().min(len - start);
+        let read = self.source.read_at(start..start + n)?;
+        if read.len() != n {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the source gave fewer bytes than it was asked for",
+            ));
+        }
+        buf[..n].copy_from_slice(&read);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for SourceReader {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(pos) => Some(pos),
+            SeekFrom::End(by) => (self.source.len() as u64).checked_add_signed(by),
+            SeekFrom::Current(by) => self.pos.checked_add_signed(by),
+        };
+        self.pos = pos.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "a seek to before the start")
+        })?;
+        Ok(self.pos)
     }
 }
 
@@ -168,6 +358,43 @@ fn map_doc_err(err: PdfiumError) -> Error {
 /// for reuse across the process), or bound dynamically via
 /// [`PdfiumBackend::bind_to_library`], [`PdfiumBackend::bind_to_system_library`],
 /// and [`PdfiumBackend::from_env`].
+///
+/// # Locking
+///
+/// PDFium keeps state for the whole process, so two threads inside it at
+/// once corrupt each other, whichever documents they use; `pdfium-render`'s
+/// `thread_safe` feature locks one library call at a time, which leaves a
+/// sequence of calls (a load and the error read after it, a page loaded,
+/// drawn and closed) open to another thread between them. So the adapter
+/// holds one process-wide lock, [`PdfiumBackend::lock`], across each of its
+/// operations whole: an open, a page's geometry, a page's render, and a
+/// document's drop. A [`RenderedDoc`] it opens is `Send + Sync` and safe to
+/// use from any thread; renders through PDFium run one at a time.
+///
+/// A host that calls PDFium itself through [`PdfiumBackend::pdfium`] (text,
+/// a flatten, a save) holds the same lock around those calls:
+///
+/// ```no_run
+/// # use pdf_raster::pdfium::PdfiumBackend;
+/// # fn main() -> Result<(), pdf_raster::pdfium::Error> {
+/// let backend = PdfiumBackend::from_env()?;
+/// {
+///     let _pdfium = backend.lock();
+///     // Calls on `backend.pdfium()` and what it returns, and drops of
+///     // what they return, go here.
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The lock is fair (threads take it in the order they asked, so a long walk
+/// that gives it up between pages lets a waiting render in) and a thread may
+/// take it again while it holds it, so the adapter's calls can be made under
+/// it. A host that made its `Pdfium` itself and gave it to
+/// [`PdfiumBackend::new`] has one library and one lock as long as every call
+/// it makes on that `Pdfium` is under this lock. A [`RenderSource`] an open
+/// was given is read inside PDFium's calls, under the lock: its `read_at`
+/// must not call PDFium or wait on a thread that does.
 ///
 /// # Page Geometry Notes
 ///
@@ -262,17 +489,110 @@ impl PdfiumBackend {
         Ok(Self { pdfium: raw })
     }
 
-    /// Underlying [`pdfium_render::prelude::Pdfium`] handle.
+    /// Underlying [`pdfium_render::prelude::Pdfium`] handle, for a host's
+    /// own PDFium calls: each made, and each object they return used and
+    /// dropped, under [`PdfiumBackend::lock`].
     #[must_use]
     pub const fn pdfium(&self) -> &'static RawPdfium {
         self.pdfium
     }
+
+    /// Takes the process-wide PDFium lock, waiting behind every thread that
+    /// asked before, and holds it until the returned [`PdfiumLock`] is
+    /// dropped: what every operation of the adapter holds, and what a host
+    /// holds around its own calls on [`PdfiumBackend::pdfium`]. There's one
+    /// lock whichever `PdfiumBackend` is asked. A thread that holds it
+    /// already takes it again at once.
+    pub fn lock(&self) -> PdfiumLock {
+        PdfiumLock::take()
+    }
+
+    /// The document `reader` gives, loaded under the lock.
+    fn load<R: Read + Seek + Send + 'static>(
+        &self,
+        reader: R,
+        password: Option<&str>,
+    ) -> Result<Box<dyn RenderedDoc>, BackendError> {
+        if password.is_some_and(|pw| pw.contains('\0')) {
+            return Err(BackendError::custom(Error::InvalidPassword));
+        }
+        // Held from the load to the page count, so `FPDF_GetLastError` reads
+        // this load's code and no other thread's; taken before `doc` is
+        // made, so a `doc` dropped on the way out is dropped under it.
+        let _pdfium = self.lock();
+        let doc = self
+            .pdfium
+            .load_pdf_from_reader(reader, password)
+            .map_err(|err| open_err(map_doc_err(err)))?;
+        let page_count = usize::try_from(doc.pages().len()).unwrap_or(0);
+        Ok(Box::new(PdfiumRenderedDoc {
+            doc: Some(doc),
+            page_count,
+            geoms: Mutex::new(HashMap::new()),
+        }))
+    }
 }
 
 struct PdfiumRenderedDoc {
-    doc: PdfDocument<'static>,
+    /// The document, there until the drop, which closes it under the lock.
+    doc: Option<PdfDocument<'static>>,
     page_count: usize,
     geoms: Mutex<HashMap<usize, PageGeom>>,
+}
+
+impl Drop for PdfiumRenderedDoc {
+    fn drop(&mut self) {
+        let _pdfium = PdfiumLock::take();
+        self.doc = None;
+    }
+}
+
+impl PdfiumRenderedDoc {
+    fn doc(&self) -> &PdfDocument<'static> {
+        self.doc.as_ref().expect("the document is held until drop")
+    }
+
+    /// Page `page_index`, loaded. The caller holds the lock, from before
+    /// this call until the page is dropped.
+    fn page(&self, page_index: usize) -> Result<PdfPage<'_>, BackendError> {
+        let out_of_bounds = || BackendError::PageOutOfBounds {
+            page_index,
+            page_count: self.page_count,
+        };
+        if page_index >= self.page_count {
+            return Err(out_of_bounds());
+        }
+        let idx = PdfPageIndex::try_from(page_index).map_err(|_| out_of_bounds())?;
+        self.doc().pages().get(idx).map_err(|e| {
+            BackendError::custom(Error::PageLoad {
+                page_index,
+                detail: e.to_string(),
+            })
+        })
+    }
+
+    /// A page's geometry as it was read before, if it was.
+    fn known_geom(&self, page_index: usize) -> Option<PageGeom> {
+        let geoms = self
+            .geoms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        geoms.get(&page_index).copied()
+    }
+
+    /// `page`'s geometry, read and kept. The caller holds the lock.
+    fn read_geom(&self, page_index: usize, page: &PdfPage<'_>) -> PageGeom {
+        if let Some(geom) = self.known_geom(page_index) {
+            return geom;
+        }
+        let geom = extract_pdf_page_geom(page);
+        let mut geoms = self
+            .geoms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        geoms.insert(page_index, geom);
+        geom
+    }
 }
 
 impl RenderedDoc for PdfiumRenderedDoc {
@@ -287,33 +607,12 @@ impl RenderedDoc for PdfiumRenderedDoc {
                 page_count: self.page_count,
             });
         }
-        {
-            let guard = self
-                .geoms
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(&geom) = guard.get(&page_index) {
-                return Ok(geom);
-            }
+        if let Some(geom) = self.known_geom(page_index) {
+            return Ok(geom);
         }
-        let idx =
-            PdfPageIndex::try_from(page_index).map_err(|_| BackendError::PageOutOfBounds {
-                page_index,
-                page_count: self.page_count,
-            })?;
-        let page = self.doc.pages().get(idx).map_err(|e| {
-            BackendError::custom(Error::PageLoad {
-                page_index,
-                detail: e.to_string(),
-            })
-        })?;
-        let geom = extract_pdf_page_geom(&page);
-        let mut guard = self
-            .geoms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(page_index, geom);
-        Ok(geom)
+        let _pdfium = PdfiumLock::take();
+        let page = self.page(page_index)?;
+        Ok(self.read_geom(page_index, &page))
     }
 
     fn render_page(
@@ -328,7 +627,19 @@ impl RenderedDoc for PdfiumRenderedDoc {
             ));
         }
 
-        let geom = self.page_geom(page_index)?;
+        if page_index >= self.page_count {
+            return Err(BackendError::PageOutOfBounds {
+                page_index,
+                page_count: self.page_count,
+            });
+        }
+
+        // Held from the page's load to its drop at the end of the render.
+        let _pdfium = PdfiumLock::take();
+        // A render that waited its turn may have been cancelled meanwhile.
+        check_cancelled(opts).map_err(BackendError::Raster)?;
+        let page = self.page(page_index)?;
+        let geom = self.read_geom(page_index, &page);
         // PDFium always ignores `/UserUnit`, so resolve `Viewport::Dpi` under
         // PDFium's unscaled user-unit policy (`Rules::Pdfium`).
         let resolved = opts
@@ -339,18 +650,6 @@ impl RenderedDoc for PdfiumRenderedDoc {
                 &opts.limits,
             )
             .map_err(BackendError::Raster)?;
-
-        let idx =
-            PdfPageIndex::try_from(page_index).map_err(|_| BackendError::PageOutOfBounds {
-                page_index,
-                page_count: self.page_count,
-            })?;
-        let page = self.doc.pages().get(idx).map_err(|e| {
-            BackendError::custom(Error::PageLoad {
-                page_index,
-                detail: e.to_string(),
-            })
-        })?;
 
         let w_px = Pixels::try_from(resolved.width)
             .map_err(|_| BackendError::Raster(crate::Error::Limit(crate::LimitKind::Dimensions)))?;
@@ -557,30 +856,18 @@ impl RenderBackend for PdfiumBackend {
         bytes: Arc<[u8]>,
         password: Option<&str>,
     ) -> Result<Box<dyn RenderedDoc>, BackendError> {
-        if password.is_some_and(|pw| pw.contains('\0')) {
-            return Err(BackendError::custom(Error::InvalidPassword));
-        }
-        // `pdfium-render`'s `thread_safe` feature locks each FFI call
-        // individually, so `FPDF_LoadCustomDocument` and the subsequent
-        // `FPDF_GetLastError` acquire separate locks; hold `OPEN_LOCK` across
-        // the pair so concurrent document opens cannot cross error codes.
-        let doc = {
-            let _open_guard = OPEN_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.pdfium
-                .load_pdf_from_reader(Cursor::new(bytes), password)
-        }
-        .map_err(|e| match map_doc_err(e) {
-            Error::DocumentLoad { locked: true, .. } => BackendError::Locked,
-            other => BackendError::custom(other),
-        })?;
-        let page_count = usize::try_from(doc.pages().len()).unwrap_or(0);
-        Ok(Box::new(PdfiumRenderedDoc {
-            doc,
-            page_count,
-            geoms: Mutex::new(HashMap::new()),
-        }))
+        self.load(Cursor::new(bytes), password)
+    }
+
+    /// Opens `source` where it is, through PDFium's custom file access:
+    /// PDFium asks for the blocks it needs as it needs them, for as long as
+    /// the document lives, and nothing copies the whole.
+    fn open_source(
+        &self,
+        source: Arc<dyn RenderSource>,
+        password: Option<&str>,
+    ) -> Result<Box<dyn RenderedDoc>, BackendError> {
+        self.load(SourceReader { source, pos: 0 }, password)
     }
 }
 
@@ -641,4 +928,185 @@ fn extract_pdf_page_geom(page: &PdfPage<'_>) -> PageGeom {
     });
 
     PageGeom::new(media_box, Some(effective_box), rotation)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::source::Parts;
+
+    fn internal(err: PdfiumInternalError) -> BackendError {
+        open_err(map_doc_err(PdfiumError::PdfiumLibraryInternalError(err)))
+    }
+
+    #[test]
+    fn a_failed_load_says_whose_trouble_it_is() {
+        // A password: asked for, not a refusal.
+        assert!(matches!(
+            internal(PdfiumInternalError::PasswordError),
+            BackendError::Locked
+        ));
+        assert_eq!(LoadFailure::Password.refusal(), None);
+
+        // The file's own trouble: refused, named, PDFium's code its source.
+        for (code, refusal, failure) in [
+            (
+                PdfiumInternalError::FormatError,
+                Refusal::Format,
+                LoadFailure::Format,
+            ),
+            (
+                PdfiumInternalError::SecurityError,
+                Refusal::Security,
+                LoadFailure::Security,
+            ),
+            (
+                PdfiumInternalError::FileError,
+                Refusal::Source,
+                LoadFailure::File,
+            ),
+            (
+                PdfiumInternalError::PageError,
+                Refusal::Unknown,
+                LoadFailure::Page,
+            ),
+            (
+                PdfiumInternalError::Unknown,
+                Refusal::Unknown,
+                LoadFailure::Unknown,
+            ),
+        ] {
+            let err = internal(code);
+            assert_eq!(err.refusal(), Some(refusal));
+            let BackendError::Refused { source, .. } = &err else {
+                panic!("{err}");
+            };
+            assert_eq!(
+                source.downcast_ref::<Error>(),
+                Some(&Error::DocumentLoad { reason: failure })
+            );
+        }
+        assert_eq!(
+            internal(PdfiumInternalError::FormatError).to_string(),
+            "the document was refused: it isn't a PDF the engine can read"
+        );
+        assert_eq!(
+            Error::DocumentLoad {
+                reason: LoadFailure::Security
+            }
+            .to_string(),
+            "PDFium refused the document: an unsupported security scheme (FPDF_ERR_SECURITY)"
+        );
+
+        // The adapter's own: neither.
+        let own = open_err(map_doc_err(PdfiumError::NoPagesInDocument));
+        let BackendError::Backend(boxed) = &own else {
+            panic!("{own}");
+        };
+        assert!(matches!(
+            boxed.downcast_ref::<Error>(),
+            Some(Error::Binding { .. })
+        ));
+    }
+
+    #[test]
+    fn a_source_reads_as_a_file_by_read_and_seek() {
+        let whole: Vec<u8> = (0..200).collect();
+        let parts = Parts::new(vec![
+            Arc::from(&whole[..50]),
+            Arc::from(&whole[50..51]),
+            Arc::from(&whole[51..]),
+        ]);
+        let mut reader = SourceReader {
+            source: Arc::new(parts),
+            pos: 0,
+        };
+        // A block across every part is filled whole by one read.
+        let mut block = [0_u8; 120];
+        assert_eq!(reader.seek(SeekFrom::Start(40)).unwrap(), 40);
+        assert_eq!(reader.read(&mut block).unwrap(), 120);
+        assert_eq!(block[..], whole[40..160]);
+        // The last block is as long as the bytes left; then none.
+        assert_eq!(reader.read(&mut block).unwrap(), 40);
+        assert_eq!(block[..40], whole[160..]);
+        assert_eq!(reader.read(&mut block).unwrap(), 0);
+        // From the end, as PDFium looks for the trailer; and past it.
+        assert_eq!(reader.seek(SeekFrom::End(-8)).unwrap(), 192);
+        assert_eq!(reader.seek(SeekFrom::Current(-2)).unwrap(), 190);
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, whole[190..]);
+        assert_eq!(reader.seek(SeekFrom::End(10)).unwrap(), 210);
+        assert_eq!(reader.read(&mut block).unwrap(), 0);
+        assert!(reader.seek(SeekFrom::End(-201)).is_err());
+    }
+
+    #[test]
+    fn a_sources_error_is_the_reads() {
+        struct Failing;
+        impl RenderSource for Failing {
+            fn len(&self) -> usize {
+                64
+            }
+            fn read_at(&self, _: std::ops::Range<usize>) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+                Err(io::Error::other("gone"))
+            }
+        }
+        let mut reader = SourceReader {
+            source: Arc::new(Failing),
+            pos: 0,
+        };
+        assert_eq!(reader.read(&mut [0; 8]).unwrap_err().to_string(), "gone");
+    }
+
+    #[test]
+    fn the_lock_is_one_threads_at_a_time_and_a_thread_takes_it_again() {
+        // A thread that holds it takes it again, and it's free only once
+        // every hold is dropped, in whatever order.
+        let outer = PdfiumLock::take();
+        let inner = PdfiumLock::take();
+        drop(outer);
+
+        let inside = Arc::new(AtomicBool::new(false));
+        let (asked, was_asked) = mpsc::channel();
+        let waiter = {
+            let inside = Arc::clone(&inside);
+            thread::spawn(move || {
+                asked.send(()).unwrap();
+                let _lock = PdfiumLock::take();
+                inside.store(true, Ordering::SeqCst);
+            })
+        };
+        was_asked.recv().unwrap();
+        thread::sleep(Duration::from_millis(50));
+        assert!(!inside.load(Ordering::SeqCst), "taken while it was held");
+        drop(inner);
+        waiter.join().unwrap();
+        assert!(inside.load(Ordering::SeqCst));
+
+        // Many threads, each holding it twice over: never two inside.
+        let within = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let within = Arc::clone(&within);
+                thread::spawn(move || {
+                    for _ in 0..200 {
+                        let _a = PdfiumLock::take();
+                        let _b = PdfiumLock::take();
+                        assert_eq!(within.fetch_add(1, Ordering::SeqCst), 0);
+                        thread::yield_now();
+                        within.fetch_sub(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
 }

@@ -4,7 +4,9 @@
 //!
 //! Lets callers share one [`pdfium_render::prelude::Pdfium`] instance across
 //! the process and swap between `pdfs::Pdf` / `pdfs::RustBackend` and
-//! [`PdfiumBackend`] behind `&dyn RenderBackend`.
+//! [`PdfiumBackend`] behind `&dyn RenderBackend`. The adapter holds one
+//! process-wide lock over PDFium across each of its operations, which a host
+//! making PDFium calls of its own holds too ([`PdfiumBackend::lock`]).
 //!
 //! # Dynamic Linking & Semver Notes
 //!
@@ -20,5 +22,5 @@
 
 mod backend;
 
-pub use backend::{Error, PdfiumBackend};
+pub use backend::{Error, LoadFailure, PdfiumBackend, PdfiumLock};
 pub use pdfium_render;

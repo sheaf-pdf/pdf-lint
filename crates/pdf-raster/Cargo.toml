@@ -22,6 +22,7 @@ pdf-gfx.workspace = true
 pdf-images.workspace = true
 pdf-objects.workspace = true
 pdf-semantics.workspace = true
+parking_lot = { version = "0.12", optional = true }
 pdfium-render = { version = "=0.9.6", default-features = false, features = ["thread_safe", "pdfium_8125"], optional = true }
 thiserror = "2"
 vello_cpu = { version = "0.4.0", default-features = false, features = ["std", "u8_pipeline"] }
@@ -72,7 +73,7 @@ tracing = [
 ]
 # Optional thin adapter (`pdf_raster::pdfium`, `PdfiumBackend`) over
 # `pdfium-render` (`thread_safe`, runtime dynamic binding by default).
-pdfium = ["dep:pdfium-render"]
+pdfium = ["dep:pdfium-render", "dep:parking_lot"]
 
 [package.metadata.docs.rs]
 features = ["pdfium", "predefined-cmaps", "simd", "zlib-rs", "tracing"]
