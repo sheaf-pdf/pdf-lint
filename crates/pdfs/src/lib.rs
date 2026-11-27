@@ -13,11 +13,15 @@
 //!   or [`from_bytes`] (in-memory buffers or custom [`pdf_structure::ByteSource`]s),
 //!   configured with [`Options`]. Objects are parsed on demand and cached
 //!   safely across threads on [`Pdf`].
-//! - **Inspect pages, geometry, annotations, and graphics** with [`Pdf::pages`],
-//!   [`Page::geom`], [`Page::annots`], [`Page::content`], [`Page::interpret`],
-//!   and [`Page::encode`] (2D page transforms, annotations/links/destinations,
-//!   placed paths, glyph origins/quads, images, shadings, clips, marked
-//!   content, and position-independent content re-encoding).
+//! - **Inspect and render pages, geometry, annotations, images, and graphics**
+//!   with [`Pdf::pages`], [`Page::geom`], [`Page::annots`], [`Page::content`],
+//!   [`Page::images`], [`Page::interpret`], [`Page::encode`],
+//!   `Page::decode_image` / `Page::decode_image_raw` (`images` feature), and
+//!   `Page::render` / `Page::render_pixmap` (`raster` feature): 2D page
+//!   transforms, annotations/links/destinations, placed paths, glyph
+//!   origins/quads, images, shadings, clips, marked content,
+//!   position-independent content re-encoding, and pure-Rust 2D page and tile
+//!   rasterization.
 //! - **Extract text and fonts** with [`Page::text`] and [`Page::fonts`] in
 //!   content-stream order, or use `Page::text_page` and `Page::search`
 //!   (`text-layout` feature) for spatial reading order, `unicode-bidi` RTL
@@ -61,21 +65,27 @@
 //! | [`filters`] | [`pdf_filters`] | The standard stream filter decoders and the Flate encoder. |
 //! | [`crypt`] | [`pdf_crypt`] | The standard security handler: decrypting and password-encrypting files. |
 //! | [`structure`] | [`pdf_structure`] | File structure: lazy positional reading, in-memory documents, full and incremental writers. |
-//! | [`color`] | [`pdf_color`] | Color space parsing, component counting, and resource lookup. |
+//! | [`color`] | [`pdf_color`] | Color space parsing, §7.10 functions, CIE/ICC evaluation, and resource lookup. |
+//! | `images` | `pdf_images` | *(with `images`)* Image XObject and inline image decoding, mask compositing, pixel scrubbing, and Flate/JPEG re-encoding. |
 //! | [`content_streams`] | [`pdf_content_streams`] | Content stream lexing, typed operators, graphics-state checks, splicing, and writing. |
 //! | [`semantics`] | [`pdf_semantics`] | Dates, name and number trees, page trees, destinations, actions, `/Info`, and XMP claims. |
 //! | [`fonts`] | [`pdf_fonts`] | Font dictionaries, encodings, CMaps, font programs, Standard 14 metrics, text extraction, TrueType embedding. |
 //! | [`gfx`] | [`pdf_gfx`] | 2D geometry, the graphics and text state interpreter, the content re-encoder, the canvas, `/DA` strings. |
 //! | [`annots`] | [`pdf_annots`] | Annotations, appearance synthesis, builders, reply threads, and page flattening. |
 //! | [`forms`] | [`pdf_forms`] | Interactive forms: the field tree, inherited field values, widgets, button groups' rules, and text, button, and choice fields' appearances. |
+//! | `raster` | `pdf_raster` | *(with `raster`)* Pure-Rust 2D PDF page, tile, Form XObject, annotation, and form rasterizer (`Page::render`, `RenderedDoc`, `RustBackend`). |
 //! | [`linearize`] | [`pdf_linearize`] | The linearized ("Fast Web View") layout engine, hint tables, and validator. |
 //!
 //! # Features
 //!
-//! - **`programs`**, **`text-layout`**, and **`clock`** *(enabled by default)*:
+//! - **`images`** and **`raster`** *(enabled by default; `raster` implies `images`)*:
+//!   enable `pdfs::images` (`Page::decode_image`) and `pdfs::raster`
+//!   (`Page::render`, `RenderedDoc` on [`Pdf`], `RustBackend`).
+//! - **`programs`**, **`text-layout`**, **`clock`**, and **`icc`** *(enabled by default)*:
 //!   parse embedded font programs via `skrifa`, assemble `TextPage` spatial
-//!   reading order / search / multiline `Canvas` layout, and enable
-//!   `Date::now` / `Date::from_unix` in `pdf-semantics`.
+//!   reading order / search / multiline `Canvas` layout, enable `Date::now` /
+//!   `Date::from_unix` in `pdf-semantics`, and evaluate `ICCBased` /
+//!   `/OutputIntents` profiles via `moxcms`.
 //! - **`embed`** *(enabled by default)*: embed a TrueType program in a
 //!   document, subset to the glyphs its pages draw, and draw Unicode text in
 //!   it (`Document::embed_font`, `EmbeddedFont`), through pdf-fonts' `embed`;
@@ -85,9 +95,11 @@
 //!   Programs with CFF, CFF2 or bitmap-only outlines are refused, text is
 //!   drawn a character at a time without shaping, and justified text in an
 //!   embedded font is laid out flush left.
-//! - **`image-ends`**, **`predefined-cmaps`**, and **`simd`**: decode inline
-//!   DCT/CCITTFax images to find their end, bundle Adobe predefined CJK CMaps,
-//!   and enable runtime CPU SIMD in `pdf-content-streams` dependencies.
+//! - **`image-ends`**, **`predefined-cmaps`**, **`simd`**, and **`pdfium`**: decode
+//!   inline DCT/CCITTFax images to find their end, bundle Adobe predefined CJK
+//!   CMaps, enable runtime CPU SIMD in `pdf-content-streams`, `pdf-images`, and
+//!   `pdf-raster`, and enable `PdfiumBackend` (a thin `RenderBackend` adapter
+//!   over `pdfium-render` `=0.9.6`).
 //! - **`tracing`**: emit `debug`-level `tracing` spans (numeric counts and
 //!   lengths only, never file content).
 //! - **`insecure-test-writer`**: deterministic seeded encryption keys and IVs
@@ -120,6 +132,8 @@
 //! }
 //! ```
 
+#[cfg(feature = "raster")]
+pub use backend::RustBackend;
 pub use build::standard_font;
 pub use document::Document;
 #[cfg(feature = "embed")]
@@ -132,7 +146,11 @@ pub use open::{Options, from_bytes};
 pub use page::{Content, NamedFont};
 pub use pdf::{Page, Pages, PagesIter, Pdf};
 pub use pdf_gfx::Rect;
+#[cfg(feature = "pdfium")]
+pub use pdf_raster::PdfiumBackend;
 
+#[cfg(feature = "raster")]
+mod backend;
 pub mod build;
 mod document;
 #[cfg(feature = "embed")]
@@ -179,11 +197,19 @@ pub use pdf_structure;
 /// the same items.
 pub use pdf_structure as structure;
 
-/// PDF color space parsing, component counting, and resource lookup.
+/// PDF color space parsing, §7.10 functions, CIE/ICC evaluation, and resource lookup.
 pub use pdf_color;
 /// [`pdf_color`] under its shorter name: the same crate, so either path names
 /// the same items.
 pub use pdf_color as color;
+
+/// PDF Image XObject and inline image decoding, mask compositing, pixel scrubbing, and Flate/JPEG re-encoding (`images` feature).
+#[cfg(feature = "images")]
+pub use pdf_images;
+/// [`pdf_images`] under its shorter name (`images` feature): the same crate, so
+/// either path names the same items.
+#[cfg(feature = "images")]
+pub use pdf_images as images;
 
 /// PDF content stream lexing, typed operators, graphics-state checks, splicing, and writing.
 pub use pdf_content_streams;
@@ -221,6 +247,14 @@ pub use pdf_forms;
 /// [`pdf_forms`] under its shorter name: the same crate, so either path names
 /// the same items.
 pub use pdf_forms as forms;
+
+/// Pure-Rust 2D PDF page, tile, Form XObject, annotation, and interactive form rasterizer (`raster` feature).
+#[cfg(feature = "raster")]
+pub use pdf_raster;
+/// [`pdf_raster`] under its shorter name (`raster` feature): the same crate, so
+/// either path names the same items.
+#[cfg(feature = "raster")]
+pub use pdf_raster as raster;
 
 /// Linearized ("Fast Web View") PDF layout engine, hint tables, and validator.
 pub use pdf_linearize;
@@ -260,6 +294,8 @@ mod tests {
             id::<crate::pdf_structure::Document>,
         );
         same(id::<crate::color::Limits>, id::<crate::pdf_color::Limits>);
+        #[cfg(feature = "images")]
+        same(id::<crate::images::Limits>, id::<crate::pdf_images::Limits>);
         same(
             id::<crate::content_streams::ContentWriter>,
             id::<crate::pdf_content_streams::ContentWriter>,
@@ -275,6 +311,8 @@ mod tests {
             id::<crate::pdf_annots::BuiltAnnot>,
         );
         same(id::<crate::forms::Limits>, id::<crate::pdf_forms::Limits>);
+        #[cfg(feature = "raster")]
+        same(id::<crate::raster::Pixmap>, id::<crate::pdf_raster::Pixmap>);
         same(
             id::<crate::linearize::Limits>,
             id::<crate::pdf_linearize::Limits>,
@@ -345,6 +383,7 @@ mod tests {
         shared::<pdf_fonts::Shown>();
         shared::<crate::Rect>();
         shared::<pdf_gfx::PageGeom>();
+        shared::<pdf_gfx::ImageDrawn>();
         shared::<pdf_gfx::Summary>();
         shared::<pdf_gfx::EncodedPage>();
         shared::<pdf_gfx::Canvas>();
@@ -380,6 +419,183 @@ mod tests {
         shared::<crate::Options<'_>>();
         shared::<crate::Limits>();
         shared::<crate::Error>();
+        #[cfg(feature = "images")]
+        {
+            shared::<pdf_images::RawImage>();
+            shared::<pdf_images::RgbaImage>();
+            shared::<pdf_images::Limits>();
+            shared::<pdf_images::Error>();
+        }
+        #[cfg(feature = "raster")]
+        {
+            shared::<crate::RustBackend>();
+            shared::<pdf_raster::Pixmap>();
+            shared::<pdf_raster::RenderOpts>();
+            shared::<pdf_raster::RenderSummary>();
+            shared::<pdf_raster::Renderer<'_>>();
+            shared::<pdf_raster::RenderCache>();
+            shared::<pdf_raster::Limits>();
+            shared::<pdf_raster::Error>();
+        }
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn page_render_decode_image_rendered_doc_and_rust_backend_work_end_to_end() {
+        use std::sync::Arc;
+
+        use crate::pdf_images::{JpegColorSpace, encode_jpeg};
+        use crate::prelude::*;
+
+        let mut doc = Document::new();
+        let img_stream = encode_jpeg(
+            &[20, 120, 220, 20, 120, 220, 20, 120, 220, 20, 120, 220],
+            2,
+            2,
+            JpegColorSpace::Rgb,
+            95,
+        )
+        .unwrap();
+        let img_id = doc.structure_mut().add(Object::from(img_stream));
+        {
+            let mut canvas = Canvas::new();
+            canvas.fill_color(Color::rgb8([230, 50, 40]));
+            canvas.fill_rect(Rect::new(10.0, 10.0, 90.0, 90.0));
+            canvas.draw_xobject(
+                Res::written(img_id),
+                Matrix::new(20.0, 0.0, 0.0, 20.0, 20.0, 20.0),
+            );
+            *doc.add_page(Rect::new(0.0, 0.0, 100.0, 100.0)) = canvas.into_writer();
+        }
+        let bytes = doc.to_bytes().unwrap();
+
+        let pdf = crate::from_bytes(&bytes[..]).unwrap();
+        let pages = pdf.pages().unwrap();
+        let page = pages.get(0).unwrap();
+
+        // Discover images drawn on `Page` and decode both RGBA8 and raw samples:
+        let drawn_images = page.images().unwrap();
+        assert_eq!(drawn_images.len(), 1);
+        assert_eq!(drawn_images[0].of, ImageOf::XObject(img_id));
+        let decoded = page.decode_image(img_id).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        let raw_decoded = page.decode_image_raw(img_id).unwrap();
+        assert_eq!((raw_decoded.width(), raw_decoded.height()), (2, 2));
+
+        // Direct page rasterization on `Page` (`render` and `render_pixmap` + `to_png`):
+        let opts = RenderOpts::page_width(100);
+        let (pix, sum) = page.render(&opts).unwrap();
+        assert_eq!(page.render_pixmap(&opts).unwrap(), pix);
+        assert!(pix.to_png().unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!((pix.width(), pix.height()), (100, 100));
+        assert_eq!(pix.pixel_rgba8(85, 85), Some([230, 50, 40, 255]));
+        assert_eq!(pix.pixel_rgba8(2, 2), Some([255, 255, 255, 255]));
+        assert!(sum.reported && sum.gfx.segments >= 1 && sum.images_drawn == 1);
+
+        // `RustBackend::open_bytes_with_passwords` tries multiple candidate passwords in one open:
+        let mut enc_doc = Document::new();
+        enc_doc.add_page(Rect::new(0.0, 0.0, 40.0, 40.0));
+        let pw = Password("correct-pass").prepared().unwrap();
+        enc_doc.encrypt(&Protection::new(&pw)).unwrap();
+        let enc_bytes: Arc<[u8]> = Arc::from(enc_doc.to_bytes().unwrap());
+        let unlocked_doc = RustBackend::new()
+            .open_bytes_with_passwords(enc_bytes, &["wrong-1", "correct-pass"])
+            .unwrap();
+        assert_eq!(unlocked_doc.page_count(), 1);
+
+        // `Pdf` directly implements `RenderedDoc`:
+        assert_eq!(RenderedDoc::page_count(&pdf), 1);
+        assert_eq!(RenderedDoc::page_geom(&pdf, 0).unwrap(), page.geom());
+        let (dpix, _) = RenderedDoc::render_page(&pdf, 0, &opts).unwrap();
+        assert_eq!(dpix, pix);
+
+        // `RustBackend` (`RenderBackend` trait) + `Page::render` both honor `Options::rules`
+        // (`Rules::Iso` vs `Rules::Pdfium` on CMYK cyan `(1, 0, 0, 0)`) and custom `Options::limits`!
+        let mut cmyk_doc = Document::new();
+        {
+            let cp = cmyk_doc.add_page(Rect::new(0.0, 0.0, 40.0, 40.0));
+            cp.fill_color(Color::Cmyk([1.0, 0.0, 0.0, 0.0]));
+            cp.rect(0.0, 0.0, 40.0, 40.0);
+            cp.paint(Paint::Fill);
+        }
+        let cmyk_bytes = cmyk_doc.to_bytes().unwrap();
+        let cmyk_vp = RenderOpts::with_viewport(Viewport::Page {
+            width: 40,
+            rotation: Rotation::R0,
+        });
+        let pdfium_page_px = crate::from_bytes(&cmyk_bytes[..])
+            .unwrap()
+            .pages()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .render(&cmyk_vp)
+            .unwrap()
+            .0
+            .pixel_rgba8(20, 20)
+            .unwrap();
+        let mut iso_open = Options::DEFAULT;
+        iso_open.rules = Rules::Iso;
+        let iso_pdf = iso_open.from_bytes(&cmyk_bytes[..]).unwrap();
+        let iso_page_px = iso_pdf
+            .pages()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .render(&cmyk_vp)
+            .unwrap()
+            .0
+            .pixel_rgba8(20, 20)
+            .unwrap();
+        let iso_backend_px = RustBackend::new()
+            .with_options(iso_open)
+            .open_bytes(Arc::from(cmyk_bytes), None)
+            .unwrap()
+            .render_page(0, &cmyk_vp)
+            .unwrap()
+            .0
+            .pixel_rgba8(20, 20)
+            .unwrap();
+        assert_eq!(iso_page_px, [0, 255, 255, 255]);
+        assert_eq!(iso_backend_px, [0, 255, 255, 255]);
+        assert!(pdfium_page_px[1] < 200, "PDFium LUT cyan != [0, 255, 255]");
+
+        let mut tight_open = Options::DEFAULT;
+        tight_open.rules = Rules::Iso;
+        tight_open.limits.raster.max_pixels = 5_000;
+        let tight_pdf = tight_open.from_bytes(&bytes[..]).unwrap();
+        let backend = RustBackend::new().with_options(tight_open);
+        let rendered_doc = backend
+            .open_bytes(Arc::from(bytes.as_slice()), None)
+            .unwrap();
+        assert_eq!(rendered_doc.page_count(), 1);
+        // Customizing one field on `opts.limits` must NOT drop `Pdf`'s `max_pixels = 5_000` cap
+        // on EITHER `Page::render` OR `RustBackend`!
+        let mut tweaked_opts = opts.clone();
+        tweaked_opts.limits.max_annots = 10;
+        assert!(matches!(
+            tight_pdf
+                .pages()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .render(&tweaked_opts)
+                .unwrap_err(),
+            Error::Raster(crate::pdf_raster::Error::Limit(
+                crate::pdf_raster::LimitKind::Pixels
+            ))
+        ));
+        let capped_err = rendered_doc.render_page(0, &tweaked_opts).unwrap_err();
+        assert!(matches!(
+            Error::from(capped_err),
+            Error::Raster(crate::pdf_raster::Error::Limit(
+                crate::pdf_raster::LimitKind::Pixels
+            ))
+        ));
+
+        // `From<BackendError> for Error` unwraps a boxed `pdfs::Error` directly:
+        let wrapped = BackendError::custom(Error::NoCatalog);
+        assert!(matches!(Error::from(wrapped), Error::NoCatalog));
     }
 
     #[test]

@@ -38,8 +38,10 @@
 //! # Cargo Features
 //!
 //! - **`programs`** *(default)*: Parses embedded font programs via `skrifa` for
-//!   [`Font::char_box`], fallback heights, and program character mappings ([`FontProgram`]).
-//!   [`Font::read_for_text`] and [`Fonts::for_text`] skip program parsing.
+//!   [`Font::char_box`], vector glyph contours ([`Font::outline`], [`Font::outline_status`],
+//!   [`FallbackProgram`]), fallback heights, and program character mappings ([`FontProgram`]).
+//!   [`Font::read_for_text`] and [`Fonts::for_text`] skip program parsing, while
+//!   [`Fonts::for_rendering`] retains simple-font faces for contour extraction.
 //! - **`predefined-cmaps`** *(optional)*: Bundles Adobe's predefined CJK CMaps via `hayro-cmap`
 //!   (otherwise reporting [`Fault::PredefinedNotBuilt`]).
 //! - **`tracing`** *(optional)*: Emits numeric `tracing` spans over font reads, program/CMap/CharProc
@@ -114,8 +116,8 @@ pub use encoding::{Encoding, cp1252, glyph_text, name_code_point};
 pub use error::Error;
 pub use fault::Fault;
 pub use font::{
-    Codes, Descendant, Font, FontApprox, FontKind, FontMetrics, FontProgram, GlyphBox,
-    VerticalMetrics,
+    Codes, Descendant, FallbackProgram, Font, FontApprox, FontKind, FontMetrics, FontProgram,
+    FontStyle, GlyphBox, OutlineOutcome, OutlineVerb, Type3Glyph, VerticalMetrics,
 };
 pub use fonts::{FontId, FontScope, Fonts};
 pub use limits::Limits;

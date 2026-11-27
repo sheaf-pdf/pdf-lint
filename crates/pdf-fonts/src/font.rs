@@ -53,10 +53,132 @@ use pdf_objects::{Dict, Object, ObjectId, Resolve, Streams};
 use crate::cmap::{CMap, CidMap, Ranges, Scheme, number, two_bytes};
 use crate::phases::phase;
 use crate::predefined::{self, BfString, Collection, Split};
-use crate::program::{CidGlyphs, Face};
+use crate::program::{CidGlyphs, Face, FallbackMap, SimpleGlyphs};
 use crate::reader::Reader;
 use crate::type1::Refusal;
 use crate::{Encoding, Error, Fault, Limits, Std14, glyph_text};
+
+/// One contour segment of a glyph outline in glyph units (`1/1000` of text
+/// space at font size `1.0`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutlineVerb {
+    /// Begins a new contour at `(x, y)`.
+    MoveTo(f32, f32),
+    /// Straight line from the active point to `(x, y)`.
+    LineTo(f32, f32),
+    /// Quadratic Bézier curve through `(cx, cy)` to `(x, y)`.
+    QuadTo(f32, f32, f32, f32),
+    /// Cubic Bézier curve through `(cx0, cy0)` and `(cx1, cy1)` to `(x, y)`.
+    CurveTo(f32, f32, f32, f32, f32, f32),
+    /// Closes the active contour.
+    Close,
+}
+
+/// Outcome of extracting a glyph contour via [`Font::outline_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OutlineOutcome {
+    /// Contour extracted from the embedded font program (may append zero verbs
+    /// for whitespace or blank `.notdef` glyphs).
+    Drawn,
+    /// Embedded font program is present, but `code` has no glyph in the program
+    /// or its glyph data is missing/malformed.
+    NoGlyph,
+    /// No readable font program is embedded on this font (`FontProgram::None`,
+    /// `Malformed`, or `Capped`), or the `programs` feature is disabled.
+    NoProgram,
+    /// Embedded font program is present, but evaluating `code`'s glyph exceeded
+    /// composite/point or charstring fuel limits.
+    BudgetExceeded,
+}
+
+/// Glyph stream and coloring mode for a Type 3 font character code
+/// (ISO 32000-2, §9.6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Type3Glyph {
+    /// Indirect stream [`ObjectId`] of the `/CharProcs` entry.
+    pub stream: ObjectId,
+    /// `true` when the stream sets `d1` (uncolored stencil painted in the
+    /// caller's fill color) rather than `d0` (`false`, colored glyph).
+    pub uncolored: bool,
+}
+
+/// Style classification extracted from `/Flags` and `/BaseFont` without
+/// retaining raw font-name bytes, used for unembedded font fallback selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct FontStyle {
+    /// `/Flags` bit 1 (`FixedPitch`) or fixed-pitch Standard 14 font.
+    pub fixed_pitch: bool,
+    /// `/Flags` bit 2 (`Serif`) or serif Standard 14 font.
+    pub serif: bool,
+    /// `/Flags` bit 3 (`Symbolic`).
+    pub symbolic: bool,
+    /// `/Flags` bit 7 (`Italic`) or italic/oblique `/BaseFont` name.
+    pub italic: bool,
+    /// `/Flags` bit 19 (`ForceBold`), `/FontWeight >= 600`, or bold `/BaseFont`.
+    pub bold: bool,
+}
+
+/// Standalone font program (TrueType, OpenType/CFF, CFF, or Type 1) opened
+/// under [`Limits`] for rendering unembedded fallback glyphs.
+pub struct FallbackProgram {
+    face: Face,
+    charmap: FallbackMap,
+}
+
+impl fmt::Debug for FallbackProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FallbackProgram")
+            .field("upem", &self.face.upem())
+            .finish()
+    }
+}
+
+impl FallbackProgram {
+    /// Opens `bytes` as a TrueType, OpenType/CFF, CFF, or Type 1 font program
+    /// under `limits`. Returns `None` if `programs` is disabled, `bytes` is
+    /// malformed, or `limits` refuses it.
+    #[must_use]
+    pub fn open(bytes: Vec<u8>, limits: &Limits) -> Option<FallbackProgram> {
+        let face = Face::open(bytes, b"", limits).ok()?;
+        let charmap = face.fallback_map();
+        Some(FallbackProgram { face, charmap })
+    }
+
+    /// Opens a borrowed font-program byte slice under `limits`.
+    #[must_use]
+    pub fn from_slice(bytes: &[u8], limits: &Limits) -> Option<FallbackProgram> {
+        Self::open(bytes.to_vec(), limits)
+    }
+
+    /// Appends the contour of `ch` in glyph units (`1000.0` = 1 em) to `out`
+    /// and returns its horizontal advance in glyph units, or `None` if `ch` has
+    /// no glyph or no defined advance width in this program (leaving `out`
+    /// unchanged).
+    ///
+    /// Note that passing `hint_ppem: Some(p)` (`p >= 4.0`) grid-fits TrueType
+    /// (`glyf`) contours to the device pixel grid at `p.min(512.0)` ppem before
+    /// scaling coordinates back to `1000.0`-unit glyph space, so hinted coordinates
+    /// depend on the target device resolution (`Some(p)` with `p < 4.0` disables
+    /// hinting; `None` leaves contours unhinted except for FreeType's tricky CJK
+    /// TrueType families, which are hinted at `16.0` ppem).
+    pub fn outline_char(
+        &self,
+        ch: char,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> Option<f32> {
+        self.face.outline_char(&self.charmap, ch, hint_ppem, out)
+    }
+}
+
+struct Type3Data {
+    matrix: [f32; 6],
+    resources_ref: Option<ObjectId>,
+    direct_resources: Option<Box<Object>>,
+    glyphs: Box<[Option<Type3Glyph>; 256]>,
+}
 
 /// A glyph or font bounding box, in glyph units unless it says otherwise:
 /// thousandths of text space at a font size of 1. Normalized, `x0 <= x1` and
@@ -299,6 +421,16 @@ pub struct Font {
     program: FontProgram,
     /// The boxes its program gives its glyphs, as PDFium has them.
     outlines: Outlines,
+    /// Matched Standard 14 font, if any.
+    std14: Option<Std14>,
+    /// Extracted style flags for unembedded font fallback selection.
+    style: FontStyle,
+    /// Raw `/BaseFont` name bytes (omitted from `Debug`).
+    base_font: Option<Box<[u8]>>,
+    /// CIDSystemInfo `/Ordering` bytes on composite/GBK fonts (omitted from `Debug`).
+    cid_ordering: Option<Box<[u8]>>,
+    /// Type 3 `/FontMatrix`, `/Resources`, and per-code `/CharProcs` streams.
+    type3: Option<Box<Type3Data>>,
     /// The codes whose widths are guessed where its others' aren't
     /// ([`Font::width_guessed`]), a bit each.
     guessed: [u64; 4],
@@ -321,7 +453,10 @@ enum Outlines {
     /// It has no program that was read.
     None,
     /// A simple font's, by code.
-    Codes(Box<[Option<GlyphBox>; 256]>),
+    Codes {
+        boxes: Box<[Option<GlyphBox>; 256]>,
+        glyphs: Option<Box<SimpleGlyphs>>,
+    },
     /// A CIDFont's, drawn as they're asked for.
     Glyphs(Box<CidGlyphs>),
 }
@@ -383,6 +518,8 @@ pub(crate) type OwnText = Vec<Option<Option<String>>>;
 pub(crate) struct SimpleMap {
     /// Each code's box, where that can be said.
     pub(crate) boxes: Box<[Option<GlyphBox>; 256]>,
+    /// Mapped glyph ID per code in the embedded program, when known.
+    pub(crate) gids: Box<[Option<u16>; 256]>,
     /// What drawing them cost.
     pub(crate) cost: usize,
     /// The lower case of a font of capitals that takes its capital's glyph, having
@@ -397,6 +534,7 @@ impl SimpleMap {
     pub(crate) fn none() -> SimpleMap {
         SimpleMap {
             boxes: Box::new([None; 256]),
+            gids: Box::new([None; 256]),
             cost: 0,
             capitals: Box::new([false; 256]),
             text: vec![None; 256],
@@ -550,23 +688,46 @@ impl Font {
         O: Resolve<'o> + Streams + Copy,
         S: Sink<Fault> + ?Sized,
     {
+        Font::read_full(
+            objects, font, None, limits, budget, sink, programs, programs,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_full<'o, O, S>(
+        objects: O,
+        font: &'o Dict,
+        font_id: Option<ObjectId>,
+        limits: &Limits,
+        budget: &mut usize,
+        sink: &mut S,
+        programs: bool,
+        keep_simple_face: bool,
+    ) -> Result<Font, Error>
+    where
+        O: Resolve<'o> + Streams + Copy,
+        S: Sink<Fault> + ?Sized,
+    {
         phase!(DEBUG, "read", programs = programs);
         let reader = Reader::new(objects, limits, sink);
         let mut left = *budget;
-        let read = read_kind(&reader, font, &mut left, programs);
+        let read = read_kind(
+            &reader,
+            font,
+            font_id,
+            &mut left,
+            programs,
+            keep_simple_face,
+        );
         if let Some(unreadable) = reader.failure() {
             return Err(unreadable.into());
         }
         let mut read = read?;
+        read.id = font_id;
         read.cost = *budget - left;
         read.extent = read.extent_of_metrics();
         *budget = left;
         Ok(read)
-    }
-
-    /// It, read from object `id`.
-    pub(crate) fn set_id(&mut self, id: ObjectId) {
-        self.id = Some(id);
     }
 
     /// The object it's read from, where it's one ([`Fonts::get`](crate::Fonts::get)).
@@ -810,8 +971,143 @@ impl Font {
     pub fn char_box(&self, code: u32) -> Option<GlyphBox> {
         match &self.outlines {
             Outlines::None => None,
-            Outlines::Codes(boxes) => *boxes.get(code as usize)?,
+            Outlines::Codes { boxes, .. } => *boxes.get(code as usize)?,
             Outlines::Glyphs(glyphs) => glyphs.char_box(self.cid(code)?),
+        }
+    }
+
+    /// Matched Standard 14 font, if any.
+    #[must_use]
+    pub const fn std14(&self) -> Option<Std14> {
+        self.std14
+    }
+
+    /// Style classification extracted from `/Flags` and `/BaseFont` for
+    /// fallback font selection.
+    #[must_use]
+    pub const fn style(&self) -> FontStyle {
+        self.style
+    }
+
+    /// Raw `/BaseFont` bytes declared on this font (or its descendant CIDFont),
+    /// if present.
+    #[must_use]
+    pub fn base_font(&self) -> Option<&[u8]> {
+        self.base_font.as_deref()
+    }
+
+    /// `/CIDSystemInfo` `/Ordering` bytes (such as `b"Japan1"`, `b"GB1"`,
+    /// `b"CNS1"`, `b"Korea1"`, or `b"Identity"`) on a composite or GBK font, if
+    /// known.
+    #[must_use]
+    pub fn cid_ordering(&self) -> Option<&[u8]> {
+        self.cid_ordering.as_deref()
+    }
+
+    /// Type 3 `/FontMatrix` (`[a, b, c, d, e, f]`) mapping glyph space to text
+    /// space, or `None` when this font is not [`FontKind::Type3`].
+    #[must_use]
+    pub fn type3_matrix(&self) -> Option<[f32; 6]> {
+        self.type3.as_ref().map(|t| t.matrix)
+    }
+
+    /// Direct Type 3 `/Resources` entry when this font was read from a standalone
+    /// dictionary (`self.id().is_none()`), or `None` when indirect (use
+    /// [`Self::type3_resources_in`] to borrow `/Resources` from indirect Type 3
+    /// fonts without copying).
+    #[must_use]
+    pub fn type3_resources(&self) -> Option<&Object> {
+        self.type3
+            .as_ref()
+            .and_then(|t| t.direct_resources.as_deref())
+    }
+
+    /// Resolves or borrows the Type 3 font's `/Resources` entry without copying
+    /// direct dictionaries on indirect font objects.
+    #[must_use]
+    pub fn type3_resources_in<'o, R: Resolve<'o>>(&'o self, objects: R) -> Option<&'o Object> {
+        let t3 = self.type3.as_ref()?;
+        if let Some(res_id) = t3.resources_ref {
+            return objects.resolve(res_id);
+        }
+        if let Some(font_id) = self.id {
+            return objects.resolve(font_id)?.as_dict()?.get(b"Resources");
+        }
+        t3.direct_resources.as_deref()
+    }
+
+    /// Type 3 `/CharProcs` stream and coloring mode (`d0` vs `d1`) for `code`.
+    #[must_use]
+    pub fn type3_glyph(&self, code: u32) -> Option<Type3Glyph> {
+        *self.type3.as_ref()?.glyphs.get(code as usize)?
+    }
+
+    /// Appends the unhinted contour of `code`'s glyph in glyph units (`1000.0` =
+    /// 1 em) to `out` (tricky CJK TrueType families still run their required
+    /// `16.0` ppem assembly).
+    pub fn outline_unhinted(&self, code: u32, out: &mut Vec<OutlineVerb>) -> OutlineOutcome {
+        self.outline_status(code, None, out)
+    }
+
+    /// Appends the contour of `code`'s glyph to `out`, grid-fitting TrueType
+    /// (`glyf`) outlines at `ppem` device pixels per em (`>= 4.0`, clamped to
+    /// `512.0`) before scaling coordinates back into `1000.0`-unit glyph space.
+    pub fn outline_hinted(
+        &self,
+        code: u32,
+        ppem: f32,
+        out: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
+        self.outline_status(code, Some(ppem), out)
+    }
+
+    /// Appends the contour of `code`'s glyph in glyph units (`1000.0` = 1 em)
+    /// to `out` when this font embeds a readable program.
+    ///
+    /// Note that passing `hint_ppem: Some(p)` (`p >= 4.0`) grid-fits TrueType
+    /// (`glyf`) contours to the device pixel grid at `p.min(512.0)` ppem before
+    /// scaling back to `1000.0`-unit glyph space, so coordinates depend on the
+    /// target device resolution (`Some(p)` with `p < 4.0` disables hinting;
+    /// `None` leaves contours unhinted except for FreeType's tricky CJK TrueType
+    /// families, which are hinted at `16.0` ppem). Note that fonts cached in
+    /// [`Fonts::default()`](crate::Fonts) drop embedded simple-font faces after
+    /// computing bounding boxes; use [`Fonts::for_rendering()`](crate::Fonts::for_rendering)
+    /// or [`Font::read`] when extracting contours from simple fonts.
+    ///
+    /// Returns `true` when `code` resolved to a valid glyph in the embedded
+    /// program (including whitespace glyphs that emit zero contour verbs), and
+    /// `false` when no program was read, `code` has no glyph, or evaluation
+    /// exceeded resource bounds (leaving `out` unchanged).
+    pub fn outline(&self, code: u32, hint_ppem: Option<f32>, out: &mut Vec<OutlineVerb>) -> bool {
+        self.outline_status(code, hint_ppem, out) == OutlineOutcome::Drawn
+    }
+
+    /// Appends the contour of `code`'s glyph in glyph units (`1000.0` = 1 em)
+    /// to `out` and reports why no contour was produced when unsuccessful
+    /// ([`OutlineOutcome`]), distinguishing fonts without a retained program
+    /// ([`OutlineOutcome::NoProgram`]) from missing glyphs
+    /// ([`OutlineOutcome::NoGlyph`]) and per-glyph resource caps
+    /// ([`OutlineOutcome::BudgetExceeded`]).
+    ///
+    /// See [`Self::outline`], [`Self::outline_unhinted`], and [`Self::outline_hinted`]
+    /// for `hint_ppem` grid-fitting semantics and [`Fonts::for_rendering`](crate::Fonts::for_rendering).
+    pub fn outline_status(
+        &self,
+        code: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
+        match &self.outlines {
+            Outlines::None => OutlineOutcome::NoProgram,
+            Outlines::Codes {
+                glyphs: Some(glyphs),
+                ..
+            } => glyphs.outline_status(code, hint_ppem, out),
+            Outlines::Codes { glyphs: None, .. } => OutlineOutcome::NoProgram,
+            Outlines::Glyphs(glyphs) => match self.cid(code) {
+                Some(cid) => glyphs.outline_status(cid, hint_ppem, out),
+                None => OutlineOutcome::NoGlyph,
+            },
         }
     }
 
@@ -944,7 +1240,7 @@ impl Font {
         let heights = [self.metrics.ascent, self.metrics.descent];
         let outlines: Vec<f32> = match &self.outlines {
             Outlines::None => Vec::new(),
-            Outlines::Codes(boxes) => (boxes.iter().flatten())
+            Outlines::Codes { boxes, .. } => (boxes.iter().flatten())
                 .flat_map(|r| [r.x0, r.y0, r.x1, r.y1])
                 .collect(),
             Outlines::Glyphs(_) => vec![OUTLINE_REACH],
@@ -1048,11 +1344,14 @@ const OUTLINE_REACH: f32 = 2_147_483_648.0;
 
 /// `font` by its `/Subtype`, as PDFium's `CPDF_Font::Create` takes it, its
 /// `/ToUnicode` read first.
+#[allow(clippy::too_many_arguments)]
 fn read_kind<'o, O, S>(
     reader: &Reader<'_, O, S>,
     font: &'o Dict,
+    font_id: Option<ObjectId>,
     budget: &mut usize,
     programs: bool,
+    keep_simple_face: bool,
 ) -> Result<Font, Error>
 where
     O: Resolve<'o> + Streams,
@@ -1082,12 +1381,21 @@ where
         (!by_cid).then(|| Encoded::read(reader, font, subtype, name, descriptor, &program));
     let decoder = Decoder::read(reader, font, encoded.as_ref(), budget)?;
     let simple_as = |kind, decoder, encoded, budget: &mut usize, program| {
-        simple(reader, font, kind, decoder, encoded, budget, program)
+        simple(
+            reader,
+            font,
+            kind,
+            decoder,
+            encoded,
+            budget,
+            program,
+            keep_simple_face,
+        )
     };
     Ok(match (subtype, encoded) {
         (Some(b"Type0"), _) => type0(reader, font, decoder, budget, programs)?,
         (_, None) => gbk_font(reader, font, decoder),
-        (Some(b"Type3"), Some(encoded)) => type3(reader, font, decoder, &encoded, budget)?,
+        (Some(b"Type3"), Some(encoded)) => type3(reader, font, font_id, decoder, &encoded, budget)?,
         (Some(b"MMType1"), Some(encoded)) => {
             simple_as(FontKind::MMType1, decoder, &encoded, budget, program)?
         }
@@ -1222,6 +1530,89 @@ fn standard_named(name: &[u8]) -> Option<Std14> {
     Std14::named(name).filter(|_| name.get(6) != Some(&b'+'))
 }
 
+/// Extracts [`FontStyle`] classification from descriptor `/Flags`,
+/// `/FontWeight`, `/BaseFont` name substrings (past any `ABCDEF+` subset tag),
+/// and [`Std14`], without emitting faults for auxiliary entries.
+fn classify_style<'o, O, S>(
+    reader: &Reader<'_, O, S>,
+    descriptor: Option<&'o Dict>,
+    name: Option<&[u8]>,
+    std14: Option<Std14>,
+    flags: i32,
+) -> FontStyle
+where
+    O: Resolve<'o> + Streams,
+    S: Sink<Fault> + ?Sized,
+{
+    let has_ci = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle))
+    };
+    let name_bytes = name.unwrap_or_default();
+    let bare = match name_bytes {
+        [a, b, c, d, e, f, b'+', rest @ ..]
+            if [a, b, c, d, e, f].into_iter().all(u8::is_ascii_uppercase) =>
+        {
+            rest
+        }
+        _ => name_bytes,
+    };
+    let has_mono = bare.windows(4).enumerate().any(|(i, w)| {
+        w.eq_ignore_ascii_case(b"Mono")
+            && !bare[i + 4..]
+                .get(..4)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(b"type"))
+    });
+    let weight = descriptor.map_or(0, |d| reader.quiet_integer_for(d, b"FontWeight", 0));
+    let std_fixed = std14.is_some_and(fixed_pitch);
+    let std_serif = matches!(
+        std14,
+        Some(Std14::TimesRoman | Std14::TimesBold | Std14::TimesItalic | Std14::TimesBoldItalic)
+    );
+    let std_italic = matches!(
+        std14,
+        Some(
+            Std14::HelveticaOblique
+                | Std14::HelveticaBoldOblique
+                | Std14::TimesItalic
+                | Std14::TimesBoldItalic
+                | Std14::CourierOblique
+                | Std14::CourierBoldOblique
+        )
+    );
+    let std_bold = matches!(
+        std14,
+        Some(
+            Std14::HelveticaBold
+                | Std14::HelveticaBoldOblique
+                | Std14::TimesBold
+                | Std14::TimesBoldItalic
+                | Std14::CourierBold
+                | Std14::CourierBoldOblique
+        )
+    );
+    FontStyle {
+        fixed_pitch: flags & 1 != 0 || std_fixed || has_mono || has_ci(bare, b"Courier"),
+        serif: flags & 2 != 0
+            || std_serif
+            || (!has_ci(bare, b"Sans")
+                && (has_ci(bare, b"Times") || has_ci(bare, b"Serif") || has_ci(bare, b"Mincho"))),
+        symbolic: flags & SYMBOLIC != 0
+            || matches!(std14, Some(Std14::Symbol | Std14::ZapfDingbats)),
+        italic: flags & (1 << 6) != 0
+            || std_italic
+            || has_ci(bare, b"Italic")
+            || has_ci(bare, b"Oblique"),
+        bold: flags & (1 << 18) != 0
+            || weight >= 600
+            || std_bold
+            || has_ci(bare, b"Bold")
+            || has_ci(bare, b"Black")
+            || has_ci(bare, b"Heavy"),
+    }
+}
+
 /// Whether it's one of PDFium's fixed-pitch standard fonts.
 fn fixed_pitch(font: Std14) -> bool {
     matches!(
@@ -1299,6 +1690,7 @@ where
 /// of capitals only has its lower case drawn as those, and advance as those, but where it
 /// embeds a program: there, what has no glyph of its own in it does, and in one that
 /// isn't read none is taken not to.
+#[allow(clippy::too_many_arguments)]
 fn simple<'o, O, S>(
     reader: &Reader<'_, O, S>,
     font: &'o Dict,
@@ -1307,6 +1699,7 @@ fn simple<'o, O, S>(
     encoded: &Encoded<'o>,
     budget: &mut usize,
     read: Embedded,
+    keep_simple_face: bool,
 ) -> Result<Font, Error>
 where
     O: Resolve<'o> + Streams,
@@ -1410,24 +1803,41 @@ where
             }
         },
     };
+    let Embedded {
+        program,
+        face: read_face,
+        ..
+    } = read;
+    let approx_boxes = read_face.as_ref().is_none_or(|face| !face.exact());
+    let program_heights = match (&read_face, &map) {
+        (Some(face), Some(map)) => ProgramHeights::of(
+            face,
+            map.boxes[usize::from(b'A')],
+            map.boxes[usize::from(b'g')],
+        ),
+        _ => None,
+    };
     let outlines = match map {
         Some(map) => {
             *budget = budget.checked_sub(map.cost).ok_or(Error::TooLarge)?;
             decoder.take_own_text(map.text);
-            Outlines::Codes(map.boxes)
+            let glyphs = if keep_simple_face {
+                read_face.map(|face| Box::new(SimpleGlyphs::new(face, map.gids)))
+            } else {
+                None
+            };
+            Outlines::Codes {
+                boxes: map.boxes,
+                glyphs,
+            }
         }
         None => Outlines::None,
     };
-    approx.boxes = read.face.as_ref().is_none_or(|face| !face.exact());
-    let program_heights = read.face.as_ref().and_then(|face| {
-        let Outlines::Codes(boxes) = &outlines else {
-            return None;
-        };
-        ProgramHeights::of(face, boxes[usize::from(b'A')], boxes[usize::from(b'g')])
-    });
+    approx.boxes = approx_boxes;
     let (metrics, guessed, descriptor_heights) =
         heights(reader, descriptor, descriptor_id, std14, program_heights);
     approx.heights = guessed;
+    let style = classify_style(reader, descriptor, encoded.base_font, std14, encoded.flags);
     Ok(Font {
         id: None,
         loaded: true,
@@ -1444,8 +1854,13 @@ where
         boxes: afm
             .filter(|_| !embedded)
             .map(|afm| Box::new(afm.map(|(_, bbox)| bbox))),
-        program: read.program,
+        program,
         outlines,
+        std14,
+        style,
+        base_font: encoded.base_font.map(Box::<[u8]>::from),
+        cid_ordering: None,
+        type3: None,
         extent: 0.0,
         cost: 0,
         decoder,
@@ -1513,6 +1928,14 @@ where
     let (metrics, guessed, descriptor_heights) =
         heights(reader, descriptor, descriptor_id, None, None);
     approx.heights = guessed;
+    let raw_base = reader.byte_string(font, b"BaseFont");
+    let style = classify_style(
+        reader,
+        descriptor,
+        raw_base,
+        None,
+        descriptor.map_or(0, |d| reader.quiet_integer_for(d, b"Flags", 0)),
+    );
     Font {
         id: None,
         loaded: true,
@@ -1526,6 +1949,11 @@ where
         boxes: None,
         program: FontProgram::None,
         outlines: Outlines::None,
+        std14: None,
+        style,
+        base_font: raw_base.map(Box::<[u8]>::from),
+        cid_ordering: Some(Box::from(&b"GB1"[..])),
+        type3: None,
         guessed: [0; 4],
         extent: 0.0,
         cost: 0,
@@ -1549,6 +1977,7 @@ fn bits(set: impl Iterator<Item = bool>) -> [u64; 4] {
 fn type3<'o, O, S>(
     reader: &Reader<'_, O, S>,
     font: &'o Dict,
+    font_id: Option<ObjectId>,
     decoder: Decoder,
     encoded: &Encoded<'o>,
     budget: &mut usize,
@@ -1594,6 +2023,7 @@ where
     );
     let mut read: HashMap<ObjectId, Option<Option<CharProc>>> = HashMap::new();
     let mut procs: [Option<Option<CharProc>>; 256] = [None; 256];
+    let mut proc_streams: [Option<ObjectId>; 256] = [None; 256];
     for (code, slot) in procs.iter_mut().enumerate() {
         let id = encoded
             .glyph_name(code as u8)
@@ -1612,6 +2042,9 @@ where
                 proc
             }
         };
+        if slot.is_some() {
+            proc_streams[code] = Some(id);
+        }
     }
     // PDFium's `CFX_Matrix::GetXUnit`.
     let xunit = match (matrix.a, matrix.b) {
@@ -1688,6 +2121,25 @@ where
             }
         },
     });
+    let type3_glyphs: [Option<Type3Glyph>; 256] = std::array::from_fn(|code| {
+        let stream = proc_streams[code]?;
+        let uncolored = procs[code].flatten().is_some_and(|p| p.uncolored);
+        Some(Type3Glyph { stream, uncolored })
+    });
+    let raw_res = font.get(b"Resources");
+    let resources_ref = raw_res.and_then(Object::as_reference);
+    let direct_resources = if resources_ref.is_none() && font_id.is_none() {
+        raw_res.map(|r| Box::new(r.clone()))
+    } else {
+        None
+    };
+    let type3 = Some(Box::new(Type3Data {
+        matrix: [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f],
+        resources_ref,
+        direct_resources,
+        glyphs: Box::new(type3_glyphs),
+    }));
+    let base_font = reader.byte_string(font, b"BaseFont").map(Box::<[u8]>::from);
     Ok(Font {
         id: None,
         loaded: true,
@@ -1700,6 +2152,11 @@ where
         boxes: Some(Box::new(boxes)),
         program: FontProgram::None,
         outlines: Outlines::None,
+        std14: None,
+        style: FontStyle::default(),
+        base_font,
+        cid_ordering: None,
+        type3,
         guessed: [0; 4],
         extent: 0.0,
         cost: 0,
@@ -1715,6 +2172,7 @@ where
 struct CharProc {
     wx: f32,
     bbox: [f32; 4],
+    uncolored: bool,
 }
 
 /// A `d1` box, `[llx, lly, urx, ury]`, in glyph units as PDFium keeps it
@@ -1759,14 +2217,21 @@ where
 fn said_of_glyph(data: &[u8], limits: &Limits) -> CharProc {
     let none = ResCx::none();
     let mut said = [0.0; 6];
+    let mut uncolored = false;
     for operation in operations(data, &none, &limits.content) {
         let Ok(operation) = operation else {
             break;
         };
         let n = |i: usize| operation.arg(i).map_or(0.0, |operand| operand.number());
         match operation.name() {
-            b"d0" => (said[0], said[1]) = (n(1), n(0)),
-            b"d1" => said = std::array::from_fn(|i| n(5 - i)),
+            b"d0" => {
+                (said[0], said[1]) = (n(1), n(0));
+                uncolored = false;
+            }
+            b"d1" => {
+                said = std::array::from_fn(|i| n(5 - i));
+                uncolored = true;
+            }
             _ => {}
         }
     }
@@ -1774,6 +2239,7 @@ fn said_of_glyph(data: &[u8], limits: &Limits) -> CharProc {
     CharProc {
         wx,
         bbox: [llx, lly, urx, ury],
+        uncolored,
     }
 }
 
@@ -1911,10 +2377,10 @@ where
         }
     };
     // Identity's collection is the one its CIDFont orders.
-    let ordered = || {
-        let info = reader.dict(cid_font?, b"CIDSystemInfo")?;
-        Collection::ordered(reader.byte_string(info, b"Ordering")?)
-    };
+    let raw_ordering = cid_font
+        .and_then(|f| reader.dict(f, b"CIDSystemInfo"))
+        .and_then(|info| reader.byte_string(info, b"Ordering"));
+    let ordered = || Collection::ordered(raw_ordering?);
     let cid_text = match &coding {
         Coding::Predefined { scheme, .. } if scheme.unicode => Some(CidText::Code),
         Coding::Predefined { scheme, .. } => scheme.collection.to_unicode().map(CidText::Cid),
@@ -1922,6 +2388,26 @@ where
         Coding::Identity => ordered().and_then(Collection::to_unicode).map(CidText::Cid),
         Coding::One | Coding::Embedded(_) | Coding::Unknown => None,
     };
+    let cid_ordering: Option<Box<[u8]>> = raw_ordering.map(Box::<[u8]>::from).or_else(|| {
+        let Coding::Predefined { scheme, .. } = &coding else {
+            return None;
+        };
+        let ord: &[u8] = match scheme.collection {
+            Collection::Cns1 => b"CNS1",
+            Collection::Gb1 => b"GB1",
+            Collection::Japan1 => b"Japan1",
+            Collection::Korea1 => b"Korea1",
+        };
+        Some(Box::from(ord))
+    });
+    let top_base = reader.byte_string(font, b"BaseFont").or(named);
+    let style = classify_style(
+        reader,
+        descriptor,
+        top_base,
+        None,
+        descriptor.map_or(0, |d| reader.quiet_integer_for(d, b"Flags", 0)),
+    );
     let mut read = Font {
         id: None,
         loaded,
@@ -1934,6 +2420,11 @@ where
         boxes: None,
         program,
         outlines,
+        std14: None,
+        style,
+        base_font: top_base.map(Box::<[u8]>::from),
+        cid_ordering,
+        type3: None,
         guessed: [0; 4],
         extent: 0.0,
         cost: 0,

@@ -1,15 +1,15 @@
 name: Fuzz
 
 # Each fuzz target under libFuzzer, through `just fuzz` as it runs locally.
-# On pull requests and pushes to main, the 22 target/feature runs are grouped
+# On pull requests and pushes to main, the 26 target/feature runs are grouped
 # into 5 buckets (two minutes a target, from the corpus the scheduled runs
 # keep) so shared dependencies build with AddressSanitizer once per bucket
-# rather than 22 times. Twice a week (and on manual `workflow_dispatch`), the
-# full 22-way matrix runs in parallel (half an hour a target on schedule, the
-# corpus minimized and kept in the cache for the next run). `content` runs
-# twice, the second time built with `simd`, and `fonts`, `gfx` and `annots`
-# twice, the second time built with `predefined-cmaps`, each from the same
-# corpus, which only the run without extra features saves. CI's `just test`
+# rather than 26 times. Twice a week (and on manual `workflow_dispatch`), the
+# full 26-way matrix runs in parallel (half an hour a target on schedule, the
+# corpus minimized and kept in the cache for the next run). `content`, `images`
+# and `raster` run twice, the second time built with `simd`, and `fonts`, `gfx`
+# and `annots` twice, the second time built with `predefined-cmaps`, each from
+# the same corpus, which only the run without extra features saves. CI's `just test`
 # runs each fuzz body too, as stable unit tests on fixed inputs; here is where
 # new inputs are found.
 on:
@@ -40,13 +40,13 @@ jobs:
       matrix:
         include:
           - group: core
-            label: tokenize, filters, crypt, objects
+            label: tokenize, filters, crypt, objects, raster
             t1: tokenize
             t2: filters
             t3: crypt
             t4: objects
-            t5: ""
-            runs: tokenize filters crypt objects
+            t5: raster
+            runs: tokenize filters crypt objects raster
           - group: structure
             label: structure, write, semantics, linearize, forms
             t1: structure
@@ -56,13 +56,13 @@ jobs:
             t5: forms
             runs: structure write semantics linearize forms
           - group: fonts
-            label: content, color, fonts, embed
+            label: content, color, images, fonts, embed
             t1: content
             t2: color
-            t3: fonts
-            t4: embed
-            t5: ""
-            runs: content color fonts embed
+            t3: images
+            t4: fonts
+            t5: embed
+            runs: content color images fonts embed
           - group: upper
             label: gfx, annots, pdfs, arlington, check
             t1: gfx
@@ -74,11 +74,12 @@ jobs:
           - group: features
             label: simd and predefined-cmaps
             t1: content
-            t2: fonts
-            t3: gfx
-            t4: annots
-            t5: ""
-            runs: content:simd fonts:predefined-cmaps gfx:predefined-cmaps annots:predefined-cmaps
+            t2: images
+            t3: raster
+            t4: fonts
+            t5: gfx
+            t6: annots
+            runs: content:simd images:simd raster:simd fonts:predefined-cmaps gfx:predefined-cmaps annots:predefined-cmaps
     steps:
       - uses: actions/checkout@v7
         with:
@@ -121,6 +122,13 @@ jobs:
           path: fuzz/corpus/${{ matrix.t5 }}
           key: fuzz-corpus-${{ matrix.t5 }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.t5 }}-
+      - name: Restore corpus (${{ matrix.t6 }})
+        if: matrix.t6 != ''
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.t6 }}
+          key: fuzz-corpus-${{ matrix.t6 }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.t6 }}-
       - name: Fuzz
         run: |
           status=0
@@ -154,13 +162,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, forms, linearize, pdfs, arlington, check]
+        target: [tokenize, filters, crypt, objects, structure, write, content, semantics, color, images, fonts, embed, gfx, annots, forms, raster, linearize, pdfs, arlington, check]
         # The features fuzz/ is built with: none, for each target. A run
         # given features of its own is a combination of its own, as it sets
         # this key, so it doesn't change the target's run without them.
         features: [""]
         include:
           - target: content
+            features: simd
+          - target: images
+            features: simd
+          - target: raster
             features: simd
           - target: fonts
             features: predefined-cmaps

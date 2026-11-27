@@ -2,6 +2,10 @@
 
 ## 0.1.0-alpha.2 (unreleased)
 
+- **§7.10 functions (`Function`, `FunctionKind`).** Public bounded reader (`Function::read`, `Function::read_at`) and evaluator (`Function::eval`, `Function::eval_vec`) for `Type 0` sampled (`1/2/4/8/12/16/24/32` bps multilinear interpolation, including `/Order 3` streams), `Type 2` exponential, `Type 3` stitching, and `Type 4` PostScript calculator (Table 42 stack machine, enforcing strict integer/boolean operand types under `Rules::Iso` and PDFium's float-coercing stack under `Rules::Pdfium`) functions, capturing execution caps from `Limits` at read time.
+- **Color evaluation (`PreparedSpace`, `EvalOptions`, `Paint`).** Evaluates device, CIE (`CalGray`, `CalRGB`, `Lab`), `Indexed`, `Separation` (including `/All` and `/None`), and `DeviceN` spaces to sRGB (`[f32; 3]` / `[u8; 3]`, single-pixel and batched `eval_pixels_srgb8`), supporting `/DefaultGray`, `/DefaultRGB`, and `/DefaultCMYK` resource overrides under `Rules::Iso`, PDFium (`chromium/8152`) compatibility under `Rules::Pdfium`, and full policy switching via `PreparedSpace::eval_with_rules` and `eval_pixels_srgb8_with_rules`.
+- **Optional `icc` feature (`moxcms`).** Opt-in `icc` Cargo feature converts `ICCBased` streams, raw profile slices (`PreparedSpace::from_icc_bytes`), and `/OutputIntents` destination profiles via pure-Rust `moxcms` (`unsafe_code = "forbid"`), falling back to `/Alternate` or the `/N` device space and reporting `Fault::IccProfile` when a profile is malformed (when `icc` is disabled, `ICCBased` spaces evaluate through `/Alternate` or the `/N` device space without emitting a fault).
+- **Image `/Decode`, palette, and rendering-intent helpers.** Added `Space::default_decode`, `PreparedSpace::decode_ranges`, `Cie::lab_range`, `Icc::range`, `Indexed::lookup_bytes`, `Lookup::bytes`, `LookupError`, and `RenderingIntent`.
 - **pdf-objects 0.1.0-alpha.3.** Updated to `pdf-objects` `=0.1.0-alpha.3`, re-exported as `pdf_color::pdf_objects`.
 - **Rust 1.92.** Raised MSRV from Rust 1.89 to 1.92 to match the workspace.
 

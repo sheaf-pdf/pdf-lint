@@ -204,4 +204,86 @@ pub enum Fault {
         /// The object.
         id: ObjectId,
     },
+    /// A value read as a function that's neither a dictionary nor a stream
+    /// (7.10.1), or a reference to nothing.
+    #[error("not a function")]
+    NotAFunction,
+    /// A function's `/FunctionType` that's missing or not 0, 2, 3 or 4
+    /// (7.10.1, Table 38).
+    #[error("a function's /FunctionType isn't 0, 2, 3 or 4")]
+    FunctionType,
+    /// A Type 0 or Type 4 function that's a dictionary rather than a stream
+    /// (7.10.2, 7.10.5).
+    #[error("a Type 0 or Type 4 function isn't a stream")]
+    FunctionNotStream,
+    /// A Type 2 or Type 3 function that's a stream rather than a dictionary
+    /// (7.10.1, Table 38). Its dictionary is read all the same.
+    #[error("a Type 2 or Type 3 function is a stream")]
+    FunctionStream,
+    /// A function's `/Domain` that's missing, empty, odd-length, not numbers,
+    /// or has a pair out of order (`Domain[2i] > Domain[2i + 1]`; Table 38).
+    #[error("a function's /Domain isn't ordered pairs of numbers")]
+    FunctionDomain,
+    /// A function's `/Range` that's missing where required (Type 0 and Type 4),
+    /// empty, odd-length, not numbers, or has a pair out of order (Table 38).
+    #[error("a function's /Range isn't ordered pairs of numbers")]
+    FunctionRange,
+    /// A Type 0 sampled function's `/Size` that's missing, not one positive
+    /// integer per input, or empty (7.10.2, Table 39).
+    #[error("a sampled function's /Size isn't a positive integer per input")]
+    SampleSize,
+    /// A Type 0 sampled function's `/BitsPerSample` that's missing or not
+    /// 1, 2, 4, 8, 12, 16, 24 or 32 (Table 39).
+    #[error("a sampled function's /BitsPerSample isn't 1, 2, 4, 8, 12, 16, 24 or 32")]
+    BitsPerSample,
+    /// A Type 0 sampled function's `/Order` that's neither 1 nor 3 (Table 39).
+    #[error("a sampled function's /Order is neither 1 nor 3")]
+    SampleOrder,
+    /// A Type 0 or Type 3 function's `/Encode` that isn't two numbers per input
+    /// or subfunction (Table 39, Table 41).
+    #[error("a function's /Encode isn't two numbers per input or subfunction")]
+    FunctionEncode,
+    /// A Type 0 sampled function's `/Decode` that isn't two numbers per output
+    /// (Table 39).
+    #[error("a sampled function's /Decode isn't two numbers per output")]
+    SampleDecode,
+    /// A Type 0 sampled function stream whose decoded bytes hold fewer bits
+    /// than `/Size`, `/BitsPerSample` and `/Range` require (7.10.2).
+    #[error("a sampled function's stream is shorter than its sample table")]
+    SampleDataLength,
+    /// A Type 0 sampled function whose total sample count exceeds
+    /// [`Limits::sample_values`](crate::Limits::sample_values).
+    #[error("a sampled function exceeds the sample cap")]
+    TooManySamples,
+    /// A Type 2 exponential function's `/N` that's missing, not a number, or
+    /// undefined on its `/Domain` (negative domain with non-integer `/N`, or
+    /// domain containing 0 with `/N < 0`; 7.10.3, Table 40).
+    #[error("an exponential function's /N isn't valid for its /Domain")]
+    Exponent,
+    /// A Type 2 exponential function's `/C0` or `/C1` that isn't an array of
+    /// numbers matching the function's output count (Table 40).
+    #[error("an exponential function's /C0 or /C1 isn't a matching number array")]
+    ExponentialEndpoints,
+    /// A Type 3 stitching function's `/Functions` that's missing, empty, or
+    /// holds subfunctions that fail to load or disagree on input/output counts
+    /// (7.10.4, Table 41).
+    #[error("a stitching function's /Functions don't form a valid 1-input family")]
+    StitchFunctions,
+    /// A Type 3 stitching function's `/Bounds` that's missing, wrong length,
+    /// not numbers, or out of order within `/Domain` (Table 41).
+    #[error("a stitching function's /Bounds aren't ordered numbers within /Domain")]
+    StitchBounds,
+    /// A Type 4 PostScript calculator stream that doesn't parse as `{ ... }` in
+    /// the ISO 32000-2 §7.10.5 Table 42 subset.
+    #[error("a PostScript calculator stream isn't valid Table 42 syntax")]
+    PostScriptSyntax,
+    /// A Type 4 PostScript calculator stream that exceeds
+    /// [`Limits::postscript_ops`](crate::Limits::postscript_ops).
+    #[error("a PostScript calculator stream exceeds the operation cap")]
+    TooManyOps,
+    /// An ICCBased stream whose ICC profile is unreadable, malformed, or
+    /// disagrees with `/N` (8.6.5.5). Evaluation falls back to `/Alternate` or
+    /// the device space for `/N`.
+    #[error("an ICCBased stream's ICC profile is invalid or mismatches /N")]
+    IccProfile,
 }

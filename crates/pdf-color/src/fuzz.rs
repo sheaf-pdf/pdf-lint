@@ -7,10 +7,14 @@ use std::collections::BTreeMap;
 
 use pdf_objects::fault::{Place, Sink};
 use pdf_objects::parse::Parser;
-use pdf_objects::{Dict, Object, ObjectId, Resolve, Unreadable, Why, resolve_fn};
+use pdf_objects::{
+    Dict, Object, ObjectId, Resolve, Rules, Streams, Unreadable, Why, WithStreams, resolve_fn,
+};
 
 use crate::count::counted;
-use crate::{Family, Fault, Limits, Space, Spaces, components};
+use crate::{
+    EvalOptions, Family, Fault, Function, Limits, PreparedSpace, Space, Spaces, components,
+};
 
 /// How many values of an input are read as objects.
 const OBJECTS: usize = 4096;
@@ -352,18 +356,114 @@ fn a_resources<'o, R: Resolve<'o> + Copy>(objects: R, resources: Option<&'o Obje
     Ok(Some(counts))
 }
 
+/// `value` read and evaluated as a §7.10 [`Function`] and a [`PreparedSpace`] under both
+/// [`Rules::Iso`] and [`Rules::Pdfium`]: sink-independent (`()` vs `Vec` vs `Unwanted`), bounded
+/// under tight [`Limits`], and panic-free on arbitrary sample inputs.
+fn an_eval<'o, O>(objects: O, value: &'o Object)
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    let mut small = Limits::DEFAULT;
+    small.space_depth = 8;
+    small.space_visits = 64;
+    small.stream_bytes = 16 * 1024;
+    small.sample_values = 512;
+    small.postscript_ops = 128;
+    small.postscript_stack = 32;
+
+    let sample_inputs = [0.0_f32, 0.25, 0.5, 1.0, -0.5, 50.0, f32::NAN, f32::INFINITY];
+
+    for rules in [Rules::Iso, Rules::Pdfium] {
+        let fn_plain = Function::read(objects, value, rules, &small, &mut ()).expect("no hard err");
+        let mut fn_faults = Vec::new();
+        let fn_told =
+            Function::read(objects, value, rules, &small, &mut fn_faults).expect("no hard err");
+        assert_eq!(fn_plain, fn_told, "{value:?} under {rules:?}");
+        let fn_unwanted =
+            Function::read(objects, value, rules, &small, &mut Unwanted).expect("no hard err");
+        assert_eq!(fn_plain, fn_unwanted, "{value:?} under {rules:?}");
+
+        if let Some(func) = &fn_plain {
+            let _dbg = format!("{func:?}");
+            let m = func.inputs() as usize;
+            let mut ins = vec![0.5_f32; m];
+            for (dst, &src) in ins.iter_mut().zip(&sample_inputs) {
+                *dst = src;
+            }
+            let _ = func.eval_vec(&ins);
+        }
+
+        let opts = match rules {
+            Rules::Iso => EvalOptions::ISO,
+            _ => EvalOptions::PDFIUM,
+        };
+        let sp_plain =
+            PreparedSpace::prepare(objects, value, &opts, &small, &mut ()).expect("no hard err");
+        let mut sp_faults = Vec::new();
+        let sp_told = PreparedSpace::prepare(objects, value, &opts, &small, &mut sp_faults)
+            .expect("no hard err");
+        let sp_unwanted = PreparedSpace::prepare(objects, value, &opts, &small, &mut Unwanted)
+            .expect("no hard err");
+        assert_eq!(
+            sp_plain.as_ref().map(|s| (s.family(), s.components())),
+            sp_told.as_ref().map(|s| (s.family(), s.components())),
+        );
+        assert_eq!(
+            sp_plain.as_ref().map(|s| (s.family(), s.components())),
+            sp_unwanted.as_ref().map(|s| (s.family(), s.components())),
+        );
+
+        if let Some(prep) = &sp_plain {
+            let _dbg = format!("{prep:?}");
+            let _ = prep.default_decode(8);
+            let n = prep.components() as usize;
+            let mut comps = vec![0.5_f32; n];
+            for (dst, &src) in comps.iter_mut().zip(&sample_inputs) {
+                *dst = src;
+            }
+            let _ = prep.eval(&comps);
+            let _ = prep.eval_with_rules(&comps, Rules::Iso);
+            let _ = prep.eval_with_rules(&comps, Rules::Pdfium);
+        }
+    }
+}
+
 /// The fuzz target's body for what's held in memory: `data` as objects
-/// ([`values`]), the first of them each counted, each read as a typed space, and
-/// each read as resources, its names counted as they're given.
+/// ([`values`]), the first of them each counted, each read as a typed space,
+/// each evaluated as a function and prepared color space, and each read as
+/// resources, its names counted as they're given.
 pub fn counts(data: &[u8]) {
     let objects = values(data);
     let resolve = resolve_fn(|id: ObjectId| objects.get(&id));
+    let with_streams = WithStreams::new(resolve, |id: ObjectId, limit: usize| {
+        let start = (id.number as usize).min(data.len());
+        let slice = &data[start..data.len().min(start + limit)];
+        Ok(slice.to_vec())
+    });
     let longest = objects.values().map(longest_array).max().unwrap_or(0);
     let most = u32::try_from(longest).unwrap_or(u32::MAX);
     for value in objects.values().take(VALUES) {
         a_value(resolve, value, most);
         a_space(resolve, value);
+        an_eval(with_streams, value);
+        if let Ok(Some(sp)) = Space::read(resolve, value, &Limits::DEFAULT, &mut ()) {
+            let _ = sp.default_decode(resolve, 8, &Limits::DEFAULT);
+            if let Space::Indexed(idx) = &sp {
+                let _ = idx.lookup_bytes(&with_streams, 256);
+            }
+        }
         a_resources(resolve, Some(value)).expect("nothing fails");
+    }
+    if data.len() <= 16 * 1024 {
+        let mut oi_opts = EvalOptions::ISO;
+        oi_opts.output_intent_profile = Some(data);
+        for dev in [Space::DeviceGray, Space::DeviceRGB, Space::DeviceCMYK] {
+            if let Ok(Some(prep)) =
+                PreparedSpace::from_space(with_streams, &dev, &oi_opts, &Limits::DEFAULT, &mut ())
+            {
+                let _ = prep.eval(&[0.2, 0.4, 0.6, 0.1]);
+            }
+        }
     }
     assert_eq!(a_resources(resolve, None), Ok(None));
 }
@@ -617,6 +717,35 @@ mod tests {
             let data: Vec<u8> = (0..random() % 64).map(|_| random() as u8).collect();
             counts(&data);
         }
+    }
+
+    #[test]
+    fn regression_oversized_indexed_lookup_string_under_tight_stream_limit() {
+        let crash: &[u8] = &[
+            60, 60, 32, 47, 76, 101, 110, 103, 116, 55, 32, 48, 32, 82, 93, 32, 47, 69, 32, 91, 47,
+            73, 110, 100, 101, 120, 101, 100, 32, 47, 68, 101, 118, 105, 99, 101, 82, 71, 66, 32,
+            49, 32, 40, 92, 48, 48, 48, 92, 48, 48, 48, 52, 50, 57, 52, 57, 54, 55, 50, 57, 54, 92,
+            48, 48, 48, 92, 51, 51, 55, 55, 92, 55, 55, 92, 51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 120, 114, 101, 102, 10,
+            48, 32, 49, 51, 10, 48, 48, 175, 0, 0, 0, 0, 0, 0, 0, 48, 48, 48, 48, 48, 48, 48, 48,
+            48, 32, 54, 53, 53, 51, 53, 32, 102, 32, 10, 48, 48, 48, 48, 48, 48, 48, 48, 48, 32,
+            102, 32, 10, 48, 48, 48, 48, 48, 48, 48, 101, 80, 111, 105, 110, 116, 32, 91, 49, 57,
+            32, 48, 32, 82, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92,
+            92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92,
+            92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 92, 10, 49, 48, 48, 56, 10, 37, 37,
+            69, 79, 70, 10, 48, 32, 82, 93, 32, 91, 49, 54, 32, 48, 32, 82, 32, 47, 66, 108, 97,
+            99, 107, 32, 47, 78, 111, 110, 101, 93, 32, 47, 68, 101, 118, 105, 99, 101, 71, 114,
+            97, 121, 32, 60, 60, 32, 47, 76, 101, 110, 103, 116, 104, 87, 0, 0, 0, 0, 0, 0, 0, 32,
+            48, 32, 47, 70, 117, 110, 99, 116, 105, 111, 110, 84, 121, 112, 101, 32, 52, 32, 47,
+            68, 57, 57, 57, 57, 57, 32, 12, 0, 0, 0, 0, 0, 0, 0, 49, 93, 32, 62, 62, 93, 32, 91,
+            47, 67, 97, 108, 32, 91, 47, 67, 97, 108, 71, 114, 97, 121, 75, 32, 91, 47, 65, 93, 32,
+            47, 71, 32, 255, 255, 255, 72, 101, 80, 111, 105, 110, 116, 32, 91, 49, 32, 49, 16, 16,
+            0, 64, 32, 49, 93, 32, 58, 62, 93, 32, 91, 47, 67, 97, 108, 71, 114, 97, 121, 41, 55,
+            93, 32, 91, 40, 80, 97, 116, 91, 101, 114, 110, 41, 32, 47, 82, 0, 9, 71, 66, 108, 71,
+            114, 97, 121, 53, 32, 118, 105, 99, 101, 67, 77, 89, 75, 32, 91, 47, 32, 47, 78, 32,
+            49, 32, 62, 62, 47, 78, 32, 49, 32, 62, 62,
+        ];
+        counts(crash);
     }
 
     /// A seed's objects, the first its trailer, as a file; a seed that's no

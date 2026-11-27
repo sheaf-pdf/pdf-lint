@@ -30,6 +30,9 @@ pub struct Fonts {
     stock: OnceLock<Arc<Font>>,
     /// Whether it reads no font's program.
     for_text: bool,
+    /// Whether embedded simple fonts retain their parsed `Face` after computing boxes so
+    /// `Font::outline` / `Font::outline_status` can extract glyph contours.
+    keep_simple_faces: bool,
 }
 
 /// Nothing: what a font written in code is read over.
@@ -63,6 +66,17 @@ impl Fonts {
     pub fn for_text() -> Fonts {
         Fonts {
             for_text: true,
+            ..Fonts::default()
+        }
+    }
+
+    /// Fonts read for page rendering (`Font::outline`, `Font::outline_status`): retains parsed
+    /// font programs on embedded simple fonts as well as CIDFonts so glyph contours can be
+    /// extracted without re-reading font streams.
+    #[must_use]
+    pub fn for_rendering() -> Fonts {
+        Fonts {
+            keep_simple_faces: true,
             ..Fonts::default()
         }
     }
@@ -107,8 +121,7 @@ impl Fonts {
         let Some(dict) = dict else {
             return Ok(None);
         };
-        let mut read = self.read(objects, dict, limits, budget)?;
-        read.set_id(id);
+        let read = self.read_with_id(objects, dict, Some(id), limits, budget)?;
         Ok(Some(
             self.lock().entry(id).or_insert(Arc::new(read)).clone(),
         ))
@@ -138,7 +151,30 @@ impl Fonts {
     where
         O: Resolve<'o> + Streams + Copy,
     {
-        Font::read_as(objects, font, limits, budget, &mut (), !self.for_text)
+        self.read_with_id(objects, font, None, limits, budget)
+    }
+
+    fn read_with_id<'o, O>(
+        &self,
+        objects: O,
+        font: &'o Dict,
+        id: Option<ObjectId>,
+        limits: &Limits,
+        budget: &mut usize,
+    ) -> Result<Font, Error>
+    where
+        O: Resolve<'o> + Streams + Copy,
+    {
+        Font::read_full(
+            objects,
+            font,
+            id,
+            limits,
+            budget,
+            &mut (),
+            !self.for_text,
+            self.keep_simple_faces,
+        )
     }
 
     /// The fonts one interpretation of content picks.

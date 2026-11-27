@@ -99,6 +99,90 @@ impl VisibilityExpr {
     }
 }
 
+/// Usage event category (`/Event` on `/AS` dictionaries and `/Usage` keys,
+/// ISO 32000-2 §8.11.4.4 Tables 100–101).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OcEvent {
+    /// Interactive screen viewing (`/View` / `/ViewState`).
+    View,
+    /// Printing (`/Print` / `/PrintState`).
+    Print,
+    /// Exporting (`/Export` / `/ExportState`).
+    Export,
+}
+
+impl OcEvent {
+    /// Parses `/View`, `/Print`, or `/Export`.
+    #[must_use]
+    pub const fn from_name(name: &[u8]) -> Option<Self> {
+        match name {
+            b"View" => Some(Self::View),
+            b"Print" => Some(Self::Print),
+            b"Export" => Some(Self::Export),
+            _ => None,
+        }
+    }
+
+    /// Canonical PDF name bytes for this event (`b"View"`, `b"Print"`, `b"Export"`).
+    #[must_use]
+    pub const fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::View => b"View",
+            Self::Print => b"Print",
+            Self::Export => b"Export",
+        }
+    }
+}
+
+/// Optional content `/Usage` state overrides on an `/OCG` dictionary
+/// (ISO 32000-2 §8.11.4.4 Table 100).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct OcUsage {
+    /// `/Usage /View /ViewState` (`Some(true)` for `/ON`, `Some(false)` for `/OFF`).
+    pub view: Option<bool>,
+    /// `/Usage /Print /PrintState` (`Some(true)` for `/ON`, `Some(false)` for `/OFF`).
+    pub print: Option<bool>,
+    /// `/Usage /Export /ExportState` (`Some(true)` for `/ON`, `Some(false)` for `/OFF`).
+    pub export: Option<bool>,
+}
+
+impl OcUsage {
+    /// Returns the `/ON` (`true`) or `/OFF` (`false`) override for `event`, if present.
+    #[must_use]
+    pub const fn state_for(self, event: OcEvent) -> Option<bool> {
+        match event {
+            OcEvent::View => self.view,
+            OcEvent::Print => self.print,
+            OcEvent::Export => self.export,
+        }
+    }
+}
+
+/// Usage application dictionary from a configuration's `/AS` array
+/// (ISO 32000-2 §8.11.4.4 Table 101).
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OcUsageApp {
+    /// Triggering event (`/View`, `/Print`, or `/Export`).
+    pub event: OcEvent,
+    /// Optional content groups governed by this rule (`/OCGs`).
+    pub ocgs: Vec<ObjectId>,
+    /// Usage categories consulted (`/Category`, e.g. `View`, `Print`, `Export`).
+    pub categories: Vec<Box<[u8]>>,
+}
+
+impl fmt::Debug for OcUsageApp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OcUsageApp")
+            .field("event", &self.event)
+            .field("ocgs", &self.ocgs.len())
+            .field("categories", &self.categories.len())
+            .finish()
+    }
+}
+
 /// One optional content group (`/Type /OCG`, ISO 32000-2 §8.11.2.1 Table 96).
 ///
 /// Its `Debug` implementation reports `name`'s byte length and intent count.
@@ -111,6 +195,8 @@ pub struct Ocg {
     pub name: String,
     /// `/Intent` name(s) (`[b"View"]` when `/Intent` is absent, per Table 96).
     pub intents: Vec<Box<[u8]>>,
+    /// `/Usage` state overrides (`/ViewState`, `/PrintState`, `/ExportState`).
+    pub usage: OcUsage,
 }
 
 impl fmt::Debug for Ocg {
@@ -119,6 +205,7 @@ impl fmt::Debug for Ocg {
             .field("id", &self.id)
             .field("name", &Len(self.name.len()))
             .field("intents", &self.intents.len())
+            .field("usage", &self.usage)
             .finish()
     }
 }
@@ -170,6 +257,8 @@ pub struct OcConfig {
     pub locked: Vec<ObjectId>,
     /// `/Order` presentation hierarchy.
     pub order: Vec<OcOrderItem>,
+    /// `/AS` usage application dictionaries (ISO 32000-2 §8.11.4.4 Table 101).
+    pub usage_apps: Vec<OcUsageApp>,
 }
 
 impl fmt::Debug for OcConfig {
@@ -182,6 +271,7 @@ impl fmt::Debug for OcConfig {
             .field("off", &self.off.len())
             .field("locked", &self.locked.len())
             .field("order", &self.order.len())
+            .field("usage_apps", &self.usage_apps.len())
             .finish()
     }
 }
@@ -203,6 +293,49 @@ impl OcProperties {
     #[must_use]
     pub fn default_state(&self) -> OcState {
         self.state_for(&self.default_config)
+    }
+
+    /// Builds the active [`OcState`] from [`Self::default_config`] for `event`
+    /// (`View`, `Print`, or `Export`) under `rules`.
+    ///
+    /// - Under [`Rules::Iso`], `/Usage` state overrides are applied through matching
+    ///   `/AS` usage application dictionaries on `default_config` (ISO 32000-2 §8.11.4.4).
+    /// - Under [`Rules::Pdfium`], `/Usage` (`ViewState`, `PrintState`, `ExportState`)
+    ///   is applied directly for each group that declares it (`CPDF_OCContext`).
+    #[must_use]
+    pub fn default_state_for_event(&self, event: OcEvent, rules: Rules) -> OcState {
+        self.state_for_event(&self.default_config, event, rules)
+    }
+
+    /// Builds an [`OcState`] by applying `config` and `event` usage rules to [`Self::groups`].
+    #[must_use]
+    pub fn state_for_event(&self, config: &OcConfig, event: OcEvent, rules: Rules) -> OcState {
+        let mut state = self.state_for(config);
+        let usage_by_id: HashMap<ObjectId, OcUsage> =
+            self.groups.iter().map(|g| (g.id, g.usage)).collect();
+        match rules {
+            Rules::Iso => {
+                let cat_name = event.as_bytes();
+                for app in &config.usage_apps {
+                    if app.event == event && app.categories.iter().any(|c| c.as_ref() == cat_name) {
+                        for &gid in &app.ocgs {
+                            if let Some(on) = usage_by_id.get(&gid).and_then(|u| u.state_for(event))
+                            {
+                                state.set_ocg(gid, on);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                for g in &self.groups {
+                    if let Some(on) = g.usage.state_for(event) {
+                        state.set_ocg(g.id, on);
+                    }
+                }
+            }
+        }
+        state
     }
 
     /// Builds an [`OcState`] by applying `config` to [`Self::groups`].
@@ -597,7 +730,58 @@ fn read_ocg<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         },
         None => vec![Box::from(&b"View"[..])],
     };
-    Ok(Ocg { id, name, intents })
+    let usage = read_ocg_usage(objects, dict, Some(id), sink)?;
+    Ok(Ocg {
+        id,
+        name,
+        intents,
+        usage,
+    })
+}
+
+fn read_ocg_usage<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    objects: &R,
+    dict: &'o Dict,
+    within: Option<ObjectId>,
+    sink: &mut S,
+) -> Result<OcUsage, Unreadable> {
+    let Some(raw) = dict.get(b"Usage") else {
+        return Ok(OcUsage::default());
+    };
+    let Some((obj, uid)) = reached(objects, raw, within, sink)? else {
+        return Ok(OcUsage::default());
+    };
+    let Some(u_dict) = obj.as_dict() else {
+        say(sink, uid, obj.at(), Fault::OcWrongType { key: "Usage" });
+        return Ok(OcUsage::default());
+    };
+    let mut state_key = |sub_key: &[u8], st_key: &[u8]| -> Result<Option<bool>, Unreadable> {
+        let Some(sub_raw) = u_dict.get(sub_key) else {
+            return Ok(None);
+        };
+        let Some((sub_obj, sid)) = reached(objects, sub_raw, uid, sink)? else {
+            return Ok(None);
+        };
+        let Some(sub_dict) = sub_obj.as_dict() else {
+            return Ok(None);
+        };
+        let Some(st_raw) = sub_dict.get(st_key) else {
+            return Ok(None);
+        };
+        let Some((st_obj, _)) = reached(objects, st_raw, sid, sink)? else {
+            return Ok(None);
+        };
+        Ok(match st_obj.as_name() {
+            Some(b"ON") => Some(true),
+            Some(b"OFF") => Some(false),
+            _ => None,
+        })
+    };
+    Ok(OcUsage {
+        view: state_key(b"View", b"ViewState")?,
+        print: state_key(b"Print", b"PrintState")?,
+        export: state_key(b"Export", b"ExportState")?,
+    })
 }
 
 fn read_config<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
@@ -639,6 +823,7 @@ fn read_config<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         },
         None => Vec::new(),
     };
+    let usage_apps = read_usage_apps(objects, dict, within, sink)?;
 
     Ok(OcConfig {
         name,
@@ -648,7 +833,65 @@ fn read_config<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         off,
         locked,
         order,
+        usage_apps,
     })
+}
+
+fn read_usage_apps<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    objects: &R,
+    dict: &'o Dict,
+    within: Option<ObjectId>,
+    sink: &mut S,
+) -> Result<Vec<OcUsageApp>, Unreadable> {
+    let Some(raw) = dict.get(b"AS") else {
+        return Ok(Vec::new());
+    };
+    let Some((obj, aid)) = reached(objects, raw, within, sink)? else {
+        return Ok(Vec::new());
+    };
+    let Some(arr) = obj.as_array() else {
+        say(sink, aid, obj.at(), Fault::OcWrongType { key: "AS" });
+        return Ok(Vec::new());
+    };
+    let mut apps = Vec::new();
+    for item in arr {
+        let Some((app_obj, app_id)) = reached(objects, item, aid, sink)? else {
+            continue;
+        };
+        let Some(app_dict) = app_obj.as_dict() else {
+            say(sink, app_id, app_obj.at(), Fault::OcWrongType { key: "AS" });
+            continue;
+        };
+        let Some(ev_raw) = app_dict.get(b"Event") else {
+            continue;
+        };
+        let Some((ev_obj, _)) = reached(objects, ev_raw, app_id, sink)? else {
+            continue;
+        };
+        let Some(event) = ev_obj.as_name().and_then(OcEvent::from_name) else {
+            continue;
+        };
+        let ocgs = ref_array(objects, app_dict, app_id, "OCGs", sink)?;
+        let mut categories = Vec::new();
+        if let Some(cat_raw) = app_dict.get(b"Category")
+            && let Some((cat_obj, cid)) = reached(objects, cat_raw, app_id, sink)?
+            && let Some(cat_arr) = cat_obj.as_array()
+        {
+            for c_item in cat_arr {
+                if let Some((co, _)) = reached(objects, c_item, cid, sink)?
+                    && let Some(n) = co.as_name()
+                {
+                    categories.push(Box::from(n));
+                }
+            }
+        }
+        apps.push(OcUsageApp {
+            event,
+            ocgs,
+            categories,
+        });
+    }
+    Ok(apps)
 }
 
 fn read_order_array<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
@@ -937,5 +1180,66 @@ mod tests {
         let dbg = format!("{ocp:?}");
         assert!(!dbg.contains("Secret"), "{dbg}");
         assert!(!dbg.contains("Watermark"), "{dbg}");
+    }
+
+    #[test]
+    fn ocg_usage_respects_as_under_iso_and_applies_directly_under_pdfium() {
+        use super::OcEvent;
+
+        let g_print_as = ObjectId::new(20, 0);
+        let g_print_no_as = ObjectId::new(21, 0);
+        let objects = BTreeMap::from([
+            (
+                g_print_as,
+                Object::from(dict! {
+                    "Type" => Object::name("OCG"),
+                    "Name" => Object::text("Print Stamp"),
+                    "Usage" => dict! {
+                        "Print" => dict! { "PrintState" => Object::name("ON") },
+                    },
+                }),
+            ),
+            (
+                g_print_no_as,
+                Object::from(dict! {
+                    "Type" => Object::name("OCG"),
+                    "Name" => Object::text("Unlisted Print Layer"),
+                    "Usage" => dict! {
+                        "Print" => dict! { "PrintState" => Object::name("ON") },
+                    },
+                }),
+            ),
+        ]);
+        let catalog = dict! {
+            "OCProperties" => dict! {
+                "OCGs" => vec![Object::from(g_print_as), Object::from(g_print_no_as)],
+                "D" => dict! {
+                    "BaseState" => Object::name("OFF"),
+                    "AS" => vec![Object::from(dict! {
+                        "Event" => Object::name("Print"),
+                        "OCGs" => vec![Object::from(g_print_as)],
+                        "Category" => vec![Object::name("Print")],
+                    })],
+                },
+            },
+        };
+        let ocp = read(&objects, &catalog, Rules::Iso, &Limits::DEFAULT, &mut ())
+            .unwrap()
+            .unwrap();
+
+        // View: both OFF under both rules.
+        let iso_view = ocp.default_state_for_event(OcEvent::View, Rules::Iso);
+        assert!(!iso_view.is_ocg_on(g_print_as));
+        assert!(!iso_view.is_ocg_on(g_print_no_as));
+
+        // ISO Print: only `g_print_as` (listed in `/AS`) turns ON; `g_print_no_as` stays OFF!
+        let iso_print = ocp.default_state_for_event(OcEvent::Print, Rules::Iso);
+        assert!(iso_print.is_ocg_on(g_print_as));
+        assert!(!iso_print.is_ocg_on(g_print_no_as));
+
+        // PDFium Print: `/Usage /Print /PrintState /ON` turns BOTH groups ON directly!
+        let pdfium_print = ocp.default_state_for_event(OcEvent::Print, Rules::Pdfium);
+        assert!(pdfium_print.is_ocg_on(g_print_as));
+        assert!(pdfium_print.is_ocg_on(g_print_no_as));
     }
 }

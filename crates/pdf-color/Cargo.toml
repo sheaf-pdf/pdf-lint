@@ -6,13 +6,22 @@ rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sheaf-pdf/pdf-lint"
 documentation = "https://docs.rs/pdf-color"
-description = "PDF color space parser and component counter for ISO 32000-2 validation and PDFium compatibility"
+description = "PDF color space and function parser, component counter, and color evaluator for ISO 32000-2 and PDFium"
 keywords = ["pdf", "color", "color-space", "iso-32000", "pdfium"]
 categories = ["graphics", "multimedia::images"]
 # Only what users need, so local tooling files can't end up in the package.
 include = ["/src", "/README.md", "/CHANGELOG.md"]
 
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# Optional ICCBased and OutputIntents profile conversion via pure-Rust `moxcms`
+# (SIMD features left off so `unsafe_code = "forbid"` holds across the tree).
+icc = ["dep:moxcms"]
+
 [dependencies]
+moxcms = { version = "0.9", optional = true, default-features = false, features = ["any_to_any", "options"] }
 pdf-objects.workspace = true
 thiserror = "2"
 

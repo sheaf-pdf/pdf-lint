@@ -9,123 +9,13 @@
 //! Where qpdf departs from the spec, the spec: TIFF's predictor takes 1,
 //! 2, 4, 8 or 16 bits a sample.
 
-use std::borrow::Cow;
-
 use pdf_filters::{Filter, Layout, Predictor};
 use pdf_objects::object::{Dict, Object, ObjectId, Value};
-use pdf_objects::streams::{FilterStep, FilterTail};
-
-/// The most filters a stream may list, as qpdf allows: more is
-/// [`Unfiltered::Filters`]. A cap of the reader's own, not one of
-/// [`Limits`](crate::Limits)', so it's the same in every reading.
-pub const FILTERS: usize = 25;
-
-/// Why the reader doesn't decode a stream by its `/Filter` and
-/// `/DecodeParms`: what it doesn't take of them.
-/// Not exhaustive, as what the reader doesn't take of a stream's filters is
-/// found as it learns more of what files hold.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
-#[non_exhaustive]
-pub enum Unfiltered {
-    /// Its `/Filter` is neither a name nor an array.
-    #[error("its /Filter is neither a name nor an array")]
-    Filter,
-    /// Its `/Filter` is an array of more than names.
-    #[error("its /Filter's array isn't names")]
-    Names,
-    /// Its `/Filter` lists more filters than the reader takes, 25
-    /// ([`FILTERS`]).
-    #[error("its /Filter lists {count} filters, more than {max}", max = FILTERS)]
-    Filters {
-        /// How many it lists.
-        count: usize,
-    },
-    /// A filter the reader doesn't decode, by its name as written.
-    #[error("its filter /{} isn't one the reader decodes", lossy(.filter))]
-    Unsupported {
-        /// The filter's name.
-        filter: Vec<u8>,
-    },
-    /// Its `/DecodeParms` has an entry for a filter that takes none.
-    #[error("its /DecodeParms gives /{} parameters, which it takes none of", lossy(.filter))]
-    Unwanted {
-        /// The filter's name.
-        filter: Vec<u8>,
-    },
-    /// A filter's parameters the reader doesn't take, and why.
-    #[error("/{}'s {why}", lossy(.filter))]
-    Parameters {
-        /// The filter's name.
-        filter: Vec<u8>,
-        /// What it doesn't take of them.
-        why: Box<Unfiltered>,
-    },
-    /// Its `/DecodeParms` is an array of another length than its filters'.
-    #[error("its /DecodeParms has {entries} entries for {filters} filters")]
-    Entries {
-        /// How many entries `/DecodeParms` has.
-        entries: usize,
-        /// How many filters `/Filter` lists.
-        filters: usize,
-    },
-    /// A reference where references aren't followed: a cross-reference
-    /// stream's dictionary, whose values are direct (ISO 32000-2,
-    /// 7.5.8.2).
-    #[error(
-        "its /Filter or /DecodeParms holds a reference, which a cross-reference stream's may not"
-    )]
-    Reference,
-    /// A parameter that isn't an integer.
-    #[error("/{key} isn't an integer")]
-    Integer {
-        /// The parameter's key.
-        key: &'static str,
-    },
-    /// A `/Predictor` that isn't one.
-    #[error("/Predictor is {value}, not 1, 2 or 10 to 15")]
-    Predictor {
-        /// What it is.
-        value: i64,
-    },
-    /// A predictor's `/Colors`, `/BitsPerComponent` or `/Columns` that
-    /// isn't a count.
-    #[error("/{key} is {value}, not a count")]
-    Count {
-        /// The parameter's key.
-        key: &'static str,
-        /// What it is.
-        value: i64,
-    },
-    /// A predictor's `/Colors` or `/Columns` of 0.
-    #[error("/Colors or /Columns is 0")]
-    Zero,
-    /// A predictor's `/BitsPerComponent` that isn't 1, 2, 4, 8 or 16.
-    #[error("/BitsPerComponent is {bits}, not 1, 2, 4, 8 or 16")]
-    Bits {
-        /// What it is.
-        bits: u32,
-    },
-    /// An LZW filter's `/EarlyChange` that isn't 0 or 1.
-    #[error("/EarlyChange is {value}, not 0 or 1")]
-    EarlyChange {
-        /// What it is.
-        value: i64,
-    },
-    /// A `/Crypt` filter's parameters that aren't a dictionary.
-    #[error("parameters aren't a dictionary")]
-    NotADictionary,
-    /// A `/Crypt` filter's parameters with a key qpdf doesn't take.
-    #[error("parameters have /{}", lossy(.key))]
-    Key {
-        /// The key.
-        key: Vec<u8>,
-    },
-}
-
-/// Bytes, lossily as text, for [`Unfiltered`]'s text.
-fn lossy(bytes: &[u8]) -> Cow<'_, str> {
-    String::from_utf8_lossy(bytes)
-}
+pub use pdf_objects::streams::{FILTERS, Unfiltered};
+use pdf_objects::streams::{
+    FilterChainError, FilterPredictor, FilterTail, PredictorLayout, StandardFilter,
+    parse_filter_chain_with,
+};
 
 /// What follows a reference to the object it refers to, none for no
 /// object; or none where references aren't followed, as in a
@@ -158,17 +48,34 @@ impl FilterChain {
     }
 }
 
-/// Expands ISO 32000-2 §8.9.7 Table 92 inline filter abbreviations to their canonical names.
-fn expand_filter_name(name: &[u8]) -> &[u8] {
-    match name {
-        b"AHx" => b"ASCIIHexDecode",
-        b"A85" => b"ASCII85Decode",
-        b"LZW" => b"LZWDecode",
-        b"Fl" => b"FlateDecode",
-        b"RL" => b"RunLengthDecode",
-        b"CCF" => b"CCITTFaxDecode",
-        b"DCT" => b"DCTDecode",
-        other => other,
+fn to_pdf_predictor(pred: FilterPredictor) -> Predictor {
+    let to_layout = |l: PredictorLayout| Layout {
+        colors: l.colors,
+        bits_per_component: l.bits_per_component,
+        columns: l.columns,
+    };
+    match pred {
+        FilterPredictor::None => Predictor::None,
+        FilterPredictor::Tiff(l) => Predictor::Tiff(to_layout(l)),
+        FilterPredictor::Png(l) => Predictor::Png(to_layout(l)),
+    }
+}
+
+fn to_pdf_filter(step: StandardFilter) -> Filter {
+    match step {
+        StandardFilter::Flate { predictor } => Filter::Flate {
+            predictor: to_pdf_predictor(predictor),
+        },
+        StandardFilter::Lzw {
+            early_change,
+            predictor,
+        } => Filter::Lzw {
+            early_change,
+            predictor: to_pdf_predictor(predictor),
+        },
+        StandardFilter::AsciiHex => Filter::AsciiHex,
+        StandardFilter::Ascii85 => Filter::Ascii85,
+        StandardFilter::RunLength => Filter::RunLength,
     }
 }
 
@@ -202,78 +109,21 @@ pub(crate) fn chain_inner<'a>(
     dict: &'a Dict,
     resolve: Resolve<'_, 'a>,
 ) -> Result<(FilterChain, Option<&'a [u8]>), Unfiltered> {
-    let names: Vec<&'a [u8]> = match dict
-        .get(b"Filter")
-        .map(|o| resolved(o, resolve))
-        .transpose()?
-    {
-        None | Some(None) => Vec::new(),
-        Some(Some(filter)) => match filter.value() {
-            Value::Name(name) => vec![&name[..]],
-            Value::Array(array) => (array.iter())
-                .map(|o| Ok(resolved(o, resolve)?.and_then(Object::as_name)))
-                .collect::<Result<Option<_>, Unfiltered>>()?
-                .ok_or(Unfiltered::Names)?,
-            _ => return Err(Unfiltered::Filter),
-        },
+    let wrapped = resolve.map(|f| move |id| Ok::<_, core::convert::Infallible>(f(id)));
+    let resolver_ref = wrapped
+        .as_ref()
+        .map(|f| f as &dyn Fn(ObjectId) -> Result<Option<&'a Object>, core::convert::Infallible>);
+    let (parsed, raw_tail) = match parse_filter_chain_with(dict, resolver_ref) {
+        Ok(res) => res,
+        Err(FilterChainError::Resolve(never)) => match never {},
+        Err(FilterChainError::Unfiltered(u)) => return Err(u),
     };
-    if names.len() > FILTERS {
-        return Err(Unfiltered::Filters { count: names.len() });
-    }
-    let parms = parameters(dict, names.len(), resolve)?;
-    let mut standard = Vec::new();
-    let mut iter = names.into_iter().zip(parms);
-    while let Some((name, parms)) = iter.next() {
-        let none = |filter: Filter| match parms {
-            None => Ok(filter),
-            Some(_) => Err(Unfiltered::Unwanted {
-                filter: name.to_vec(),
-            }),
-        };
-        let named = |why: Unfiltered| Unfiltered::Parameters {
-            filter: name.to_vec(),
-            why: Box::new(why),
-        };
-        standard.push(match name {
-            b"FlateDecode" | b"Fl" => Filter::Flate {
-                predictor: predictor(parms, resolve).map_err(named)?,
-            },
-            b"LZWDecode" | b"LZW" => Filter::Lzw {
-                early_change: early_change(parms, resolve).map_err(named)?,
-                predictor: predictor(parms, resolve).map_err(named)?,
-            },
-            b"ASCIIHexDecode" | b"AHx" => none(Filter::AsciiHex)?,
-            b"ASCII85Decode" | b"A85" => none(Filter::Ascii85)?,
-            b"RunLengthDecode" | b"RL" => none(Filter::RunLength)?,
-            b"Crypt" => {
-                crypt(parms, resolve).map_err(named)?;
-                continue;
-            }
-            _ => {
-                let step = |raw: &'a [u8], p: Option<&'a Object>| {
-                    FilterStep::new(
-                        expand_filter_name(raw),
-                        p.and_then(Object::as_dict).cloned(),
-                    )
-                };
-                let first = step(name, parms);
-                let after = iter.map(|(raw, p)| step(raw, p)).collect();
-                return Ok((
-                    FilterChain {
-                        standard,
-                        tail: Some(FilterTail::new(first, after)),
-                    },
-                    Some(name),
-                ));
-            }
-        });
-    }
     Ok((
         FilterChain {
-            standard,
-            tail: None,
+            standard: parsed.standard.into_iter().map(to_pdf_filter).collect(),
+            tail: parsed.tail,
         },
-        None,
+        raw_tail,
     ))
 }
 
@@ -399,109 +249,12 @@ fn parameters<'a>(
     })
 }
 
-/// A parameter of `parms` that's an integer, resolved; none when it's
-/// absent or null, or `parms` isn't a dictionary.
-fn integer<'a>(
-    parms: Option<&'a Object>,
-    key: &'static str,
-    resolve: Resolve<'_, 'a>,
-) -> Result<Option<i64>, Unfiltered> {
-    let Some(Value::Dict(dict)) = parms.map(|o| o.value()) else {
-        return Ok(None);
-    };
-    let Some(value) = dict.get(key.as_bytes()) else {
-        return Ok(None);
-    };
-    match resolved(value, resolve)?.map(|o| o.value()) {
-        None => Ok(None),
-        Some(Value::Integer(n)) => Ok(Some(*n)),
-        Some(_) => Err(Unfiltered::Integer { key }),
-    }
-}
-
-/// What an LZW or Flate filter's `/Predictor`, `/Colors`,
-/// `/BitsPerComponent` and `/Columns` say, with the spec's defaults; a
-/// parameters value that isn't a dictionary, the defaults all, as in
-/// qpdf. The layout's values are integers, and with a predictor, a
-/// layout.
-fn predictor<'a>(
-    parms: Option<&'a Object>,
-    resolve: Resolve<'_, 'a>,
-) -> Result<Predictor, Unfiltered> {
-    let colors = integer(parms, "Colors", resolve)?;
-    let bits = integer(parms, "BitsPerComponent", resolve)?;
-    let columns = integer(parms, "Columns", resolve)?;
-    let png = match integer(parms, "Predictor", resolve)? {
-        None | Some(1) => return Ok(Predictor::None),
-        Some(2) => false,
-        Some(10..=15) => true,
-        Some(value) => return Err(Unfiltered::Predictor { value }),
-    };
-    let count = |key: &'static str, value: Option<i64>, default: u32| -> Result<u32, Unfiltered> {
-        match value {
-            None => Ok(default),
-            Some(n) => u32::try_from(n).map_err(|_| Unfiltered::Count { key, value: n }),
-        }
-    };
-    let layout = Layout {
-        colors: count("Colors", colors, 1)?,
-        bits_per_component: count("BitsPerComponent", bits, 8)?,
-        columns: count("Columns", columns, 1)?,
-    };
-    if layout.colors == 0 || layout.columns == 0 {
-        return Err(Unfiltered::Zero);
-    }
-    if !matches!(layout.bits_per_component, 1 | 2 | 4 | 8 | 16) {
-        let bits = layout.bits_per_component;
-        return Err(Unfiltered::Bits { bits });
-    }
-    Ok(match png {
-        true => Predictor::Png(layout),
-        false => Predictor::Tiff(layout),
-    })
-}
-
-/// An LZW filter's `/EarlyChange`: 1 by default, and 0 or 1.
-fn early_change<'a>(
-    parms: Option<&'a Object>,
-    resolve: Resolve<'_, 'a>,
-) -> Result<bool, Unfiltered> {
-    match integer(parms, "EarlyChange", resolve)? {
-        None | Some(1) => Ok(true),
-        Some(0) => Ok(false),
-        Some(value) => Err(Unfiltered::EarlyChange { value }),
-    }
-}
-
-/// Whether a `/Crypt` filter's parameters are ones qpdf takes: none, or
-/// a dictionary of `/Name` and `/Type /CryptFilterDecodeParms`, others
-/// null.
-fn crypt<'a>(parms: Option<&'a Object>, resolve: Resolve<'_, 'a>) -> Result<(), Unfiltered> {
-    let Some(parms) = parms else {
-        return Ok(());
-    };
-    let Value::Dict(dict) = parms.value() else {
-        return Err(Unfiltered::NotADictionary);
-    };
-    for (key, value) in dict.iter() {
-        let value = resolved(value, resolve)?;
-        let taken = match key {
-            b"Name" => true,
-            b"Type" => value.is_none_or(|v| v.as_name() == Some(b"CryptFilterDecodeParms")),
-            _ => value.is_none(),
-        };
-        if !taken {
-            return Err(Unfiltered::Key { key: key.to_vec() });
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use pdf_objects::dict;
+    use pdf_objects::streams::FilterStep;
 
     use super::*;
 

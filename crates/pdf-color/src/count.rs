@@ -233,7 +233,7 @@ enum Number32 {
 /// What PDFium's integer accessor reads of `object`, itself no reference: an
 /// integer as it holds it, past 31 bits with no sign wrapping to a negative; a
 /// real cut from its 32-bit float, saturating; `true` as 1; anything else 0.
-fn integer(object: &Object) -> i32 {
+pub(crate) fn integer(object: &Object) -> i32 {
     match object.value() {
         Value::Integer(n) => match held(*n) {
             Number32::Unsigned(n) => n as i32,

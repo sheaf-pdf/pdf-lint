@@ -9,13 +9,456 @@
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::String;
 #[cfg(target_has_atomic = "ptr")]
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
 use crate::object::{Data, Dict, Entry, Name, Object, ObjectId, Str, Value};
 use crate::{Resolve, Unreadable, Why};
+
+/// Maximum number of filters permitted in a single stream `/Filter` pipeline (matching `qpdf`).
+pub const FILTERS: usize = 25;
+
+/// Why a stream's `/Filter` and `/DecodeParms` pipeline cannot be decoded by standard filters.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum Unfiltered {
+    /// Its `/Filter` is neither a name nor an array.
+    #[error("its /Filter is neither a name nor an array")]
+    Filter,
+    /// Its `/Filter` is an array of more than names.
+    #[error("its /Filter's array isn't names")]
+    Names,
+    /// Its `/Filter` lists more filters than [`FILTERS`] (`25`).
+    #[error("its /Filter lists {count} filters, more than {max}", max = FILTERS)]
+    Filters {
+        /// How many it lists.
+        count: usize,
+    },
+    /// A filter the reader doesn't decode, by its name as written.
+    #[error("its filter /{} isn't one the reader decodes", lossy(.filter))]
+    Unsupported {
+        /// The filter's name.
+        filter: Vec<u8>,
+    },
+    /// Its `/DecodeParms` has an entry for a filter that takes none.
+    #[error("its /DecodeParms gives /{} parameters, which it takes none of", lossy(.filter))]
+    Unwanted {
+        /// The filter's name.
+        filter: Vec<u8>,
+    },
+    /// A filter's parameters the reader doesn't take, and why.
+    #[error("/{}'s {why}", lossy(.filter))]
+    Parameters {
+        /// The filter's name.
+        filter: Vec<u8>,
+        /// What it doesn't take of them.
+        why: Box<Unfiltered>,
+    },
+    /// Its `/DecodeParms` is an array of another length than its filters'.
+    #[error("its /DecodeParms has {entries} entries for {filters} filters")]
+    Entries {
+        /// How many entries `/DecodeParms` has.
+        entries: usize,
+        /// How many filters `/Filter` lists.
+        filters: usize,
+    },
+    /// A reference where references aren't followed (such as a cross-reference stream dictionary).
+    #[error(
+        "its /Filter or /DecodeParms holds a reference, which a cross-reference stream's may not"
+    )]
+    Reference,
+    /// A parameter that isn't an integer.
+    #[error("/{key} isn't an integer")]
+    Integer {
+        /// The parameter's key.
+        key: &'static str,
+    },
+    /// A `/Predictor` that isn't `1`, `2`, or `10..=15`.
+    #[error("/Predictor is {value}, not 1, 2 or 10 to 15")]
+    Predictor {
+        /// What it is.
+        value: i64,
+    },
+    /// A predictor's `/Colors`, `/BitsPerComponent`, or `/Columns` that isn't a `u32` count.
+    #[error("/{key} is {value}, not a count")]
+    Count {
+        /// The parameter's key.
+        key: &'static str,
+        /// What it is.
+        value: i64,
+    },
+    /// A predictor's `/Colors` or `/Columns` of `0`.
+    #[error("/Colors or /Columns is 0")]
+    Zero,
+    /// A predictor's `/BitsPerComponent` that isn't `1, 2, 4, 8, 16`.
+    #[error("/BitsPerComponent is {bits}, not 1, 2, 4, 8 or 16")]
+    Bits {
+        /// What it is.
+        bits: u32,
+    },
+    /// An LZW filter's `/EarlyChange` that isn't `0` or `1`.
+    #[error("/EarlyChange is {value}, not 0 or 1")]
+    EarlyChange {
+        /// What it is.
+        value: i64,
+    },
+    /// A `/Crypt` filter's parameters that aren't a dictionary.
+    #[error("parameters aren't a dictionary")]
+    NotADictionary,
+    /// A `/Crypt` filter's parameters with an unsupported key.
+    #[error("parameters have /{}", lossy(.key))]
+    Key {
+        /// The key.
+        key: Vec<u8>,
+    },
+}
+
+fn lossy(bytes: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
+}
+
+/// Predictor sample geometry parsed from `/DecodeParms` (ISO 32000-2, Table 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PredictorLayout {
+    /// Components per sample (`/Colors`, `>= 1`).
+    pub colors: u32,
+    /// Bits per component (`/BitsPerComponent`: `1, 2, 4, 8, 16`).
+    pub bits_per_component: u32,
+    /// Samples per row (`/Columns`, `>= 1`).
+    pub columns: u32,
+}
+
+/// Predictor mode parsed from `/DecodeParms` (ISO 32000-2, §7.4.4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FilterPredictor {
+    /// No prediction (`/Predictor 1` or omitted).
+    #[default]
+    None,
+    /// TIFF Predictor 2 (`/Predictor 2`).
+    Tiff(PredictorLayout),
+    /// PNG row prediction (`/Predictor 10..=15`).
+    Png(PredictorLayout),
+}
+
+/// Parsed standard PDF stream filter step (`/FlateDecode`, `/LZWDecode`, `/ASCIIHexDecode`,
+/// `/ASCII85Decode`, or `/RunLengthDecode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StandardFilter {
+    /// `FlateDecode` (`/Fl`).
+    Flate {
+        /// Optional TIFF/PNG predictor.
+        predictor: FilterPredictor,
+    },
+    /// `LZWDecode` (`/LZW`).
+    Lzw {
+        /// `/EarlyChange` (`true` by default).
+        early_change: bool,
+        /// Optional TIFF/PNG predictor.
+        predictor: FilterPredictor,
+    },
+    /// `ASCIIHexDecode` (`/AHx`).
+    AsciiHex,
+    /// `ASCII85Decode` (`/A85`).
+    Ascii85,
+    /// `RunLengthDecode` (`/RL`).
+    RunLength,
+}
+
+/// Parsed `/Filter` and `/DecodeParms` pipeline split into leading standard filters and optional
+/// non-standard tail.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ParsedFilterChain {
+    /// Leading standard filters (`/Crypt` validated and elided).
+    pub standard: Vec<StandardFilter>,
+    /// First non-standard filter and any filters listed after it.
+    pub tail: Option<FilterTail>,
+}
+
+/// Error returned by [`parse_filter_chain`] and [`parse_filter_chain_with`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterChainError<E> {
+    /// Indirect object lookup failed in the caller's resolver.
+    Resolve(E),
+    /// `/Filter` or `/DecodeParms` violated standard filter grammar.
+    Unfiltered(Unfiltered),
+}
+
+impl<E> From<Unfiltered> for FilterChainError<E> {
+    fn from(u: Unfiltered) -> Self {
+        Self::Unfiltered(u)
+    }
+}
+
+/// Expands ISO 32000-2 §8.9.7 Table 92 inline filter abbreviations to their canonical names.
+#[must_use]
+pub fn expand_filter_name(name: &[u8]) -> &[u8] {
+    match name {
+        b"AHx" => b"ASCIIHexDecode",
+        b"A85" => b"ASCII85Decode",
+        b"LZW" => b"LZWDecode",
+        b"Fl" => b"FlateDecode",
+        b"RL" => b"RunLengthDecode",
+        b"CCF" => b"CCITTFaxDecode",
+        b"DCT" => b"DCTDecode",
+        other => other,
+    }
+}
+
+/// Parses `dict`'s `/Filter` and `/DecodeParms` entries through [`Resolve::try_resolve`], stopping
+/// at the first non-standard filter.
+///
+/// # Errors
+///
+/// Returns [`FilterChainError::Resolve`] if [`Resolve::try_resolve`] fails, or
+/// [`FilterChainError::Unfiltered`] if `/Filter` or `/DecodeParms` is malformed.
+pub fn parse_filter_chain<'o, R: Resolve<'o> + Copy>(
+    objects: R,
+    dict: &'o Dict,
+) -> Result<(ParsedFilterChain, Option<&'o [u8]>), FilterChainError<Unreadable>> {
+    let resolver = |id: ObjectId| objects.try_resolve(id);
+    parse_filter_chain_with(dict, Some(&resolver))
+}
+
+/// Parses `dict`'s `/Filter` and `/DecodeParms` entries using an optional reference resolver
+/// (`None` rejects indirect references with [`Unfiltered::Reference`], as required for
+/// cross-reference stream dictionaries in ISO 32000-2 §7.5.8.2).
+///
+/// Returns `(chain, first_non_standard_raw_name)`.
+///
+/// # Errors
+///
+/// Returns [`FilterChainError::Resolve`] if `resolve` returns `Err`, or
+/// [`FilterChainError::Unfiltered`] if `/Filter` or `/DecodeParms` is malformed.
+pub fn parse_filter_chain_with<'a, E>(
+    dict: &'a Dict,
+    resolve: Option<&dyn Fn(ObjectId) -> Result<Option<&'a Object>, E>>,
+) -> Result<(ParsedFilterChain, Option<&'a [u8]>), FilterChainError<E>> {
+    let names: Vec<&'a [u8]> = match dict
+        .get(b"Filter")
+        .map(|o| chain_resolved(o, resolve))
+        .transpose()?
+    {
+        None | Some(None) => Vec::new(),
+        Some(Some(filter)) => match filter.value() {
+            Value::Name(name) => vec![&name[..]],
+            Value::Array(array) => (array.iter())
+                .map(|o| Ok(chain_resolved(o, resolve)?.and_then(Object::as_name)))
+                .collect::<Result<Option<_>, FilterChainError<E>>>()?
+                .ok_or(Unfiltered::Names)?,
+            _ => return Err(Unfiltered::Filter.into()),
+        },
+    };
+    if names.len() > FILTERS {
+        return Err(Unfiltered::Filters { count: names.len() }.into());
+    }
+    let parms = chain_parameters(dict, names.len(), resolve)?;
+    let mut standard = Vec::new();
+    let mut iter = names.into_iter().zip(parms);
+    while let Some((name, parms)) = iter.next() {
+        let none = |filter: StandardFilter| match parms {
+            None => Ok(filter),
+            Some(_) => Err(FilterChainError::Unfiltered(Unfiltered::Unwanted {
+                filter: name.to_vec(),
+            })),
+        };
+        standard.push(match name {
+            b"FlateDecode" | b"Fl" => StandardFilter::Flate {
+                predictor: map_filter_param(name, chain_predictor(parms, resolve))?,
+            },
+            b"LZWDecode" | b"LZW" => StandardFilter::Lzw {
+                early_change: map_filter_param(name, chain_early_change(parms, resolve))?,
+                predictor: map_filter_param(name, chain_predictor(parms, resolve))?,
+            },
+            b"ASCIIHexDecode" | b"AHx" => none(StandardFilter::AsciiHex)?,
+            b"ASCII85Decode" | b"A85" => none(StandardFilter::Ascii85)?,
+            b"RunLengthDecode" | b"RL" => none(StandardFilter::RunLength)?,
+            b"Crypt" => {
+                map_filter_param(name, chain_crypt(parms, resolve))?;
+                continue;
+            }
+            _ => {
+                let step = |raw: &'a [u8], p: Option<&'a Object>| {
+                    FilterStep::new(
+                        expand_filter_name(raw),
+                        p.and_then(Object::as_dict).cloned(),
+                    )
+                };
+                let first = step(name, parms);
+                let after = iter.map(|(raw, p)| step(raw, p)).collect();
+                return Ok((
+                    ParsedFilterChain {
+                        standard,
+                        tail: Some(FilterTail::new(first, after)),
+                    },
+                    Some(name),
+                ));
+            }
+        });
+    }
+    Ok((
+        ParsedFilterChain {
+            standard,
+            tail: None,
+        },
+        None,
+    ))
+}
+
+fn map_filter_param<T, E>(
+    filter: &[u8],
+    res: Result<T, FilterChainError<E>>,
+) -> Result<T, FilterChainError<E>> {
+    res.map_err(|e| match e {
+        FilterChainError::Resolve(r) => FilterChainError::Resolve(r),
+        FilterChainError::Unfiltered(why) => FilterChainError::Unfiltered(Unfiltered::Parameters {
+            filter: filter.to_vec(),
+            why: Box::new(why),
+        }),
+    })
+}
+
+fn chain_resolved<'a, E>(
+    mut o: &'a Object,
+    resolve: Option<&dyn Fn(ObjectId) -> Result<Option<&'a Object>, E>>,
+) -> Result<Option<&'a Object>, FilterChainError<E>> {
+    for _ in 0..8 {
+        match (o.value(), resolve) {
+            (Value::Ref(_), None) => return Err(Unfiltered::Reference.into()),
+            (Value::Ref(id), Some(resolve)) => {
+                match resolve(*id).map_err(FilterChainError::Resolve)? {
+                    Some(to) => o = to,
+                    None => return Ok(None),
+                }
+            }
+            (Value::Null, _) => return Ok(None),
+            _ => return Ok(Some(o)),
+        }
+    }
+    Ok(None)
+}
+
+fn chain_parameters<'a, E>(
+    dict: &'a Dict,
+    count: usize,
+    resolve: Option<&dyn Fn(ObjectId) -> Result<Option<&'a Object>, E>>,
+) -> Result<Vec<Option<&'a Object>>, FilterChainError<E>> {
+    let Some(parms) = dict.get(b"DecodeParms") else {
+        return Ok(vec![None; count]);
+    };
+    let Some(parms) = chain_resolved(parms, resolve)? else {
+        return Ok(vec![None; count]);
+    };
+    Ok(match parms.value() {
+        Value::Array(array) if array.is_empty() || count == 0 => vec![None; count],
+        Value::Array(array) if array.len() != count => {
+            return Err(Unfiltered::Entries {
+                entries: array.len(),
+                filters: count,
+            }
+            .into());
+        }
+        Value::Array(array) => (array.iter())
+            .map(|o| chain_resolved(o, resolve))
+            .collect::<Result<_, _>>()?,
+        _ => vec![Some(parms); count],
+    })
+}
+
+fn chain_integer<'a, E>(
+    parms: Option<&'a Object>,
+    key: &'static str,
+    resolve: Option<&dyn Fn(ObjectId) -> Result<Option<&'a Object>, E>>,
+) -> Result<Option<i64>, FilterChainError<E>> {
+    let Some(Value::Dict(dict)) = parms.map(Object::value) else {
+        return Ok(None);
+    };
+    let Some(value) = dict.get(key.as_bytes()) else {
+        return Ok(None);
+    };
+    match chain_resolved(value, resolve)?.map(Object::value) {
+        None => Ok(None),
+        Some(Value::Integer(n)) => Ok(Some(*n)),
+        Some(_) => Err(Unfiltered::Integer { key }.into()),
+    }
+}
+
+fn chain_predictor<'a, E>(
+    parms: Option<&'a Object>,
+    resolve: Option<&dyn Fn(ObjectId) -> Result<Option<&'a Object>, E>>,
+) -> Result<FilterPredictor, FilterChainError<E>> {
+    let colors = chain_integer(parms, "Colors", resolve)?;
+    let bits = chain_integer(parms, "BitsPerComponent", resolve)?;
+    let columns = chain_integer(parms, "Columns", resolve)?;
+    let png = match chain_integer(parms, "Predictor", resolve)? {
+        None | Some(1) => return Ok(FilterPredictor::None),
+        Some(2) => false,
+        Some(10..=15) => true,
+        Some(value) => return Err(Unfiltered::Predictor { value }.into()),
+    };
+    let count = |key: &'static str, value: Option<i64>, default: u32| -> Result<u32, Unfiltered> {
+        match value {
+            None => Ok(default),
+            Some(n) => u32::try_from(n).map_err(|_| Unfiltered::Count { key, value: n }),
+        }
+    };
+    let layout = PredictorLayout {
+        colors: count("Colors", colors, 1)?,
+        bits_per_component: count("BitsPerComponent", bits, 8)?,
+        columns: count("Columns", columns, 1)?,
+    };
+    if layout.colors == 0 || layout.columns == 0 {
+        return Err(Unfiltered::Zero.into());
+    }
+    if !matches!(layout.bits_per_component, 1 | 2 | 4 | 8 | 16) {
+        let bits = layout.bits_per_component;
+        return Err(Unfiltered::Bits { bits }.into());
+    }
+    Ok(if png {
+        FilterPredictor::Png(layout)
+    } else {
+        FilterPredictor::Tiff(layout)
+    })
+}
+
+fn chain_early_change<'a, E>(
+    parms: Option<&'a Object>,
+    resolve: Option<&dyn Fn(ObjectId) -> Result<Option<&'a Object>, E>>,
+) -> Result<bool, FilterChainError<E>> {
+    match chain_integer(parms, "EarlyChange", resolve)? {
+        None | Some(1) => Ok(true),
+        Some(0) => Ok(false),
+        Some(value) => Err(Unfiltered::EarlyChange { value }.into()),
+    }
+}
+
+fn chain_crypt<'a, E>(
+    parms: Option<&'a Object>,
+    resolve: Option<&dyn Fn(ObjectId) -> Result<Option<&'a Object>, E>>,
+) -> Result<(), FilterChainError<E>> {
+    let Some(parms) = parms else {
+        return Ok(());
+    };
+    let Value::Dict(dict) = parms.value() else {
+        return Err(Unfiltered::NotADictionary.into());
+    };
+    for (key, value) in dict.iter() {
+        let value = chain_resolved(value, resolve)?;
+        let taken = match key {
+            b"Name" => true,
+            b"Type" => value.is_none_or(|v| v.as_name() == Some(b"CryptFilterDecodeParms")),
+            _ => value.is_none(),
+        };
+        if !taken {
+            return Err(Unfiltered::Key { key: key.to_vec() }.into());
+        }
+    }
+    Ok(())
+}
 
 /// Stream payload decoded through all leading standard filters, paired with any trailing
 /// non-standard filters left for a caller's codec ([`Streams::decoded_standard`]).

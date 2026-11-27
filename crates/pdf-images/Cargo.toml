@@ -1,0 +1,63 @@
+[package]
+name = "pdf-images"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sheaf-pdf/pdf-lint"
+documentation = "https://docs.rs/pdf-images"
+description = "Zero-I/O PDF image XObject and inline image decoder, mask compositor, pixel scrubber, and clean stream re-encoder"
+keywords = ["pdf", "images", "jpeg", "jbig2", "jpeg2000"]
+categories = ["multimedia::images", "parser-implementations"]
+# Only what users need, so local tooling files can't end up in the package.
+include = ["/src", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+pdf-color.workspace = true
+pdf-content-streams.workspace = true
+pdf-filters = { workspace = true, features = ["miniz_oxide"] }
+pdf-objects.workspace = true
+hayro-ccitt = "0.5"
+hayro-jbig2 = { version = "0.4", default-features = false, features = ["std"] }
+hayro-jpeg2000 = { version = "0.5", default-features = false, features = ["std"] }
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
+zune-jpeg = { version = "0.5.15", default-features = false }
+thiserror = "2"
+tracing = { version = "0.1.41", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = []
+# Enables ICC profile evaluation (`ICCBased`, `/OutputIntents`, and embedded JP2
+# `colr` ICC profiles) via `pdf-color/icc` (`moxcms`).
+icc = ["pdf-color/icc"]
+# Enables runtime SIMD dispatch in the underlying JPEG, JBIG2, and JPEG 2000
+# decoders (`pdf-images` itself remains `#![forbid(unsafe_code)]`).
+simd = [
+    "zune-jpeg/std",
+    "zune-jpeg/x86",
+    "zune-jpeg/neon",
+    "hayro-jbig2/simd",
+    "hayro-jpeg2000/simd",
+]
+# Adds `zlib-rs` as an available Flate backend alongside `miniz_oxide`.
+zlib-rs = ["pdf-filters/zlib-rs"]
+# Emits numeric `debug`-level `tracing` spans (dimensions, byte counts, and IDs
+# only; never pixel data or file plaintext).
+tracing = ["dep:tracing", "pdf-content-streams/tracing"]
+
+[package.metadata.docs.rs]
+features = ["icc", "tracing"]
+
+[lib]
+bench = false
+
+[dev-dependencies]
+# Path-only dev-dependencies omitted from the published package manifest so
+# `pdf-images` packages cleanly over its zero-I/O library dependencies alone.
+pdf-fixtures = { path = "../pdf-fixtures" }
+pdf-structure = { path = "../pdf-structure" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

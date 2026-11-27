@@ -13,7 +13,7 @@ use pdf_content_streams::{
     TextMode,
 };
 use pdf_fonts::FontId;
-use pdf_objects::ObjectId;
+use pdf_objects::{Object, ObjectId};
 
 use crate::clip::Clip;
 use crate::geom::{Matrix, Point, Rect};
@@ -152,52 +152,7 @@ impl DashPattern {
     }
 }
 
-/// Colorimetric rendering intent (`ri` or `/ExtGState` `/RI`, ISO 32000-2
-/// §8.6.5.8).
-#[derive(Clone, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
-pub enum RenderingIntent {
-    /// `/AbsoluteColorimetric`.
-    AbsoluteColorimetric,
-    /// `/RelativeColorimetric` (initial default, ISO 32000-2 §8.4.1).
-    #[default]
-    RelativeColorimetric,
-    /// `/Saturation`.
-    Saturation,
-    /// `/Perceptual`.
-    Perceptual,
-    /// Non-standard rendering intent name.
-    Other(Arc<[u8]>),
-}
-
-impl RenderingIntent {
-    /// Parses a rendering intent from its decoded PDF name bytes.
-    #[must_use]
-    pub fn from_name(name: &[u8]) -> Self {
-        match name {
-            b"AbsoluteColorimetric" => Self::AbsoluteColorimetric,
-            b"RelativeColorimetric" => Self::RelativeColorimetric,
-            b"Saturation" => Self::Saturation,
-            b"Perceptual" => Self::Perceptual,
-            other => Self::Other(Arc::from(other)),
-        }
-    }
-}
-
-impl fmt::Debug for RenderingIntent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AbsoluteColorimetric => f.write_str("AbsoluteColorimetric"),
-            Self::RelativeColorimetric => f.write_str("RelativeColorimetric"),
-            Self::Saturation => f.write_str("Saturation"),
-            Self::Perceptual => f.write_str("Perceptual"),
-            Self::Other(name) => f
-                .debug_struct("Other")
-                .field("name_len", &name.len())
-                .finish(),
-        }
-    }
-}
+pub use pdf_color::RenderingIntent;
 
 /// Transparency blend mode in the graphics state (`/ExtGState` `/BM`,
 /// ISO 32000-2 §11.3.5).
@@ -294,6 +249,35 @@ pub enum SoftMask {
     },
 }
 
+/// Parameters captured when `gs` sets a soft-mask dictionary (`/ExtGState`
+/// `/SMask`, ISO 32000-2 §11.6.5.1).
+///
+/// Its `Debug` implementation omits raw `/TR` object contents.
+#[derive(Clone, PartialEq)]
+#[non_exhaustive]
+pub struct SoftMaskParams {
+    /// Optional backdrop color (`/BC`) on the `/SMask` dictionary, in the
+    /// soft-mask transparency group's color space.
+    pub backdrop: Option<ColorValues>,
+    /// Optional transfer function (`/TR`) on the `/SMask` dictionary (`None`
+    /// when absent, `/Identity`, or `/Default`; may be an indirect
+    /// [`Object::as_reference`] requiring resolution via [`pdf_objects::Resolve`]).
+    pub transfer: Option<Arc<Object>>,
+    /// Current transformation matrix (`State::ctm`) in effect when `gs` set
+    /// this soft mask (ISO 32000-2 §11.6.5.1).
+    pub ctm: Matrix,
+}
+
+impl fmt::Debug for SoftMaskParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SoftMaskParams")
+            .field("backdrop", &self.backdrop)
+            .field("has_transfer", &self.transfer.is_some())
+            .field("ctm", &self.ctm)
+            .finish()
+    }
+}
+
 /// Complete graphics and text state at an [`Event`](crate::Event), saved by `q`
 /// and restored by `Q`.
 #[derive(Clone, PartialEq)]
@@ -341,6 +325,9 @@ pub struct State {
     pub blend_mode: BlendState,
     /// Active soft mask (`/ExtGState` `/SMask`; default [`SoftMask::None`]).
     pub soft_mask: SoftMask,
+    /// Backdrop, transfer function, and CTM captured when `gs` set
+    /// [`State::soft_mask`] (`None` when [`SoftMask::None`]).
+    pub soft_mask_params: Option<SoftMaskParams>,
     /// Stroking overprint flag (`/ExtGState` `/OP`; default `false`).
     pub stroke_overprint: bool,
     /// Nonstroking (fill) overprint flag (`/ExtGState` `/op`, falling back to
@@ -383,6 +370,7 @@ impl fmt::Debug for State {
             .field("text_knockout", &self.text_knockout)
             .field("blend_mode", &self.blend_mode)
             .field("soft_mask", &self.soft_mask)
+            .field("soft_mask_params", &self.soft_mask_params)
             .field("stroke_overprint", &self.stroke_overprint)
             .field("fill_overprint", &self.fill_overprint)
             .field("overprint_mode", &self.overprint_mode)
@@ -476,6 +464,7 @@ impl Default for State {
             text_knockout: true,
             blend_mode: BlendState::default(),
             soft_mask: SoftMask::None,
+            soft_mask_params: None,
             stroke_overprint: false,
             fill_overprint: false,
             overprint_mode: 0,
@@ -500,8 +489,16 @@ impl State {
     /// Initial state inside a Form XObject (`CPDF_StreamContentParser::AddForm`),
     /// carrying general, graph, color, and `CPDF_TextState` fields from `self`
     /// while resetting `Tz`, `TL`, `Ts`, `matrix`, `line`, and `pen`, setting
-    /// `ctm` to `matrix`, and intersecting `clip` with `bbox` (if any).
-    pub(crate) fn form(&self, matrix: Matrix, bbox: Option<Rect>) -> State {
+    /// `ctm` to `matrix`, intersecting `clip` with `bbox` (if any), and—when
+    /// `is_transparency_group` is `true`—resetting `stroke_alpha` (`CA`),
+    /// `fill_alpha` (`ca`), `blend_mode` (`BM`), and `soft_mask` (`SMask`) to
+    /// their initial transparency defaults per ISO 32000-2 §11.4.7 / §11.6.6.
+    pub(crate) fn form(
+        &self,
+        matrix: Matrix,
+        bbox: Option<Rect>,
+        is_transparency_group: bool,
+    ) -> State {
         let clip = match bbox {
             // Order of corners matches PDFium's `CFX_Path::AppendRect`.
             Some(r) => {
@@ -529,6 +526,13 @@ impl State {
         let mut out = self.clone();
         out.ctm = matrix;
         out.clip = clip;
+        if is_transparency_group {
+            out.stroke_alpha = 1.0;
+            out.fill_alpha = 1.0;
+            out.blend_mode = BlendState::default();
+            out.soft_mask = SoftMask::None;
+            out.soft_mask_params = None;
+        }
         out.text = TextState {
             font: self.text.font,
             stock: self.text.stock,

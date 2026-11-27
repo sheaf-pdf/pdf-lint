@@ -39,6 +39,22 @@ pub struct Limits {
     /// as many again of its own, so a sink that wants faults reads the same
     /// space as `()`.
     pub space_visits: usize,
+    /// Maximum decoded byte length read from any single stream (`ICCBased`
+    /// profile stream, `Indexed` lookup stream, `Type 0` sampled function
+    /// stream, or `Type 4` PostScript calculator stream): 16 MiB by default.
+    pub stream_bytes: usize,
+    /// Maximum unpacked `f32` sample values (`outputs * prod(Size)`) held for a
+    /// `Type 0` sampled function: 4,194,304 (16 MiB of `f32`s) by default, so a
+    /// tiny compressed 1-bit stream with a huge `/Size` cannot allocate
+    /// unbounded memory.
+    pub sample_values: usize,
+    /// Maximum tokens parsed and maximum operations executed per `Type 4`
+    /// PostScript calculator invocation: 4,096 by default.
+    pub postscript_ops: usize,
+    /// Maximum operand stack depth in a `Type 4` PostScript calculator
+    /// function: 100 by default (matching PostScript / PDFium's operand stack
+    /// limit).
+    pub postscript_stack: usize,
 }
 
 impl Limits {
@@ -46,6 +62,10 @@ impl Limits {
     pub const DEFAULT: Limits = Limits {
         space_depth: 64,
         space_visits: 4096,
+        stream_bytes: 16 * 1024 * 1024,
+        sample_values: 4 * 1024 * 1024,
+        postscript_ops: 4096,
+        postscript_stack: 100,
     };
 }
 

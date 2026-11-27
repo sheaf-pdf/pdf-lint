@@ -192,14 +192,42 @@ mod tests {
             let page = pages.get(0).unwrap();
             assert!(page.fonts().unwrap().is_empty());
             assert!(page.text().unwrap().strings.is_empty());
+            assert!(page.images().unwrap().is_empty());
+            page.encode().unwrap();
         });
         let read = [
-            ("pages", DEBUG, vec!["pdfium"]),
             ("fonts", DEBUG, vec![]),
             ("text", DEBUG, vec![]),
             ("content", DEBUG, vec![]),
+            ("images", DEBUG, vec![]),
+            ("interpret", DEBUG, vec![]),
+            ("encode", DEBUG, vec![]),
         ];
         assert_eq!(named(&made), read);
+        let made = spans(|| {
+            let mut sink = Vec::new();
+            let _ = pdf.pages_with(&mut sink).unwrap();
+        });
+        assert_eq!(named(&made), [("pages", DEBUG, vec!["pdfium"])]);
+        #[cfg(feature = "images")]
+        {
+            let made = spans(|| {
+                let pages = pdf.pages().unwrap();
+                let page = pages.get(0).unwrap();
+                let _ = page.decode_image(ObjectId::new(99, 0));
+            });
+            assert_eq!(named(&made), [("decode_image", DEBUG, vec![])]);
+        }
+        #[cfg(feature = "raster")]
+        {
+            let made = spans(|| {
+                let pages = pdf.pages().unwrap();
+                let page = pages.get(0).unwrap();
+                page.render_pixmap(&pdf_raster::RenderOpts::page_width(16))
+                    .unwrap();
+            });
+            assert_eq!(named(&made), [("render", DEBUG, vec![])]);
+        }
         let made = spans(|| {
             assert_eq!(pdf.info().unwrap(), None);
             assert_eq!(pdf.claims().unwrap(), None);

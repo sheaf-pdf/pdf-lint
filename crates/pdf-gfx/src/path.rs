@@ -64,6 +64,10 @@ pub struct PathDrawn<'e> {
     /// degenerate closed zero-area rectangle at PageSpace's origin so nothing
     /// subsequent is visible.
     pub segments: &'e [Seg],
+    /// Segments in user space immediately before transformation by the CTM at
+    /// the painting operator (used by rasterizers so strokes and dash patterns
+    /// apply in user space before CTM transformation per ISO 32000-2 §8.4.3).
+    pub user_segments: &'e [Seg],
     /// How the path is painted (`Paint::None` when `n` ends a clipping path).
     pub paint: Paint,
     /// Clipping rule set by a preceding `W` or `W*` on this path, if any.
@@ -86,6 +90,9 @@ const KEPT_SEGMENTS: usize = 1 << 16;
 #[derive(Debug)]
 pub(crate) struct Builder {
     segs: Vec<Seg>,
+    /// User-space output slice preserved alongside `placed` without per-path
+    /// allocation.
+    user: Vec<Seg>,
     /// Double-buffered output slice in PageSpace so path emission does not
     /// allocate per path.
     placed: Vec<Seg>,
@@ -97,6 +104,7 @@ pub(crate) struct Builder {
 
 pub(crate) struct Ended<'a> {
     pub(crate) segs: &'a [Seg],
+    pub(crate) user_segs: &'a [Seg],
     pub(crate) paint: Paint,
     pub(crate) clip: Option<FillRule>,
     pub(crate) points: Rect,
@@ -107,6 +115,7 @@ impl Default for Builder {
     fn default() -> Self {
         Self {
             segs: Vec::new(),
+            user: Vec::new(),
             placed: Vec::new(),
             start: Point::ZERO,
             current: Point::ZERO,
@@ -275,52 +284,56 @@ impl Builder {
             Paint::CloseFillStrokeEvenOdd => self.close_to(self.start),
             _ => {}
         }
-        std::mem::swap(&mut self.segs, &mut self.placed);
+        std::mem::swap(&mut self.segs, &mut self.user);
         self.segs.clear();
         self.segs.shrink_to(KEPT_SEGMENTS);
-        let segs = &mut self.placed;
+        let user_segs = &mut self.user;
         let clip = self.clip.take();
-        if segs.is_empty() {
+        if user_segs.is_empty() {
             return None;
         }
-        if segs.iter().map(|s| s.points().count()).sum::<usize>() == 1 {
+        if user_segs.iter().map(|s| s.points().count()).sum::<usize>() == 1 {
             if clip.is_some() {
-                segs.clear();
-                segs.push(Seg::Move(Point::ZERO));
-                segs.extend([Seg::Line(Point::ZERO); 4]);
-                segs.push(Seg::Close);
+                user_segs.clear();
+                user_segs.push(Seg::Move(Point::ZERO));
+                user_segs.extend([Seg::Line(Point::ZERO); 4]);
+                user_segs.push(Seg::Close);
+                self.placed.clear();
+                self.placed.extend_from_slice(user_segs);
                 return Some(Ended {
-                    segs,
+                    segs: &self.placed,
+                    user_segs,
                     paint: Paint::None,
                     clip: Some(FillRule::NonZero),
                     points: Rect::default(),
                     bounds: Rect::default(),
                 });
             }
-            let [Seg::Move(p), Seg::Close] = segs[..] else {
+            let [Seg::Move(p), Seg::Close] = user_segs[..] else {
                 return None;
             };
             if state.line_cap != LineCap::Round {
                 return None;
             }
-            segs.clear();
-            segs.extend([Seg::Move(p), Seg::Line(p), Seg::Close]);
+            user_segs.clear();
+            user_segs.extend([Seg::Move(p), Seg::Line(p), Seg::Close]);
         }
-        if matches!(segs.last(), Some(Seg::Move(_))) {
-            segs.pop();
+        if matches!(user_segs.last(), Some(Seg::Move(_))) {
+            user_segs.pop();
         }
         if !paint.strokes() && paint.fills().is_none() && clip.is_none() {
             return None;
         }
         let m = state.ctm;
-        for seg in segs.iter_mut() {
-            *seg = match *seg {
-                Seg::Move(p) => Seg::Move(m.apply(p)),
-                Seg::Line(p) => Seg::Line(m.apply(p)),
-                Seg::Curve(a, b, p) => Seg::Curve(m.apply(a), m.apply(b), m.apply(p)),
-                Seg::Close => Seg::Close,
-            };
-        }
+        self.placed.clear();
+        self.placed.shrink_to(KEPT_SEGMENTS);
+        self.placed.extend(user_segs.iter().map(|&seg| match seg {
+            Seg::Move(p) => Seg::Move(m.apply(p)),
+            Seg::Line(p) => Seg::Line(m.apply(p)),
+            Seg::Curve(a, b, p) => Seg::Curve(m.apply(a), m.apply(b), m.apply(p)),
+            Seg::Close => Seg::Close,
+        }));
+        let segs = &self.placed;
         let points = bounds(segs);
         let bounds = if paint.strokes() {
             stroked(points, segs, state)
@@ -329,6 +342,7 @@ impl Builder {
         };
         Some(Ended {
             segs,
+            user_segs,
             paint,
             clip,
             points,

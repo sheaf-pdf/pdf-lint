@@ -188,7 +188,7 @@ pub use path::{PathDrawn, Seg};
 pub use program::ProgramFont;
 pub use state::{
     ActiveColorSpace, BlendState, ColorValues, DashPattern, RenderingIntent, SoftMask,
-    SoftMaskKind, State, TextState,
+    SoftMaskKind, SoftMaskParams, State, TextState,
 };
 pub use text::{Glyph, Glyphs, TextShow};
 #[cfg(feature = "text-layout")]
@@ -197,7 +197,7 @@ pub use wrap::{
     TextBoxError, TextBoxStyle, UnencodableChar, VerticalAlign, WithFallback, WrapMode, face_for,
     layout_text,
 };
-pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, UseId};
+pub use xobject::{FormUse, ImageDrawn, ImageOf, Refused, ShadingDrawn, TransparencyGroup, UseId};
 
 /// The README's examples, run as doctests.
 #[cfg(doctest)]

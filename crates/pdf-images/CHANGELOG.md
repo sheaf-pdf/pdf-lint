@@ -1,0 +1,13 @@
+# Changelog
+
+## 0.1.0-alpha.1 (unreleased)
+
+First release. It's an alpha: any alpha may change the API, and each entry here says what changed and how to update. Depend on the exact version, `=0.1.0-alpha.1`; a plain `0.1.0-alpha.1` lets cargo take later alphas too.
+
+### Added
+
+- **Two-tier zero-I/O image decoding (`RawImage` and `RgbaImage`).** Decodes indirect Image XObjects (`decode_xobject_raw`, `decode_xobject`), in-memory streams (`decode_stream_raw`, `decode_stream`), and inline images (`decode_inline_raw`, `decode_inline`) over `pdf_objects::{Resolve, Streams}` under explicit `Limits` and `Rules::Iso` / `Rules::Pdfium` (`as of chromium/8152`) policies, reporting recoverable spec departures to any `fault::Sink<Fault>` at zero cost when `()` is passed.
+- **Standard filters and image codecs (`ImageCodec`).** Unpacks `1, 2, 4, 8, 16` bpc raw and standard-filtered (`FlateDecode`, `LZWDecode`, `ASCII85Decode`, `ASCIIHexDecode`, `RunLengthDecode`) streams, `DCTDecode` (`zune-jpeg`, including grayscale, RGB, YCbCr, CMYK, and Adobe `APP14` YCCK with `/ColorTransform`), `CCITTFaxDecode` (`hayro-ccitt`, Group 3 1D/2D and Group 4 MMR), `JBIG2Decode` (`hayro-jbig2`, including indirect `/JBIG2Globals`), and `JPXDecode` (`hayro-jpeg2000`, `1..=16` bit depths rescaled to PDF `1, 2, 4, 8, 16` bpc, embedded JP2 color spaces, and `/SMaskInData`).
+- **Color evaluation and mask compositing (`DecodeOptions`).** Evaluates colors through `pdf-color`'s `PreparedSpace` (including `/DefaultGray`, `/DefaultRGB`, `/DefaultCMYK`, and optional `icc` profiles), colors `/ImageMask` stencils, and composites explicit stencil `/Mask` streams, pre-`/Decode` integer color-key `/Mask` arrays, `/SMask` soft-mask streams with ISO and PDFium `/Matte` un-premultiplication, and `JPXDecode` `/SMaskInData` opacity channels into straight-alpha `RGBA8`.
+- **Native-space pixel scrubbing and clean re-encoding (`RawImage::fill_rect_raw`, `RawImage::fill_rect_decoded`, `encode_raw_flate`, `encode_rgba_flate`, `encode_jpeg`).** Scrubs rectangular regions in native sample space (rejecting color-key-transparent fills via `ScrubError`) and re-encodes streams cleanly with `FlateDecode` + PNG `Sub` prediction or pure-Rust baseline `DCTDecode` (`jpeg-encoder`) without carrying over EXIF, XMP, IPTC, comment segments, or JBIG2 symbol dictionaries.
+- **Re-exports and features.** Re-exports `pdf-objects`, `pdf-color`, `pdf-filters`, and `pdf-content-streams` at matching versions; optional features `icc`, `simd`, `zlib-rs`, and `tracing` (`#![forbid(unsafe_code)]`, Rust 1.92).

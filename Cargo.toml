@@ -10,9 +10,10 @@ resolver = "3"
 # then leaves out. pdfs, which takes every crate in the table but
 # pdf-arlington, is required by none, so it isn't in the table itself.
 # pdf-fixtures, the tests' file writer and qpdf, is never published: a crate
-# whose tests use it takes it by its path alone, a dev-dependency. Nor is
-# pdf-linearize-lopdf, the lopdf adapter, which no member depends on.
-# Nothing else is inherited from here.
+# whose tests use it takes it by its path alone, a dev-dependency. Neither is
+# pdf-raster-oracle, the visual/ISO conformance rubric and live PDFium test
+# runner, nor pdf-linearize-lopdf, the lopdf adapter, which no member depends
+# on. Nothing else is inherited from here.
 members = [
     "crates/pdf-tokenizer",
     "crates/pdf-filters",
@@ -23,10 +24,13 @@ members = [
     "crates/pdf-content-streams",
     "crates/pdf-semantics",
     "crates/pdf-color",
+    "crates/pdf-images",
     "crates/pdf-fonts",
     "crates/pdf-gfx",
     "crates/pdf-annots",
     "crates/pdf-forms",
+    "crates/pdf-raster",
+    "crates/pdf-raster-oracle",
     "crates/pdf-linearize",
     "crates/pdf-linearize-lopdf",
     "crates/pdfs",
@@ -38,23 +42,24 @@ exclude = ["fuzz"]
 
 # Each crate by its path here and the version its dependents require once
 # published: pdf-tokenizer's by caret; pdf-objects', pdf-filters',
-# pdf-crypt's, pdf-structure's, pdf-color's, pdf-content-streams',
-# pdf-semantics', pdf-fonts', pdf-linearize's and pdf-arlington's exactly,
+# pdf-crypt's, pdf-structure's, pdf-color's, pdf-images',
+# pdf-content-streams', pdf-semantics', pdf-fonts', pdf-gfx's, pdf-annots',
+# pdf-forms', pdf-raster's, pdf-linearize's and pdf-arlington's exactly,
 # as an alpha promises nothing of the next, and a requirement matches a
 # pre-release only where it names one. A crate some member takes without its
 # default features has them off here, as an older cargo (1.85's) refused a
 # member's `default-features = false` over an entry that leaves them on, and
 # every member that takes it names the features it takes: pdf-filters', its
-# Flate backend; pdf-semantics' and pdf-fonts', none here, as pdf-lint and
+# Flate backend; pdf-images', pdf-semantics', pdf-fonts', pdf-gfx's,
+# pdf-annots', pdf-forms' and pdf-raster's, none here, as pdf-lint and
 # pdf-linearize take neither the clock nor a font's program nor a predefined
 # CMap, and pdfs turns them on through features of its own; pdf-linearize's,
 # `family`, as the lopdf adapter's crate takes the engine alone. A
 # dev-dependency on a crate here that isn't on crates.io yet is by its path
 # alone, as pdf-color's, pdf-semantics' and pdf-fonts' on pdf-structure are,
 # which the dependent's package then leaves out, so that it can be published
-# first; pdf-linearize's on pdf-structure is through this table, as it
-# depends on pdf-structure anyway and is published after it, so its package
-# keeps it.
+# first; pdf-images', pdf-raster's and pdf-linearize's on pdf-structure are
+# through this table, as they are published after pdf-structure.
 [workspace.dependencies]
 pdf-tokenizer = { path = "crates/pdf-tokenizer", version = "0.2" }
 pdf-objects = { path = "crates/pdf-objects", version = "=0.1.0-alpha.3" }
@@ -62,12 +67,14 @@ pdf-filters = { path = "crates/pdf-filters", version = "=0.1.0-alpha.3", default
 pdf-crypt = { path = "crates/pdf-crypt", version = "=0.1.0-alpha.3" }
 pdf-structure = { path = "crates/pdf-structure", version = "=0.1.0-alpha.1" }
 pdf-color = { path = "crates/pdf-color", version = "=0.1.0-alpha.2" }
+pdf-images = { path = "crates/pdf-images", version = "=0.1.0-alpha.1", default-features = false }
 pdf-content-streams = { path = "crates/pdf-content-streams", version = "=0.1.0-alpha.1" }
 pdf-semantics = { path = "crates/pdf-semantics", version = "=0.1.0-alpha.1", default-features = false }
 pdf-fonts = { path = "crates/pdf-fonts", version = "=0.1.0-alpha.1", default-features = false }
 pdf-gfx = { path = "crates/pdf-gfx", version = "=0.1.0-alpha.1", default-features = false }
 pdf-annots = { path = "crates/pdf-annots", version = "=0.1.0-alpha.1", default-features = false }
 pdf-forms = { path = "crates/pdf-forms", version = "=0.1.0-alpha.1", default-features = false }
+pdf-raster = { path = "crates/pdf-raster", version = "=0.1.0-alpha.1", default-features = false }
 pdf-linearize = { path = "crates/pdf-linearize", version = "=0.1.0-alpha.1", default-features = false }
 pdf-arlington = { path = "crates/pdf-arlington", version = "=0.1.0-alpha.1" }
 
@@ -131,6 +138,14 @@ opt-level = 3
 # a second.
 [profile.dev.package.pdf-content-streams]
 opt-level = 1
+
+# Fine-strip 2D rasterization (`vello_cpu`) built optimized in dev/test runs so
+# page and PDFium rubric renders complete in milliseconds.
+[profile.dev.package.vello_cpu]
+opt-level = 2
+
+[profile.dev.package.vello_common]
+opt-level = 2
 
 # The checker's binary is built with thin LTO, across the crates it's made
 # of, which takes back what splitting it into them cost. Said twice: here,

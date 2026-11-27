@@ -240,6 +240,205 @@ impl<'a, 'o> IntoIterator for &'a Pages<'o> {
     }
 }
 
+/// Owned, resolver-independent snapshot of a walked [`Pages`] table.
+///
+/// Indirect page dictionaries and indirect inheritable attributes are stored by
+/// [`ObjectId`] (avoiding deep clones of `/Resources` dictionaries) while
+/// direct/inline values are retained in place, so callers such as `pdfs::Pdf`
+/// can cache the walked page tree once (`Send + Sync`, `#![forbid(unsafe_code)]`)
+/// and re-bind [`Page`] or [`Pages`] views in `O(1)` / `O(N)` without
+/// re-walking `/Kids` or `/Parent` chains.
+#[derive(Debug, Clone)]
+pub struct PageTable {
+    pages: Vec<CachedPage>,
+    counted: usize,
+}
+
+#[derive(Debug, Clone)]
+enum StoredDict {
+    Indirect(ObjectId),
+    Inline(Box<Dict>),
+}
+
+#[derive(Debug, Clone)]
+enum StoredObject {
+    Indirect(ObjectId),
+    Scalar(Object),
+    Inline(Box<Object>),
+}
+
+#[derive(Debug, Clone)]
+struct StoredAttribute {
+    written: StoredObject,
+    value: StoredObject,
+    origin: Origin,
+}
+
+#[derive(Debug, Clone)]
+struct CachedPage {
+    id: Option<ObjectId>,
+    dict: Option<StoredDict>,
+    repeat: u32,
+    parent: Option<Arc<Parent>>,
+    attributes: [Option<StoredAttribute>; 4],
+    media_box: Sourced<PdfBox>,
+    crop_box: Sourced<PdfBox>,
+    rotate: Sourced<i64>,
+    user_unit: Sourced<f64>,
+}
+
+impl StoredDict {
+    fn from_page<'o, R: Resolve<'o>>(objects: R, id: Option<ObjectId>, dict: &'o Dict) -> Self {
+        if let Some(oid) = id
+            && let Some(rd) = objects.resolve(oid).and_then(Object::as_dict)
+            && std::ptr::eq(rd, dict)
+        {
+            return Self::Indirect(oid);
+        }
+        Self::Inline(Box::new(dict.clone()))
+    }
+
+    fn bind<'o, R: Resolve<'o>>(&'o self, objects: R) -> Option<&'o Dict> {
+        match self {
+            Self::Indirect(oid) => objects.resolve(*oid).and_then(Object::as_dict),
+            Self::Inline(dict) => Some(dict.as_ref()),
+        }
+    }
+}
+
+impl StoredObject {
+    fn from_written(obj: &Object) -> Self {
+        match obj.value() {
+            Value::Null | Value::Bool(_) | Value::Integer(_) | Value::Real(_) | Value::Ref(_) => {
+                Self::Scalar(obj.clone())
+            }
+            _ => Self::Inline(Box::new(obj.clone())),
+        }
+    }
+
+    fn from_value<'o, R: Resolve<'o> + Copy>(
+        objects: R,
+        written: &'o Object,
+        value: &'o Object,
+    ) -> Self {
+        let mut cur = written;
+        for _ in 0..HOPS {
+            let Value::Ref(oid) = *cur.value() else {
+                break;
+            };
+            let Some(next) = objects.resolve(oid) else {
+                break;
+            };
+            if std::ptr::eq(next, value) {
+                return Self::Indirect(oid);
+            }
+            cur = next;
+        }
+        Self::from_written(value)
+    }
+
+    fn bind<'o, R: Resolve<'o>>(&'o self, objects: R) -> Option<&'o Object> {
+        match self {
+            Self::Indirect(oid) => objects.resolve(*oid),
+            Self::Scalar(obj) => Some(obj),
+            Self::Inline(obj) => Some(obj.as_ref()),
+        }
+    }
+}
+
+impl CachedPage {
+    fn from_page<'o, R: Resolve<'o> + Copy>(objects: R, page: &Page<'o>) -> Self {
+        Self {
+            id: page.id,
+            dict: page
+                .dict
+                .map(|dict| StoredDict::from_page(objects, page.id, dict)),
+            repeat: page.repeat,
+            parent: page.parent.clone(),
+            attributes: page.attributes.map(|opt| {
+                opt.map(|attr| StoredAttribute {
+                    written: StoredObject::from_written(attr.written),
+                    value: StoredObject::from_value(objects, attr.written, attr.value),
+                    origin: attr.origin,
+                })
+            }),
+            media_box: page.media_box,
+            crop_box: page.crop_box,
+            rotate: page.rotate,
+            user_unit: page.user_unit,
+        }
+    }
+
+    fn bind<'o, R: Resolve<'o> + Copy>(&'o self, objects: R) -> Page<'o> {
+        Page {
+            id: self.id,
+            dict: self.dict.as_ref().and_then(|d| d.bind(objects)),
+            repeat: self.repeat,
+            parent: self.parent.clone(),
+            attributes: self.attributes.each_ref().map(|opt| {
+                let attr = opt.as_ref()?;
+                Some(Attribute {
+                    written: attr.written.bind(objects)?,
+                    value: attr.value.bind(objects)?,
+                    origin: attr.origin,
+                })
+            }),
+            media_box: self.media_box,
+            crop_box: self.crop_box,
+            rotate: self.rotate,
+            user_unit: self.user_unit,
+        }
+    }
+}
+
+impl PageTable {
+    /// Captures an owned [`PageTable`] from an already-walked [`Pages`] view.
+    #[must_use]
+    pub fn from_pages<'o, R: Resolve<'o> + Copy>(objects: R, pages: &Pages<'o>) -> Self {
+        Self {
+            pages: pages
+                .pages
+                .iter()
+                .map(|p| CachedPage::from_page(objects, p))
+                .collect(),
+            counted: pages.counted,
+        }
+    }
+
+    /// Number of pages listed by the walked tree.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Whether the walked tree listed zero pages.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
+    /// Page count reported under [`Pages::counted`].
+    #[must_use]
+    pub const fn counted(&self) -> usize {
+        self.counted
+    }
+
+    /// Re-binds single page `index` against `objects` in `O(1)`.
+    #[must_use]
+    pub fn get<'o, R: Resolve<'o> + Copy>(&'o self, objects: R, index: usize) -> Option<Page<'o>> {
+        self.pages.get(index).map(|p| p.bind(objects))
+    }
+
+    /// Re-binds all pages against `objects` without re-walking the page tree.
+    #[must_use]
+    pub fn bind<'o, R: Resolve<'o> + Copy>(&'o self, objects: R) -> Pages<'o> {
+        Pages {
+            pages: self.pages.iter().map(|p| p.bind(objects)).collect(),
+            counted: self.counted,
+        }
+    }
+}
+
 /// A page, as the tree lists it. A page object listed twice is two pages,
 /// the second saying so, and each value is the page's own, inherited, or
 /// what stands for it:

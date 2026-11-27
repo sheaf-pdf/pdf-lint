@@ -43,6 +43,17 @@ pub struct Limits {
     /// [`content`](Limits::content) and [`semantics`](Limits::semantics) at each
     /// call.
     pub annots: pdf_annots::Limits,
+    /// What Image XObjects and inline images decode under (`pdf-images`'s,
+    /// `images` feature). Its `content` and `color` are synced from
+    /// [`content`](Limits::content) at each call.
+    #[cfg(feature = "images")]
+    pub images: pdf_images::Limits,
+    /// What 2D page, tile, annotation, and form rasterization runs under
+    /// (`pdf-raster`'s, `raster` feature). Its `gfx`, `images`, `color`,
+    /// `semantics`, `annots`, and `forms` limits are synced from this struct's
+    /// fields at each call.
+    #[cfg(feature = "raster")]
+    pub raster: pdf_raster::Limits,
     /// What a file's linearization is checked under, and a document is
     /// linearized under (pdf-linearize's): the graph a plan is made of, and
     /// its hint tables. Its `page_depth`, `tree_depth` and `tree_nodes` are
@@ -69,6 +80,10 @@ impl Limits {
         fonts: pdf_fonts::Limits::DEFAULT,
         gfx: pdf_gfx::Limits::DEFAULT,
         annots: pdf_annots::Limits::DEFAULT,
+        #[cfg(feature = "images")]
+        images: pdf_images::Limits::DEFAULT,
+        #[cfg(feature = "raster")]
+        raster: pdf_raster::Limits::DEFAULT,
         linearize: pdf_linearize::Limits::DEFAULT,
         font_budget: 256 << 20,
     };
@@ -98,6 +113,85 @@ impl Limits {
         annots
     }
 
+    /// `images`, its `content` and `color` synced from
+    /// [`content`](Limits::content).
+    #[cfg(feature = "images")]
+    pub(crate) const fn reading_images(&self) -> pdf_images::Limits {
+        let mut images = self.images;
+        images.content = self.content;
+        images.color = self.content.color;
+        images
+    }
+
+    /// `raster`, its subsystem limits synced from this struct's fields.
+    #[cfg(feature = "raster")]
+    pub(crate) const fn reading_raster(&self) -> pdf_raster::Limits {
+        let mut raster = self.raster;
+        raster.gfx = self.reading_gfx();
+        raster.images = self.reading_images();
+        raster.color = self.content.color;
+        raster.semantics = self.semantics;
+        raster.annots = self.reading_annots();
+        raster.forms.annots = raster.annots;
+        raster.forms.fonts = self.reading_fonts();
+        raster
+    }
+
+    /// Element-wise narrower of [`Self::reading_raster`] and `other`, so
+    /// customizing one cap on `RenderOpts::limits` never drops any cap the
+    /// `Pdf` was opened with (and vice versa).
+    #[cfg(feature = "raster")]
+    pub(crate) fn narrower_raster(&self, other: &pdf_raster::Limits) -> pdf_raster::Limits {
+        let mut r = self.reading_raster();
+        r.max_width = r.max_width.min(other.max_width);
+        r.max_height = r.max_height.min(other.max_height);
+        r.max_pixels = r.max_pixels.min(other.max_pixels);
+        r.max_pixmap_bytes = r.max_pixmap_bytes.min(other.max_pixmap_bytes);
+        r.max_layer_depth = r.max_layer_depth.min(other.max_layer_depth);
+        r.max_tile_side = r.max_tile_side.min(other.max_tile_side);
+        r.max_tile_pixels = r.max_tile_pixels.min(other.max_tile_pixels);
+        r.max_shading_samples = r.max_shading_samples.min(other.max_shading_samples);
+        r.max_scene_bytes = r.max_scene_bytes.min(other.max_scene_bytes);
+        r.max_annots = r.max_annots.min(other.max_annots);
+
+        r.gfx.content = min_content(r.gfx.content, other.gfx.content);
+        r.gfx.fonts = min_fonts(r.gfx.fonts, other.gfx.fonts);
+        r.gfx.form_depth = r.gfx.form_depth.min(other.gfx.form_depth);
+        r.gfx.states = r.gfx.states.min(other.gfx.states);
+        r.gfx.operators = r.gfx.operators.min(other.gfx.operators);
+        r.gfx.glyphs = r.gfx.glyphs.min(other.gfx.glyphs);
+        r.gfx.segments = r.gfx.segments.min(other.gfx.segments);
+        r.gfx.marked = r.gfx.marked.min(other.gfx.marked);
+        r.gfx.interpreted = r.gfx.interpreted.min(other.gfx.interpreted);
+        r.gfx.decompressed = r.gfx.decompressed.min(other.gfx.decompressed);
+
+        r.images.max_width = r.images.max_width.min(other.images.max_width);
+        r.images.max_height = r.images.max_height.min(other.images.max_height);
+        r.images.max_pixels = r.images.max_pixels.min(other.images.max_pixels);
+        r.images.max_sample_bytes = r.images.max_sample_bytes.min(other.images.max_sample_bytes);
+        r.images.max_encoded_bytes = r
+            .images
+            .max_encoded_bytes
+            .min(other.images.max_encoded_bytes);
+        r.images.color = min_color(r.images.color, other.images.color);
+        r.images.content = min_content(r.images.content, other.images.content);
+
+        r.color = min_color(r.color, other.color);
+        r.semantics = min_semantics(r.semantics, other.semantics);
+        r.annots = min_annots(r.annots, other.annots);
+
+        r.forms.hops = r.forms.hops.min(other.forms.hops);
+        r.forms.fields = r.forms.fields.min(other.forms.fields);
+        r.forms.depth = r.forms.depth.min(other.forms.depth);
+        r.forms.items = r.forms.items.min(other.forms.items);
+        r.forms.annots = min_annots(r.forms.annots, other.forms.annots);
+        r.forms.text = r.forms.text.min(other.forms.text);
+        r.forms.comb_cells = r.forms.comb_cells.min(other.forms.comb_cells);
+        r.forms.fonts = min_fonts(r.forms.fonts, other.forms.fonts);
+        r.forms.font_budget = r.forms.font_budget.min(other.forms.font_budget);
+        r
+    }
+
     /// [`linearize`](Limits::linearize), its walks' caps
     /// [`semantics`](Limits::semantics)', its pages the lesser of the two.
     pub(crate) const fn linearizing(&self) -> pdf_linearize::Limits {
@@ -110,6 +204,79 @@ impl Limits {
         linearize.tree_nodes = self.semantics.tree_nodes;
         linearize
     }
+}
+
+#[cfg(feature = "raster")]
+fn min_color(mut a: pdf_color::Limits, b: pdf_color::Limits) -> pdf_color::Limits {
+    a.space_depth = a.space_depth.min(b.space_depth);
+    a.space_visits = a.space_visits.min(b.space_visits);
+    a.stream_bytes = a.stream_bytes.min(b.stream_bytes);
+    a.sample_values = a.sample_values.min(b.sample_values);
+    a.postscript_ops = a.postscript_ops.min(b.postscript_ops);
+    a.postscript_stack = a.postscript_stack.min(b.postscript_stack);
+    a
+}
+
+#[cfg(feature = "raster")]
+fn min_content(
+    mut a: pdf_content_streams::Limits,
+    b: pdf_content_streams::Limits,
+) -> pdf_content_streams::Limits {
+    a.operands = a.operands.min(b.operands);
+    a.depth = a.depth.min(b.depth);
+    a.values = a.values.min(b.values);
+    a.inline_image = a.inline_image.min(b.inline_image);
+    a.image_ends = a.image_ends.min(b.image_ends);
+    a.content = a.content.min(b.content);
+    a.color = min_color(a.color, b.color);
+    a.space_values = a.space_values.min(b.space_values);
+    a.marked = a.marked.min(b.marked);
+    a.splice_reads = a.splice_reads.min(b.splice_reads);
+    a.hops = a.hops.min(b.hops);
+    a
+}
+
+#[cfg(feature = "raster")]
+fn min_fonts(mut a: pdf_fonts::Limits, b: pdf_fonts::Limits) -> pdf_fonts::Limits {
+    a.content = min_content(a.content, b.content);
+    a.cmaps = a.cmaps.min(b.cmaps);
+    a.type1_work = a.type1_work.min(b.type1_work);
+    a.font_fuel = a.font_fuel.min(b.font_fuel);
+    a.glyph_fuel = a.glyph_fuel.min(b.glyph_fuel);
+    a.composite_glyphs = a.composite_glyphs.min(b.composite_glyphs);
+    a.composite_depth = a.composite_depth.min(b.composite_depth);
+    a.forms = a.forms.min(b.forms);
+    a.form_uses = a.form_uses.min(b.form_uses);
+    a
+}
+
+#[cfg(feature = "raster")]
+fn min_semantics(mut a: pdf_semantics::Limits, b: pdf_semantics::Limits) -> pdf_semantics::Limits {
+    a.tree_depth = a.tree_depth.min(b.tree_depth);
+    a.tree_nodes = a.tree_nodes.min(b.tree_nodes);
+    a.page_depth = a.page_depth.min(b.page_depth);
+    a.pages = a.pages.min(b.pages);
+    a.xmp_bytes = a.xmp_bytes.min(b.xmp_bytes);
+    a.xmp_depth = a.xmp_depth.min(b.xmp_depth);
+    a.xmp_bindings = a.xmp_bindings.min(b.xmp_bindings);
+    a.action_chain = a.action_chain.min(b.action_chain);
+    a.outline_depth = a.outline_depth.min(b.outline_depth);
+    a.outline_items = a.outline_items.min(b.outline_items);
+    a.embedded_bytes = a.embedded_bytes.min(b.embedded_bytes);
+    a.oc_depth = a.oc_depth.min(b.oc_depth);
+    a
+}
+
+#[cfg(feature = "raster")]
+fn min_annots(mut a: pdf_annots::Limits, b: pdf_annots::Limits) -> pdf_annots::Limits {
+    a.hops = a.hops.min(b.hops);
+    a.annots_per_page = a.annots_per_page.min(b.annots_per_page);
+    a.reply_depth = a.reply_depth.min(b.reply_depth);
+    a.quads = a.quads.min(b.quads);
+    a.points = a.points.min(b.points);
+    a.content = min_content(a.content, b.content);
+    a.semantics = min_semantics(a.semantics, b.semantics);
+    a
 }
 
 impl Default for Limits {
@@ -137,6 +304,16 @@ mod tests {
         assert_eq!(limits.reading_gfx(), pdf_gfx::Limits::DEFAULT);
         assert_eq!(limits.annots, pdf_annots::Limits::DEFAULT);
         assert_eq!(limits.reading_annots(), pdf_annots::Limits::DEFAULT);
+        #[cfg(feature = "images")]
+        {
+            assert_eq!(limits.images, pdf_images::Limits::DEFAULT);
+            assert_eq!(limits.reading_images(), pdf_images::Limits::DEFAULT);
+        }
+        #[cfg(feature = "raster")]
+        {
+            assert_eq!(limits.raster, pdf_raster::Limits::DEFAULT);
+            assert_eq!(limits.reading_raster(), pdf_raster::Limits::DEFAULT);
+        }
         assert_eq!(limits.linearize, pdf_linearize::Limits::DEFAULT);
         assert_eq!(limits.font_budget, 256 << 20);
         assert_eq!(limits.linearizing(), pdf_linearize::Limits::DEFAULT);

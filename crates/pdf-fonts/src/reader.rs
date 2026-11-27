@@ -161,6 +161,23 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> Reader<'_, O, S> {
             .map_or(absent, |value| self.integer(value, object))
     }
 
+    /// Reads `dict`'s `key` as an integer without reporting any faults or reader
+    /// failures, for auxiliary style hints that PDFium's font loader does not inspect.
+    pub(crate) fn quiet_integer_for(&self, dict: &'o Dict, key: &[u8], absent: i32) -> i32 {
+        let Some(raw) = dict.get(key) else {
+            return absent;
+        };
+        let seen = match raw.as_reference() {
+            Some(id) => self
+                .objects
+                .resolve(id)
+                .filter(|o| o.as_reference().is_none()),
+            None => Some(raw),
+        };
+        seen.filter(|o| o.as_number().is_some())
+            .map_or(absent, integer_of)
+    }
+
     /// [`Reader::integer`] of `array`'s element `i`, as PDFium's `GetIntegerAt`: 0
     /// past its end.
     pub(crate) fn integer_at(

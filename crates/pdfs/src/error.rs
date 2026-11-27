@@ -58,6 +58,21 @@ pub enum Error {
     /// (`pdf-annots`'s / `pdf-semantics`'s).
     #[error("{0}")]
     Annots(pdf_annots::Error),
+    /// Decoding or re-encoding a PDF Image XObject or inline image failed
+    /// (`pdf-images`'s, `images` feature).
+    #[cfg(feature = "images")]
+    #[error("{0}")]
+    Images(pdf_images::Error),
+    /// Rasterizing a PDF page, tile, or content stream failed (`pdf-raster`'s,
+    /// `raster` feature).
+    #[cfg(feature = "raster")]
+    #[error("{0}")]
+    Raster(pdf_raster::Error),
+    /// Opening, inspecting, or rendering through a [`pdf_raster::RenderBackend`]
+    /// failed (`raster` feature).
+    #[cfg(feature = "raster")]
+    #[error("{0}")]
+    Backend(pdf_raster::BackendError),
     /// Reading the document outline (`/Outlines`) failed (`pdf-semantics`'s).
     #[error("{0}")]
     Outlines(outlines::Error),
@@ -173,6 +188,34 @@ impl From<pdf_gfx::Error> for Error {
 impl From<pdf_annots::Error> for Error {
     fn from(error: pdf_annots::Error) -> Error {
         Error::Annots(error)
+    }
+}
+
+#[cfg(feature = "images")]
+impl From<pdf_images::Error> for Error {
+    fn from(error: pdf_images::Error) -> Error {
+        Error::Images(error)
+    }
+}
+
+#[cfg(feature = "raster")]
+impl From<pdf_raster::Error> for Error {
+    fn from(error: pdf_raster::Error) -> Error {
+        Error::Raster(error)
+    }
+}
+
+#[cfg(feature = "raster")]
+impl From<pdf_raster::BackendError> for Error {
+    fn from(error: pdf_raster::BackendError) -> Error {
+        match error {
+            pdf_raster::BackendError::Raster(r) => Error::Raster(r),
+            pdf_raster::BackendError::Backend(boxed) => match boxed.downcast::<Error>() {
+                Ok(inner) => *inner,
+                Err(other) => Error::Backend(pdf_raster::BackendError::Backend(other)),
+            },
+            other => Error::Backend(other),
+        }
     }
 }
 

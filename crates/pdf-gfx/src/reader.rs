@@ -164,6 +164,34 @@ impl<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized> ObjReader<'_, O, S> 
     pub(crate) fn stream(&self, id: ObjectId) -> Option<&'o Stream> {
         self.resolve(id)?.as_stream()
     }
+
+    /// Resolves `value` via `Resolve::resolve` without recording `Fault::Damaged`
+    /// or `Unreadable` on auxiliary rasterizer-only keys (`/Group`, `/BC`, `/TR`),
+    /// preserving exact error and fault parity for non-rasterizing callers.
+    pub(crate) fn quiet_hop(&self, value: &'o Object) -> Option<&'o Object> {
+        match value.as_reference() {
+            Some(id) => self.objects.resolve(id),
+            None => Some(value),
+        }
+    }
+
+    pub(crate) fn quiet_seen(&self, value: &'o Object) -> Option<&'o Object> {
+        self.quiet_hop(value)
+            .filter(|obj| obj.as_reference().is_none())
+    }
+
+    pub(crate) fn quiet_array_for(&self, dict: &'o Dict, key: &[u8]) -> Option<&'o [Object]> {
+        self.quiet_seen(dict.get(key)?)?.as_array()
+    }
+
+    pub(crate) fn quiet_float_of(&self, value: &'o Object) -> Option<f32> {
+        let obj = self.quiet_seen(value)?;
+        match obj.value() {
+            Value::Integer(n) => Some(int32_as_f32(*n)),
+            Value::Real(r) => Some(*r as f32),
+            _ => None,
+        }
+    }
 }
 
 fn own_dict(object: &Object) -> Option<&Dict> {

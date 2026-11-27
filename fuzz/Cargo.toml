@@ -2,8 +2,9 @@
 # build on nightly with libFuzzer. Locally, `just fuzz tokenize`,
 # `just fuzz filters`, `just fuzz crypt`, `just fuzz objects`,
 # `just fuzz structure`, `just fuzz write`, `just fuzz content`,
-# `just fuzz semantics`, `just fuzz color`, `just fuzz fonts`,
-# `just fuzz embed`, `just fuzz gfx`, `just fuzz linearize`,
+# `just fuzz semantics`, `just fuzz color`, `just fuzz images`,
+# `just fuzz fonts`, `just fuzz embed`, `just fuzz gfx`, `just fuzz annots`,
+# `just fuzz forms`, `just fuzz raster`, `just fuzz linearize`,
 # `just fuzz pdfs`, `just fuzz arlington` or `just fuzz check`, or:
 #
 #   cargo +nightly fuzz run tokenize -- -dict=fuzz/pdf.dict
@@ -111,6 +112,11 @@
 # `random_bytes_keep_every_promise`,
 # `files_read_alike_through_a_reading_and_its_document`) run, the last as a file,
 # as the target does but under the default options;
+# `images` calls `pdf_images::fuzz::check`, arbitrary bytes decoded as indirect
+# Image XObjects (with `/SMask`, `/Mask`, `/Matte`, `/Decode`, and standard or
+# image-codec filters) and inline images under both rules, checking fault-sink
+# invariance, scrubbing, clean Flate/JPEG re-encoding, and `Debug` redaction,
+# and `pdf_images::fuzz::over` on opened PDF files;
 # `fonts` calls `pdf_fonts::fuzz::type1`, any bytes scanned as a Type 1 program,
 # holding no more than it was given, and under other caps the same or refused;
 # `pdf_fonts::fuzz::names`, an input's words read as glyphs' and fonts' names,
@@ -132,6 +138,15 @@
 # read and its glyphs' boxes the same cut as whole; which two stable unit
 # tests (`the_embed_seeds_come_to_what_they_hold` and
 # `mutated_programs_keep_every_promise`) run, with `embed`;
+# `gfx` calls `pdf_gfx::fuzz::check` and `pdf_gfx::fuzz::over`, interpreting and
+# re-encoding content streams and nested Form XObjects under tight caps;
+# `annots` calls `pdf_annots::fuzz::check` and `pdf_annots::fuzz::over`, reading
+# annotations, reply threads, appearance synthesis, and page flattening plans;
+# `forms` calls `pdf_forms::fuzz::check` and `pdf_forms::fuzz::over`, walking
+# `/AcroForm` field trees, button group transitions, and widget appearances;
+# `raster` calls `pdf_raster::fuzz::check` and `pdf_raster::fuzz::over`,
+# rasterizing multi-object scenes (forms, images, patterns, shadings, soft
+# masks, Type 3 fonts, annotations) across viewports and pixel formats;
 # `linearize` calls `pdf_linearize::fuzz::graphs`, any bytes as a graph, refused
 # for what it has or planned, every promise of the plan held against plain walks
 # of it, and `tables`, the same bytes as a hint stream, which a stable unit test
@@ -217,7 +232,7 @@ pdf-arlington = { path = "../crates/pdf-arlington" }
 # With `image-ends`, so the content target can read with DCT and CCITTFax
 # data decoded to find where an inline image's ends, as it asks to.
 pdf-content-streams = { path = "../crates/pdf-content-streams", features = ["image-ends"] }
-pdf-color = { path = "../crates/pdf-color" }
+pdf-color = { path = "../crates/pdf-color", features = ["icc"] }
 # With the test writer, so the crypt target makes new files from the input's
 # draws, and the write target new encryptions.
 pdf-crypt = { path = "../crates/pdf-crypt", features = ["insecure-test-writer"] }
@@ -230,6 +245,7 @@ pdf-filters = { path = "../crates/pdf-filters", features = ["zlib-rs"] }
 # fonts for text, which reads no program whatever the features. The feature
 # of that name below turns it on.
 pdf-fonts = { path = "../crates/pdf-fonts", features = ["embed"] }
+pdf-images = { path = "../crates/pdf-images", features = ["icc"] }
 pdf-gfx = { path = "../crates/pdf-gfx" }
 pdf-annots = { path = "../crates/pdf-annots" }
 # With `embed`, so `forms` draws a value in its field's font and a fallback
@@ -247,6 +263,7 @@ pdf-lint = { path = "../crates/pdf-lint", default-features = false }
 # input writes the same bytes each run, and a saved one reruns as it ran.
 pdfs = { path = "../crates/pdfs", features = ["insecure-test-writer"] }
 pdf-objects = { path = "../crates/pdf-objects" }
+pdf-raster = { path = "../crates/pdf-raster" }
 # With its default features, so the semantics target fuzzes the clock's
 # reading of a count of seconds too.
 pdf-semantics = { path = "../crates/pdf-semantics" }
@@ -254,11 +271,11 @@ pdf-structure = { path = "../crates/pdf-structure", features = ["insecure-test-w
 pdf-tokenizer = { path = "../crates/pdf-tokenizer" }
 
 [features]
-# pdf-content-streams' dependencies on the CPU's SIMD, found as they run.
-simd = ["pdf-content-streams/simd"]
+# pdf-content-streams', pdf-images' and pdf-raster's dependencies on the CPU's SIMD, found as they run.
+simd = ["pdf-content-streams/simd", "pdf-images/simd", "pdf-raster/simd"]
 # Adobe's predefined CMaps, from pdf-fonts' bundle, so a name that's one
 # reaches it.
-predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps", "pdf-annots/predefined-cmaps", "pdf-forms/predefined-cmaps"]
+predefined-cmaps = ["pdf-fonts/predefined-cmaps", "pdf-gfx/predefined-cmaps", "pdf-annots/predefined-cmaps", "pdf-forms/predefined-cmaps", "pdf-raster/predefined-cmaps"]
 
 [[bin]]
 name = "tokenize"
@@ -324,6 +341,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "images"
+path = "fuzz_targets/images.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fonts"
 path = "fuzz_targets/fonts.rs"
 test = false
@@ -354,6 +378,13 @@ bench = false
 [[bin]]
 name = "forms"
 path = "fuzz_targets/forms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raster"
+path = "fuzz_targets/raster.rs"
 test = false
 doc = false
 bench = false

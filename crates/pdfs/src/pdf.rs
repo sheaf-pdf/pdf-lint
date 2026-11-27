@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::iter::FusedIterator;
 use std::ops::ControlFlow;
+use std::sync::OnceLock;
 
 use pdf_crypt::{Encoded, Refused};
 use pdf_fonts::{Fonts, Shown};
@@ -41,7 +42,13 @@ pub struct Pdf<S: ByteSource = Vec<u8>> {
     reading: Reading<S>,
     limits: Limits,
     rules: Rules,
+    #[cfg(not(feature = "raster"))]
     fonts: Fonts,
+    #[cfg(feature = "raster")]
+    cache: pdf_raster::RenderCache,
+    #[cfg(feature = "raster")]
+    fallback: Option<std::sync::Arc<dyn pdf_raster::FontFallback>>,
+    pages_cache: OnceLock<pages::PageTable>,
     identity: Option<Identity>,
 }
 
@@ -67,9 +74,35 @@ impl<S: ByteSource> Pdf<S> {
             reading,
             limits: options.limits,
             rules: options.rules,
+            #[cfg(not(feature = "raster"))]
             fonts: Fonts::default(),
+            #[cfg(feature = "raster")]
+            cache: pdf_raster::RenderCache::default(),
+            #[cfg(feature = "raster")]
+            fallback: options.font_fallback.cloned(),
+            pages_cache: OnceLock::new(),
             identity,
         }
+    }
+
+    /// Attaches a shared [`FontFallback`](pdf_raster::FontFallback) provider
+    /// (`raster` feature) used by [`Page::render`] and [`pdf_raster::RenderedDoc`].
+    #[cfg(feature = "raster")]
+    #[must_use]
+    pub fn with_font_fallback(
+        mut self,
+        fallback: std::sync::Arc<dyn pdf_raster::FontFallback>,
+    ) -> Self {
+        self.fallback = Some(fallback);
+        self
+    }
+
+    /// The shared [`FontFallback`](pdf_raster::FontFallback) provider attached
+    /// to this [`Pdf`], if any (`raster` feature).
+    #[cfg(feature = "raster")]
+    #[must_use]
+    pub fn font_fallback(&self) -> Option<&dyn pdf_raster::FontFallback> {
+        self.fallback.as_deref()
     }
 
     /// The reading, for what the facade doesn't do: each object, a stream's
@@ -104,7 +137,23 @@ impl<S: ByteSource> Pdf<S> {
     /// leaves to it; for pdf-fonts' calls over [`Pdf::reading`] too.
     #[must_use]
     pub const fn fonts(&self) -> &Fonts {
-        &self.fonts
+        #[cfg(feature = "raster")]
+        {
+            self.cache.fonts()
+        }
+        #[cfg(not(feature = "raster"))]
+        {
+            &self.fonts
+        }
+    }
+
+    /// Its shared cross-page [`RenderCache`](pdf_raster::RenderCache) (`raster`
+    /// feature), wrapping [`Self::fonts`] alongside cached fallback font
+    /// programs for [`Page::render`] and [`pdf_raster`] calls.
+    #[cfg(feature = "raster")]
+    #[must_use]
+    pub const fn render_cache(&self) -> &pdf_raster::RenderCache {
+        &self.cache
     }
 
     /// The file it reads, where [`open`](crate::open) opened it by its path:
@@ -163,19 +212,45 @@ impl<S: ByteSource> Pdf<S> {
             reading,
             limits,
             rules,
+            #[cfg(not(feature = "raster"))]
             fonts,
+            #[cfg(feature = "raster")]
+            cache,
+            #[cfg(feature = "raster")]
+            fallback,
+            pages_cache,
             identity,
         } = self;
-        let back = |reading, fonts| Pdf {
-            reading,
-            limits,
-            rules,
-            fonts,
-            identity: identity.clone(),
-        };
         match reading.unlock(passwords) {
-            Ok(reading) => Ok(back(reading, Fonts::default())),
-            Err((reading, refused)) => Err((back(reading, fonts), refused)),
+            Ok(reading) => Ok(Pdf {
+                reading,
+                limits,
+                rules,
+                #[cfg(not(feature = "raster"))]
+                fonts: Fonts::default(),
+                #[cfg(feature = "raster")]
+                cache: pdf_raster::RenderCache::default(),
+                #[cfg(feature = "raster")]
+                fallback,
+                pages_cache: OnceLock::new(),
+                identity,
+            }),
+            Err((reading, refused)) => Err((
+                Pdf {
+                    reading,
+                    limits,
+                    rules,
+                    #[cfg(not(feature = "raster"))]
+                    fonts,
+                    #[cfg(feature = "raster")]
+                    cache,
+                    #[cfg(feature = "raster")]
+                    fallback,
+                    pages_cache,
+                    identity,
+                },
+                refused,
+            )),
         }
     }
 
@@ -201,6 +276,15 @@ impl<S: ByteSource> Pdf<S> {
     pub fn catalog(&self) -> Result<&Dict, Error> {
         let trailer = self.reading.trailer().dict();
         pdf_semantics::catalog(&self.reading, trailer)?.ok_or(Error::NoCatalog)
+    }
+
+    #[cfg(any(feature = "images", feature = "raster"))]
+    pub(crate) fn optional_catalog(&self) -> Result<Option<&Dict>, Error> {
+        match self.catalog() {
+            Ok(dict) => Ok(Some(dict)),
+            Err(Error::NoCatalog) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// What it says of itself, its document information dictionary
@@ -457,10 +541,34 @@ impl<S: ByteSource> Pdf<S> {
         file::catalog_view(&self.reading, self.rules, sink)
     }
 
+    pub(crate) fn cached_page_table(&self) -> Result<&pages::PageTable, Error> {
+        if let Some(tbl) = self.pages_cache.get() {
+            return Ok(tbl);
+        }
+        phase!(DEBUG, "pages", pdfium = matches!(self.rules, Rules::Pdfium));
+        let catalog = self.catalog()?;
+        let walked = pages::pages(
+            &self.reading,
+            catalog,
+            self.rules,
+            &self.limits.semantics,
+            &mut (),
+        )?;
+        let tbl = pages::PageTable::from_pages(&self.reading, &walked);
+        let _ = self.pages_cache.set(tbl);
+        Ok(self.pages_cache.get().expect("just initialized"))
+    }
+
+    #[cfg(feature = "raster")]
+    pub(crate) fn prime_pages(&self) -> Result<(), Error> {
+        let _ = self.cached_page_table()?;
+        Ok(())
+    }
+
     /// Its pages, in order, as its page tree lists them by its rules, each
     /// with what it inherits and from where (pdf-semantics'
-    /// [`pages::pages`]). Nothing departing from the clause is told:
-    /// [`Pdf::pages_with`] tells it.
+    /// [`pages::pages`]). Cached on first read; nothing departing from the
+    /// clause is told: [`Pdf::pages_with`] tells it.
     ///
     /// # Errors
     ///
@@ -470,7 +578,11 @@ impl<S: ByteSource> Pdf<S> {
     /// a loop, and an object on the way that doesn't read for the reader's
     /// own reason, never read as no pages.
     pub fn pages(&self) -> Result<Pages<'_, S>, Error> {
-        self.pages_with(&mut ())
+        let tbl = self.cached_page_table()?;
+        Ok(Pages {
+            table: tbl.bind(&self.reading),
+            pdf: self,
+        })
     }
 
     /// [`Pdf::pages`], what departs from the clause told to `sink`: by ISO's
@@ -483,6 +595,9 @@ impl<S: ByteSource> Pdf<S> {
         &self,
         sink: &mut K,
     ) -> Result<Pages<'_, S>, Error> {
+        if !sink.wants() {
+            return self.pages();
+        }
         phase!(DEBUG, "pages", pdfium = matches!(self.rules, Rules::Pdfium));
         let catalog = self.catalog()?;
         let walked = pages::pages(
@@ -491,9 +606,14 @@ impl<S: ByteSource> Pdf<S> {
             self.rules,
             &self.limits.semantics,
             sink,
-        );
+        )?;
+        if self.pages_cache.get().is_none() {
+            let _ = self
+                .pages_cache
+                .set(pages::PageTable::from_pages(&self.reading, &walked));
+        }
         Ok(Pages {
-            table: walked?,
+            table: walked,
             pdf: self,
         })
     }
@@ -924,7 +1044,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         let mut budget = pdf.limits.font_budget;
         page::fonts(
             &pdf.reading,
-            &pdf.fonts,
+            pdf.fonts(),
             self.page,
             &pdf.limits,
             &mut budget,
@@ -946,7 +1066,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         let mut budget = pdf.limits.font_budget;
         page::text(
             &pdf.reading,
-            &pdf.fonts,
+            pdf.fonts(),
             self.page,
             &pdf.limits,
             &mut budget,
@@ -984,7 +1104,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         let pdf = self.pdf;
         page::interpret_with(
             &pdf.reading,
-            &pdf.fonts,
+            pdf.fonts(),
             self.page,
             &pdf.limits,
             opts,
@@ -1015,7 +1135,7 @@ impl<'a, S: ByteSource> Page<'a, S> {
         sink: &mut K,
     ) -> Result<pdf_gfx::EncodedPage, Error> {
         let pdf = self.pdf;
-        page::encode_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, sink)
+        page::encode_with(&pdf.reading, pdf.fonts(), self.page, &pdf.limits, sink)
     }
 
     /// Extracts reading-order text, line geometry, and search index
@@ -1042,7 +1162,14 @@ impl<'a, S: ByteSource> Page<'a, S> {
         sink: &mut K,
     ) -> Result<pdf_gfx::TextPage, Error> {
         let pdf = self.pdf;
-        page::text_page_with(&pdf.reading, &pdf.fonts, self.page, &pdf.limits, opts, sink)
+        page::text_page_with(
+            &pdf.reading,
+            pdf.fonts(),
+            self.page,
+            &pdf.limits,
+            opts,
+            sink,
+        )
     }
 
     /// Searches reading-order text on the page for `query` under `opts`
@@ -1061,5 +1188,291 @@ impl<'a, S: ByteSource> Page<'a, S> {
         Ok(self
             .text_page(pdf_gfx::TextPageOpts::default())?
             .search(query, opts))
+    }
+
+    /// Lists every Image XObject and inline image drawn on the page (including
+    /// inside Form XObjects) in content-stream drawing order, without decoding
+    /// pixel samples ([`page::images`](fn@page::images)).
+    ///
+    /// Pass any `ImageOf::XObject(id)` entry to `Page::decode_image` or
+    /// `Page::decode_image_raw` (`images` feature) to decode its pixels.
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::interpret`] fails.
+    pub fn images(&self) -> Result<Vec<pdf_gfx::ImageDrawn>, Error> {
+        self.images_with(&mut ())
+    }
+
+    /// [`Page::images`], reporting recoverable ISO 32000-2 departures to `sink`
+    /// ([`pdf_gfx::Fault`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::images`] fails.
+    pub fn images_with<K: Sink<pdf_gfx::Fault> + ?Sized>(
+        &self,
+        sink: &mut K,
+    ) -> Result<Vec<pdf_gfx::ImageDrawn>, Error> {
+        let pdf = self.pdf;
+        page::images_with(&pdf.reading, pdf.fonts(), self.page, &pdf.limits, sink)
+    }
+
+    /// Decodes any indirect Image XObject stream `image_id` in the document
+    /// into straight `sRGB` `RGBA8` ([`pdf_images::RgbaImage`], `images`
+    /// feature), using this page's `/Resources` for `/Default*` color spaces
+    /// and the file's catalog for `/OutputIntents` (under [`Rules::Iso`]),
+    /// without collecting non-fatal faults.
+    ///
+    /// Discover image `ObjectId`s drawn on the page via [`Page::images`], and
+    /// call [`RgbaImage::to_png`](pdf_images::RgbaImage::to_png) to encode PNG
+    /// bytes.
+    ///
+    /// ```
+    /// use pdfs::pdf_images::{JpegColorSpace, encode_jpeg};
+    /// use pdfs::prelude::*;
+    ///
+    /// let mut doc = Document::new();
+    /// let jpg = encode_jpeg(&[240, 60, 40], 1, 1, JpegColorSpace::Rgb, 95).unwrap();
+    /// let img_id = doc.structure_mut().add(Object::from(jpg));
+    /// let mut canvas = Canvas::new();
+    /// canvas.draw_xobject(Res::written(img_id), Matrix::new(50.0, 0.0, 0.0, 50.0, 10.0, 10.0));
+    /// *doc.add_page(Rect::new(0.0, 0.0, 100.0, 100.0)) = canvas.into_writer();
+    ///
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    /// let pages = pdf.pages().unwrap();
+    /// let page = pages.get(0).unwrap();
+    /// let drawn = page.images().unwrap();
+    /// let ImageOf::XObject(id) = drawn[0].of else { unreachable!() };
+    /// let rgba = page.decode_image(id).unwrap();
+    /// assert_eq!((rgba.width(), rgba.height()), (1, 1));
+    /// assert!(rgba.to_png().unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unreadable`] if the catalog or page `/Resources` cannot be read
+    /// (locked, capped, or I/O failure), or [`Error::Images`] if `image_id` is
+    /// missing, malformed, exceeds [`Limits::images`], or fails to decode.
+    #[cfg(feature = "images")]
+    pub fn decode_image(&self, image_id: ObjectId) -> Result<pdf_images::RgbaImage, Error> {
+        self.decode_image_with(image_id, &mut ())
+    }
+
+    /// [`Page::decode_image`], reporting recoverable ISO 32000-2 departures to
+    /// `sink` ([`pdf_images::Fault`], `images` feature).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::decode_image`] fails.
+    #[cfg(feature = "images")]
+    pub fn decode_image_with<K: Sink<pdf_images::Fault> + ?Sized>(
+        &self,
+        image_id: ObjectId,
+        sink: &mut K,
+    ) -> Result<pdf_images::RgbaImage, Error> {
+        let pdf = self.pdf;
+        let catalog = pdf.optional_catalog()?;
+        page::decode_image_with(
+            &pdf.reading,
+            catalog,
+            self.page,
+            image_id,
+            pdf.rules,
+            &pdf.limits,
+            sink,
+        )
+    }
+
+    /// Decodes any indirect Image XObject stream `image_id` into native
+    /// unpacked samples ([`pdf_images::RawImage`], `images` feature) before
+    /// color conversion or mask compositing, without collecting non-fatal
+    /// faults.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Images`] if `image_id` is missing, malformed, exceeds
+    /// [`Limits::images`], or fails to decode.
+    #[cfg(feature = "images")]
+    pub fn decode_image_raw(&self, image_id: ObjectId) -> Result<pdf_images::RawImage, Error> {
+        self.decode_image_raw_with(image_id, &mut ())
+    }
+
+    /// [`Page::decode_image_raw`], reporting recoverable ISO 32000-2 departures
+    /// to `sink` ([`pdf_images::Fault`], `images` feature).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::decode_image_raw`] fails.
+    #[cfg(feature = "images")]
+    pub fn decode_image_raw_with<K: Sink<pdf_images::Fault> + ?Sized>(
+        &self,
+        image_id: ObjectId,
+        sink: &mut K,
+    ) -> Result<pdf_images::RawImage, Error> {
+        let pdf = self.pdf;
+        page::decode_image_raw_with(
+            &pdf.reading,
+            self.page,
+            image_id,
+            pdf.rules,
+            &pdf.limits,
+            sink,
+        )
+    }
+
+    /// Rasterizes this page into a [`Pixmap`](pdf_raster::Pixmap) (`raster`
+    /// feature), discarding [`RenderSummary`](pdf_raster::RenderSummary) for
+    /// concise call sites (e.g. `page.render_pixmap(&RenderOpts::dpi(150.0))?.to_png()`).
+    ///
+    /// As with [`Page::render`], [`Pdf::rules`] overrides `opts.rules` and
+    /// resource caps take the element-wise narrower of [`Pdf::limits`] and
+    /// `opts.limits`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::render`] fails.
+    #[cfg(feature = "raster")]
+    pub fn render_pixmap(
+        &self,
+        opts: &pdf_raster::RenderOpts,
+    ) -> Result<pdf_raster::Pixmap, Error> {
+        Ok(self.render(opts)?.0)
+    }
+
+    /// Rasterizes this page into `(Pixmap, RenderSummary)` (`raster` feature)
+    /// under `opts`, reusing [`Pdf::render_cache`] and [`Pdf::font_fallback`]
+    /// without collecting non-fatal faults.
+    ///
+    /// **Policy & limits override:** [`Pdf::rules`] always overrides
+    /// `opts.rules`, and resource limits take the element-wise narrower of
+    /// [`Pdf::limits`] and `opts.limits` so customizing a single cap on `opts`
+    /// never widens the caps the [`Pdf`] was opened with. Call
+    /// [`Pixmap::to_png`](pdf_raster::Pixmap::to_png) to encode PNG bytes, or
+    /// [`Page::render_pixmap`] when [`RenderSummary`](pdf_raster::RenderSummary)
+    /// is not needed.
+    ///
+    /// ```
+    /// use pdfs::prelude::*;
+    ///
+    /// let mut doc = Document::new();
+    /// let p = doc.add_page(Rect::new(0.0, 0.0, 72.0, 72.0));
+    /// p.fill_color(Color::rgb8([220, 40, 30]));
+    /// p.rect(0.0, 0.0, 72.0, 72.0);
+    /// p.paint(Paint::Fill);
+    ///
+    /// let pdf = pdfs::from_bytes(doc.to_bytes().unwrap()).unwrap();
+    /// let pages = pdf.pages().unwrap();
+    /// let page = pages.get(0).unwrap();
+    /// let (pixmap, summary) = page.render(&RenderOpts::dpi(72.0)).unwrap();
+    /// assert_eq!((pixmap.width(), pixmap.height()), (72, 72));
+    /// assert_eq!(pixmap.pixel_rgba8(36, 36), Some([220, 40, 30, 255]));
+    /// assert!(!summary.approximated);
+    /// assert!(pixmap.to_png().unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unreadable`] if the catalog cannot be read, or
+    /// [`Error::Raster`] as [`page::render`](fn@page::render) fails.
+    #[cfg(feature = "raster")]
+    pub fn render(
+        &self,
+        opts: &pdf_raster::RenderOpts,
+    ) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error> {
+        self.render_with(opts, &mut ())
+    }
+
+    /// [`Page::render`], reporting recoverable ISO 32000-2 departures to
+    /// `sink` ([`pdf_raster::Fault`], `raster` feature).
+    ///
+    /// # Errors
+    ///
+    /// As [`Page::render`] fails.
+    #[cfg(feature = "raster")]
+    pub fn render_with<K: Sink<pdf_raster::Fault> + ?Sized>(
+        &self,
+        opts: &pdf_raster::RenderOpts,
+        sink: &mut K,
+    ) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error> {
+        let pdf = self.pdf;
+        let catalog = pdf.optional_catalog()?;
+        page::render_with(
+            &pdf.reading,
+            catalog,
+            self.page,
+            &pdf.cache,
+            pdf.font_fallback(),
+            opts,
+            pdf.rules,
+            &pdf.limits,
+            sink,
+        )
+    }
+}
+
+#[cfg(feature = "raster")]
+impl<S: ByteSource> pdf_raster::RenderedDoc for Pdf<S> {
+    fn page_count(&self) -> usize {
+        self.cached_page_table().map_or(0, pages::PageTable::len)
+    }
+
+    fn page_geom(&self, page_index: usize) -> Result<pdf_gfx::PageGeom, pdf_raster::BackendError> {
+        if *self.encryption() == Encryption::Locked {
+            return Err(pdf_raster::BackendError::Locked);
+        }
+        let tbl = self
+            .cached_page_table()
+            .map_err(pdf_raster::BackendError::custom)?;
+        let Some(p) = tbl.get(&self.reading, page_index) else {
+            return Err(pdf_raster::BackendError::PageOutOfBounds {
+                page_index,
+                page_count: tbl.len(),
+            });
+        };
+        Ok(page::geom(&self.reading, &p))
+    }
+
+    fn render_page(
+        &self,
+        page_index: usize,
+        opts: &pdf_raster::RenderOpts,
+    ) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), pdf_raster::BackendError> {
+        if *self.encryption() == Encryption::Locked {
+            return Err(pdf_raster::BackendError::Locked);
+        }
+        let tbl = self
+            .cached_page_table()
+            .map_err(pdf_raster::BackendError::custom)?;
+        let Some(p) = tbl.get(&self.reading, page_index) else {
+            return Err(pdf_raster::BackendError::PageOutOfBounds {
+                page_index,
+                page_count: tbl.len(),
+            });
+        };
+        let catalog = self.optional_catalog().map_err(|err| match err {
+            Error::Unreadable(u) if u.why == pdf_objects::Why::Locked => {
+                pdf_raster::BackendError::Locked
+            }
+            other => pdf_raster::BackendError::custom(other),
+        })?;
+        page::render_with(
+            &self.reading,
+            catalog,
+            &p,
+            &self.cache,
+            self.font_fallback(),
+            opts,
+            self.rules,
+            &self.limits,
+            &mut (),
+        )
+        .map_err(|err| match err {
+            Error::Raster(r) => pdf_raster::BackendError::Raster(r),
+            Error::Unreadable(u) if u.why == pdf_objects::Why::Locked => {
+                pdf_raster::BackendError::Locked
+            }
+            other => pdf_raster::BackendError::custom(other),
+        })
     }
 }

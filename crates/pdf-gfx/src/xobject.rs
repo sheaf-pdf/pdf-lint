@@ -4,6 +4,7 @@
 //! Images are inspected from their stream dictionary or inline `BI..ID` header
 //! alone—pixel samples are never decoded.
 
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -15,6 +16,72 @@ use crate::error::Error;
 use crate::fault::Fault;
 use crate::geom::{Matrix, Quad, Rect};
 use crate::reader::ObjReader;
+
+/// Transparency group attributes (`/Group << /S /Transparency ... >>`,
+/// ISO 32000-2 §11.4.5–§11.4.7) on a Form XObject or page dictionary.
+///
+/// Its `Debug` implementation reports flags without printing raw `/CS` object
+/// contents.
+#[derive(Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct TransparencyGroup<'a> {
+    /// `/I`: whether the group is isolated (`false` when absent).
+    pub isolated: bool,
+    /// `/K`: whether the group is a knockout group (`false` when absent).
+    pub knockout: bool,
+    /// `/CS`: optional group blending color space object (which may be an
+    /// indirect [`Object::as_reference`] requiring resolution via [`Resolve`]).
+    pub color_space: Option<&'a Object>,
+}
+
+impl fmt::Debug for TransparencyGroup<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransparencyGroup")
+            .field("isolated", &self.isolated)
+            .field("knockout", &self.knockout)
+            .field("has_color_space", &self.color_space.is_some())
+            .finish()
+    }
+}
+
+impl<'o> TransparencyGroup<'o> {
+    /// Parses `/Group` on a page or Form XObject dictionary `dict` when its
+    /// `/S` entry is `/Transparency`.
+    #[must_use]
+    pub fn from_dict<R: Resolve<'o>>(objects: R, dict: &'o Dict) -> Option<TransparencyGroup<'o>> {
+        let hop = |v: &'o Object| -> Option<&'o Object> {
+            match v.as_reference() {
+                Some(id) => objects.resolve(id),
+                None => Some(v),
+            }
+        };
+        let seen = |v: &'o Object| -> Option<&'o Object> {
+            hop(v).filter(|obj| obj.as_reference().is_none())
+        };
+        let group_step = hop(dict.get(b"Group")?)?;
+        let group_obj = seen(group_step)?;
+        let group = group_obj
+            .as_dict()
+            .or_else(|| group_obj.as_stream().map(|s| &s.dict))?;
+        let s_obj = seen(group.get(b"S")?)?;
+        let s_name = s_obj.as_name().or_else(|| s_obj.as_bytes());
+        if s_name != Some(b"Transparency") {
+            return None;
+        }
+        let bool_at = |key: &[u8]| -> bool {
+            group
+                .get(key)
+                .and_then(seen)
+                .and_then(Object::as_bool)
+                .unwrap_or(false)
+        };
+        Some(TransparencyGroup {
+            isolated: bool_at(b"I"),
+            knockout: bool_at(b"K"),
+            color_space: group.get(b"CS"),
+        })
+    }
+}
 
 /// Stable path of `Do` byte offsets from the page's content stream down to a
 /// specific Form XObject invocation.
@@ -62,6 +129,8 @@ pub struct FormUse<'e> {
     /// Optional content group or membership dictionary (`/OC`) referenced by
     /// the Form XObject dictionary, if any.
     pub oc: Option<ObjectId>,
+    /// Transparency group attributes (`/Group`), when `/S` is `/Transparency`.
+    pub group: Option<TransparencyGroup<'e>>,
 }
 
 /// Reason a Form XObject invocation (`Do`) was not entered
@@ -228,6 +297,7 @@ pub(crate) struct Form<'o> {
     pub(crate) bbox: Option<Rect>,
     pub(crate) resources: Option<&'o Object>,
     pub(crate) oc: Option<ObjectId>,
+    pub(crate) group: Option<TransparencyGroup<'o>>,
 }
 
 pub(crate) enum XObject<'o> {
@@ -291,6 +361,7 @@ impl<'o> XObject<'o> {
             .get(b"Resources")
             .filter(|r| reader.plain_dict_of(r).is_some());
         let oc = dict.get(b"OC").and_then(Object::as_reference);
+        let group = TransparencyGroup::from_dict(&reader.objects as &dyn Resolve<'o>, dict);
         if let Some(unreadable) = reader.take_failure() {
             return Err(Error::Unreadable(unreadable));
         }
@@ -300,6 +371,7 @@ impl<'o> XObject<'o> {
             bbox,
             resources,
             oc,
+            group,
         }))
     }
 }

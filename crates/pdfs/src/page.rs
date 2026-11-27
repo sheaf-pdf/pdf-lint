@@ -590,6 +590,361 @@ where
     )?)
 }
 
+/// Lists every Image XObject and inline image drawn on `page` (including inside
+/// Form XObjects) in drawing order, without decoding pixel samples or collecting
+/// non-fatal faults.
+///
+/// # Errors
+///
+/// As [`interpret`](fn@interpret) fails.
+pub fn images<'o, O>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+) -> Result<Vec<pdf_gfx::ImageDrawn>, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    images_with(objects, fonts, page, limits, &mut ())
+}
+
+/// [`images`](fn@images), reporting recoverable ISO 32000-2 departures to
+/// `sink` ([`pdf_gfx::Fault`]).
+///
+/// # Errors
+///
+/// As [`images`](fn@images) fails.
+pub fn images_with<'o, O, K>(
+    objects: O,
+    fonts: &Fonts,
+    page: &pages::Page<'o>,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<Vec<pdf_gfx::ImageDrawn>, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_gfx::Fault> + ?Sized,
+{
+    phase!(DEBUG, "images");
+    let mut drawn = Vec::new();
+    let opts = pdf_gfx::Opts {
+        forms: pdf_gfx::Forms::Descend,
+        wants: pdf_gfx::Wants::NONE,
+    };
+    interpret_with(objects, fonts, page, limits, opts, sink, |event| {
+        if let pdf_gfx::Kind::Image(img) = event.kind {
+            drawn.push(img);
+        }
+        ControlFlow::Continue(())
+    })?;
+    Ok(drawn)
+}
+
+#[cfg(feature = "images")]
+fn load_output_intent_bytes<'o, O>(
+    objects: O,
+    catalog: Option<&'o Dict>,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<Option<Vec<u8>>, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    if rules != Rules::Iso {
+        return Ok(None);
+    }
+    let Some(cat) = catalog else {
+        return Ok(None);
+    };
+    let Some(oi_raw) = cat.get(b"OutputIntents") else {
+        return Ok(None);
+    };
+    let oi_arr = match oi_raw.as_reference() {
+        Some(id) => objects.try_resolve(id)?.and_then(Object::as_array),
+        None => oi_raw.as_array(),
+    };
+    let Some(arr) = oi_arr else {
+        return Ok(None);
+    };
+    for item in arr.iter().take(16) {
+        let d_opt = match item.as_reference() {
+            Some(id) => objects.try_resolve(id)?.and_then(Object::as_dict),
+            None => item.as_dict(),
+        };
+        let Some(d) = d_opt else {
+            continue;
+        };
+        let Some(prof_id) = d.get(b"DestOutputProfile").and_then(Object::as_reference) else {
+            continue;
+        };
+        match objects.decoded(prof_id, limits.content.color.stream_bytes) {
+            Ok(bytes) => return Ok(Some(bytes.into_owned())),
+            Err(e)
+                if matches!(
+                    e.why,
+                    pdf_objects::Why::Damaged | pdf_objects::Why::Filter | pdf_objects::Why::Limit
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(Error::Unreadable(e)),
+        }
+    }
+    Ok(None)
+}
+
+/// Decodes any indirect Image XObject stream `image_id` into straight `sRGB`
+/// `RGBA8` ([`pdf_images::RgbaImage`], `images` feature), using `page`'s
+/// `/Resources` for `/Default*` color spaces and `catalog` for `/OutputIntents`
+/// (under [`Rules::Iso`]), without collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Unreadable`] if `page`'s `/Resources` or `catalog`'s
+/// `/OutputIntents` cannot be read due to locked, capped, or failed I/O, or
+/// [`Error::Images`] if `image_id` is missing, malformed, exceeds
+/// `limits.images`, or fails to decode.
+#[cfg(feature = "images")]
+pub fn decode_image<'o, O>(
+    objects: O,
+    catalog: Option<&'o Dict>,
+    page: &pages::Page<'o>,
+    image_id: pdf_objects::ObjectId,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<pdf_images::RgbaImage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    decode_image_with(objects, catalog, page, image_id, rules, limits, &mut ())
+}
+
+/// [`decode_image`](fn@decode_image), reporting recoverable ISO 32000-2
+/// departures to `sink` ([`pdf_images::Fault`], `images` feature).
+///
+/// # Errors
+///
+/// As [`decode_image`](fn@decode_image) fails.
+#[cfg(feature = "images")]
+pub fn decode_image_with<'o, O, K>(
+    objects: O,
+    catalog: Option<&'o Dict>,
+    page: &pages::Page<'o>,
+    image_id: pdf_objects::ObjectId,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<pdf_images::RgbaImage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_images::Fault> + ?Sized,
+{
+    phase!(DEBUG, "decode_image");
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let intent_bytes = load_output_intent_bytes(objects, catalog, rules, limits)?;
+    decode_with_intent(
+        objects,
+        resources,
+        intent_bytes.as_deref(),
+        image_id,
+        rules,
+        limits,
+        sink,
+    )
+}
+
+#[cfg(feature = "images")]
+fn decode_with_intent<'o: 'b, 'b, O, K>(
+    objects: O,
+    resources: Option<&'b Object>,
+    intent_icc: Option<&'b [u8]>,
+    image_id: pdf_objects::ObjectId,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<pdf_images::RgbaImage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_images::Fault> + ?Sized,
+{
+    #[derive(Clone, Copy)]
+    struct Shorten<'o, 'b, O>(O, std::marker::PhantomData<(&'o (), &'b ())>);
+
+    impl<'o: 'b, 'b, O: Resolve<'o>> Resolve<'b> for Shorten<'o, 'b, O> {
+        fn resolve(&self, id: pdf_objects::ObjectId) -> Option<&'b Object> {
+            self.0.resolve(id)
+        }
+
+        fn try_resolve(&self, id: pdf_objects::ObjectId) -> Result<Option<&'b Object>, Unreadable> {
+            self.0.try_resolve(id)
+        }
+    }
+
+    impl<O: Streams> Streams for Shorten<'_, '_, O> {
+        fn decoded(
+            &self,
+            id: pdf_objects::ObjectId,
+            limit: usize,
+        ) -> Result<std::borrow::Cow<'_, [u8]>, Unreadable> {
+            self.0.decoded(id, limit)
+        }
+
+        fn decoded_standard(
+            &self,
+            id: pdf_objects::ObjectId,
+            limit: usize,
+        ) -> Result<pdf_objects::streams::DecodedStream<'_>, Unreadable> {
+            self.0.decoded_standard(id, limit)
+        }
+    }
+
+    let shortened = Shorten(objects, std::marker::PhantomData);
+    let mut dec_opts = pdf_images::DecodeOptions::from_resources(shortened, rules, resources)?;
+    dec_opts.color.output_intent_profile = intent_icc;
+    let img_limits = limits.reading_images();
+    Ok(pdf_images::decode_xobject_with(
+        shortened,
+        image_id,
+        resources,
+        &dec_opts,
+        &img_limits,
+        sink,
+    )?)
+}
+
+/// Decodes any indirect Image XObject stream `image_id` into native unpacked
+/// samples ([`pdf_images::RawImage`], `images` feature) before color conversion
+/// or mask compositing, without collecting non-fatal faults.
+///
+/// # Errors
+///
+/// [`Error::Unreadable`] if `page`'s `/Resources` cannot be read, or
+/// [`Error::Images`] if `image_id` is missing, malformed, exceeds
+/// `limits.images`, or fails to decode.
+#[cfg(feature = "images")]
+pub fn decode_image_raw<'o, O>(
+    objects: O,
+    page: &pages::Page<'o>,
+    image_id: pdf_objects::ObjectId,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<pdf_images::RawImage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    decode_image_raw_with(objects, page, image_id, rules, limits, &mut ())
+}
+
+/// [`decode_image_raw`](fn@decode_image_raw), reporting recoverable ISO 32000-2
+/// departures to `sink` ([`pdf_images::Fault`], `images` feature).
+///
+/// # Errors
+///
+/// As [`decode_image_raw`](fn@decode_image_raw) fails.
+#[cfg(feature = "images")]
+pub fn decode_image_raw_with<'o, O, K>(
+    objects: O,
+    page: &pages::Page<'o>,
+    image_id: pdf_objects::ObjectId,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<pdf_images::RawImage, Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_images::Fault> + ?Sized,
+{
+    phase!(DEBUG, "decode_image");
+    let resources = page.attribute(Inheritable::Resources).map(|r| r.written);
+    let dec_opts = pdf_images::DecodeOptions::from_resources(objects, rules, resources)?;
+    let img_limits = limits.reading_images();
+    Ok(pdf_images::decode_xobject_raw_with(
+        objects,
+        image_id,
+        resources,
+        &dec_opts,
+        &img_limits,
+        sink,
+    )?)
+}
+
+/// Rasterizes `page` into a [`pdf_raster::Pixmap`] (`raster` feature) under
+/// `opts` without collecting non-fatal faults.
+///
+/// **Policy & limits override:** `rules` always overrides `opts.rules`, and
+/// resource limits are clamped to the element-wise narrower of `limits` and
+/// `opts.limits` so customizing a single field on `opts.limits` never widens
+/// `limits`. Use [`pdf_raster::Pixmap::to_png`] to encode the resulting bitmap
+/// as PNG.
+///
+/// # Errors
+///
+/// [`Error::Raster`] on invalid viewports, cooperative cancellation, exceeded
+/// resource caps, or unreadable objects/streams.
+#[cfg(feature = "raster")]
+#[allow(clippy::too_many_arguments)]
+pub fn render<'o, O>(
+    objects: O,
+    catalog: Option<&'o Dict>,
+    page: &pages::Page<'o>,
+    cache: &pdf_raster::RenderCache,
+    fallback: Option<&dyn pdf_raster::FontFallback>,
+    opts: &pdf_raster::RenderOpts,
+    rules: Rules,
+    limits: &Limits,
+) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+{
+    render_with(
+        objects,
+        catalog,
+        page,
+        cache,
+        fallback,
+        opts,
+        rules,
+        limits,
+        &mut (),
+    )
+}
+
+/// [`render`](fn@render), reporting recoverable ISO 32000-2 departures to
+/// `sink` ([`pdf_raster::Fault`], `raster` feature).
+///
+/// As with [`render`](fn@render), `rules` overrides `opts.rules` and resource
+/// caps use the element-wise narrower of `limits` and `opts.limits`.
+///
+/// # Errors
+///
+/// As [`render`](fn@render) fails.
+#[cfg(feature = "raster")]
+#[allow(clippy::too_many_arguments)]
+pub fn render_with<'o, O, K>(
+    objects: O,
+    catalog: Option<&'o Dict>,
+    page: &pages::Page<'o>,
+    cache: &pdf_raster::RenderCache,
+    fallback: Option<&dyn pdf_raster::FontFallback>,
+    opts: &pdf_raster::RenderOpts,
+    rules: Rules,
+    limits: &Limits,
+    sink: &mut K,
+) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), Error>
+where
+    O: Resolve<'o> + Streams + Copy,
+    K: Sink<pdf_raster::Fault> + ?Sized,
+{
+    phase!(DEBUG, "render");
+    let mut effective = opts.clone();
+    effective.rules = rules;
+    effective.limits = limits.narrower_raster(&opts.limits);
+    Ok(pdf_raster::render_page_with(
+        objects, catalog, page, cache, fallback, &effective, sink,
+    )?)
+}
+
 /// The dictionary `value` is, as PDFium reaches one (`GetDict`): its own, or a
 /// stream's, through two references at most; none for anything else, or past
 /// that, or for a reference to nothing or to an object that's damaged.

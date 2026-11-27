@@ -36,11 +36,13 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use skrifa::MetadataProvider;
 use skrifa::instance::{LocationRef, Size};
-use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::outline::{
+    DrawSettings, HintingInstance, HintingMode, HintingOptions, OutlineGlyph, OutlinePen,
+};
 use skrifa::raw::model::Error as PsError;
 use skrifa::raw::ps::cff::CffFontRef;
 use skrifa::raw::ps::cff::index::Index;
@@ -50,9 +52,9 @@ use skrifa::raw::ps::{FontMatrix, PredefinedEncoding};
 use skrifa::raw::tables::cmap::{CmapSubtable, PlatformId};
 use skrifa::raw::tables::glyf::{Anchor, Glyph};
 use skrifa::raw::types::{CFF_SFNT_VERSION, Fixed, GlyphId, Tag};
-use skrifa::raw::{FileRef, FontRead, FontRef, TableProvider};
+use skrifa::raw::{FontRead, FontRef, TableProvider};
 
-use crate::font::{Base, OwnText, Simple, SimpleMap};
+use crate::font::{Base, OutlineOutcome, OutlineVerb, OwnText, Simple, SimpleMap};
 use crate::type1::Refusal;
 use crate::{Encoding, GlyphBox, Limits, glyph_text, name_code_point, type1};
 
@@ -68,6 +70,8 @@ pub(crate) struct Face {
     bbox: [i32; 4],
     ascender: i32,
     descender: i32,
+    /// Whether FreeType draws its glyphs hinted regardless of caller flags.
+    tricky: bool,
     /// Whether its glyphs' boxes are PDFium's: not where FreeType draws
     /// them hinted (a tricky TrueType font), where its units per em aren't
     /// FreeType's, or where a Type 1 font's charstrings aren't found as
@@ -90,6 +94,18 @@ pub(crate) struct Face {
     /// None where none does. FreeType keeps none for one in an OpenType font, whose
     /// CIDs are its glyphs (`cff_font_load`).
     cids: Option<Box<[Option<u16>]>>,
+    /// Cached `(gid, ppem_quarter)` contours and active `(ppem_quarter, HintingInstance)`.
+    outline_cache: Mutex<FaceOutlineCache>,
+}
+
+const MAX_CACHED_OUTLINES: usize = 4_096;
+
+type CachedOutlineEntry = (OutlineOutcome, Arc<[OutlineVerb]>, Option<f32>);
+
+#[derive(Default)]
+struct FaceOutlineCache {
+    hinter: Option<(u16, HintingInstance)>,
+    outlines: HashMap<(u32, u16), CachedOutlineEntry>,
 }
 
 /// A program's format, as FreeType tells them apart.
@@ -154,6 +170,7 @@ impl Face {
             bbox: [0; 4],
             ascender: 0,
             descender: 0,
+            tricky: false,
             exact: true,
             units: true,
             glyphs: 0,
@@ -161,6 +178,7 @@ impl Face {
             composites: (limits.composite_glyphs, limits.composite_depth),
             type1: None,
             cids: None,
+            outline_cache: Mutex::new(FaceOutlineCache::default()),
         };
         if let Some(font) = sfnt(&data) {
             face.sfnt(&font, named).ok_or(Malformed)?;
@@ -286,7 +304,8 @@ impl Face {
             (_, _, Some(win)) => win,
             _ => hhea,
         };
-        self.exact &= !tricky(font, named);
+        self.tricky = tricky(font, named);
+        self.exact &= !self.tricky;
         if self.format == Format::Glyf {
             // FreeType takes a `loca` as long for any format but 0, read-fonts only for
             // 1; and with long metrics that don't fit `hmtx`, or none, FreeType reads on
@@ -312,6 +331,10 @@ impl Face {
             Some((font, scanned)) => Some(View::Type1 { font, scanned }),
             None => view(&self.data, self.format, self.upem),
         }
+    }
+
+    pub(crate) fn upem(&self) -> u16 {
+        self.upem
     }
 
     /// Its box's left, bottom, right and top, as it gives them, and its heights, in
@@ -419,6 +442,41 @@ fn view(data: &[u8], format: Format, upem: u16) -> Option<View<'_>> {
         // Read once, as the face is opened.
         Format::Type1 => return None,
     })
+}
+
+/// A simple font's program and code-to-glyph map, retained for contour
+/// extraction ([`crate::Font::outline`]).
+pub(crate) struct SimpleGlyphs {
+    face: Face,
+    gids: Box<[Option<u16>; 256]>,
+}
+
+impl std::fmt::Debug for SimpleGlyphs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimpleGlyphs")
+            .field("format", &self.face.format)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SimpleGlyphs {
+    pub(crate) fn new(face: Face, gids: Box<[Option<u16>; 256]>) -> SimpleGlyphs {
+        SimpleGlyphs { face, gids }
+    }
+
+    pub(crate) fn outline_status(
+        &self,
+        code: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
+        let Some(&Some(gid)) = self.gids.get(code as usize) else {
+            return OutlineOutcome::NoGlyph;
+        };
+        self.face
+            .outline_gid_cached(u32::from(gid), hint_ppem, out)
+            .0
+    }
 }
 
 /// A CIDFont's program, its glyphs drawn as they're asked for, each once.
@@ -541,10 +599,7 @@ fn format(data: &[u8]) -> Option<Format> {
 
 /// `data` as an SFNT: its first font, where it's a collection.
 fn sfnt(data: &[u8]) -> Option<FontRef<'_>> {
-    match FileRef::new(data).ok()? {
-        FileRef::Font(font) => Some(font),
-        FileRef::Collection(fonts) => fonts.get(0).ok(),
-    }
+    FontRef::from_index(data, 0).ok()
 }
 
 /// A CFF or Type 1 box in 16.16, in whole units as FreeType rounds a face's
@@ -604,21 +659,38 @@ const TRICK_NAMES: [&str; 20] = [
     "MingLi43",
 ];
 
-/// A TrueType glyph's outline box, as skrifa draws it unscaled, FreeType's
-/// way, once its composites are known to draw few glyphs and points;
-/// missing where it, or a glyph it draws, is past the font's `glyphs`, as
-/// FreeType fails it (`load_truetype_glyph`). With it, what drawing it cost
-/// ([`Face::draw`]).
-fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Drawn, usize) {
+#[allow(clippy::large_enum_variant)]
+enum PreparedGlyf<'a> {
+    Missing {
+        read: usize,
+    },
+    Empty {
+        len: usize,
+    },
+    OverBudget {
+        read: usize,
+    },
+    Ready {
+        outlines: skrifa::outline::OutlineGlyphCollection<'a>,
+        glyph: OutlineGlyph<'a>,
+        nodes: u64,
+        points: u64,
+        cost: usize,
+    },
+}
+
+fn prepare_glyf<'a>(
+    font: &'a FontRef<'a>,
+    gid: u32,
+    glyphs: u32,
+    most: (u64, u8),
+) -> PreparedGlyf<'a> {
     if gid >= glyphs {
-        return (Drawn::Missing, 0);
+        return PreparedGlyf::Missing { read: 0 };
     }
-    let located = font.loca(None).ok().zip(font.glyf().ok());
-    let Some((loca, glyf)) = located else {
-        return (Drawn::Unknown, 0);
+    let Some((loca, glyf)) = font.loca(None).ok().zip(font.glyf().ok()) else {
+        return PreparedGlyf::Missing { read: 0 };
     };
-    // An empty glyph, or one with no contours, draws nothing; one too
-    // short for its header FreeType fails (`load_truetype_glyph`).
     let data = font
         .table_data(Tag::new(b"glyf"))
         .map_or(&[][..], |d| d.as_bytes());
@@ -627,13 +699,13 @@ fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Dra
         .get(at..at + 2)
         .map(|c| i16::from_be_bytes([c[0], c[1]]));
     match (len, contours) {
-        (0, _) | (_, Some(0)) => return (Drawn::Box([0; 4]), len),
-        (1..10, _) => return (Drawn::Missing, len),
+        (0, _) | (_, Some(0)) => return PreparedGlyf::Empty { len },
+        (1..10, _) => return PreparedGlyf::Missing { read: len },
         _ => {}
     }
     let mut counted = HashMap::new();
     let mut read = 0;
-    let (nodes, points) = match composite_glyphs(
+    let Some((nodes, points)) = composite_glyphs(
         &loca,
         &glyf,
         (glyphs, most.1),
@@ -641,33 +713,60 @@ fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Dra
         0,
         &mut counted,
         &mut read,
-    ) {
-        None => return (Drawn::Missing, read),
-        Some(drawn) => drawn,
+    ) else {
+        return PreparedGlyf::Missing { read };
     };
-    // skrifa draws no more points than a `u16` counts, failing a glyph
-    // past that only once it's made room for them all. Its own bound on
-    // components, `MAX_COMPOSITE_EDGES`, is why `outlines.get` can say none
-    // of a glyph within `most` that a caller has raised.
     if nodes > most.0 || points > u64::from(u16::MAX) {
-        return (Drawn::Unknown, read);
+        return PreparedGlyf::OverBudget { read };
     }
     let cost = read + (nodes + points) as usize;
     let outlines = font.outline_glyphs();
     let Some(glyph) = outlines.get(GlyphId::new(gid)) else {
-        return (Drawn::Unknown, cost);
+        return PreparedGlyf::OverBudget { read: cost };
     };
-    let mut pen = Pen::default();
-    let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
-    let drawn = match glyph.draw(settings, &mut pen) {
-        // A glyph with data that isn't a composite of empty ones, and no point drawn,
-        // doesn't parse here, or a component doesn't. Whether FreeType fails it too, by a
-        // parser of its own, can't be told, and skrifa draws it as nothing.
-        Ok(_) if pen.bbox.is_none() && (points > 0 || nodes == 1) => Drawn::Unknown,
-        Ok(_) => pen.bbox().map_or(Drawn::Unknown, Drawn::Box),
-        Err(_) => Drawn::Unknown,
-    };
-    (drawn, cost)
+    PreparedGlyf::Ready {
+        outlines,
+        glyph,
+        nodes,
+        points,
+        cost,
+    }
+}
+
+/// A TrueType glyph's outline box, as skrifa draws it unscaled, FreeType's
+/// way, once its composites are known to draw few glyphs and points;
+/// missing where it, or a glyph it draws, is past the font's `glyphs`, as
+/// FreeType fails it (`load_truetype_glyph`). With it, what drawing it cost
+/// ([`Face::draw`]).
+fn draw_glyf(font: &FontRef<'_>, gid: u32, glyphs: u32, most: (u64, u8)) -> (Drawn, usize) {
+    if font.loca(None).is_err() || font.glyf().is_err() {
+        return if gid >= glyphs {
+            (Drawn::Missing, 0)
+        } else {
+            (Drawn::Unknown, 0)
+        };
+    }
+    match prepare_glyf(font, gid, glyphs, most) {
+        PreparedGlyf::Missing { read } => (Drawn::Missing, read),
+        PreparedGlyf::Empty { len } => (Drawn::Box([0; 4]), len),
+        PreparedGlyf::OverBudget { read } => (Drawn::Unknown, read),
+        PreparedGlyf::Ready {
+            glyph,
+            nodes,
+            points,
+            cost,
+            ..
+        } => {
+            let mut pen = Pen::default();
+            let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
+            let drawn = match glyph.draw(settings, &mut pen) {
+                Ok(_) if pen.bbox.is_none() && (points > 0 || nodes == 1) => Drawn::Unknown,
+                Ok(_) => pen.bbox().map_or(Drawn::Unknown, Drawn::Box),
+                Err(_) => Drawn::Unknown,
+            };
+            (drawn, cost)
+        }
+    }
 }
 
 /// Where glyph `gid`'s data is in a `glyf` table `glyf_len` long, and how
@@ -814,6 +913,44 @@ impl OutlinePen for Pen {
     fn close(&mut self) {}
 }
 
+/// Shared move/line/curve/hint-mask state machine for PostScript Type 1 & Type 2 charstrings.
+#[derive(Default)]
+struct PsTracker {
+    at: (Fixed, Fixed),
+    moved: Option<(Fixed, Fixed)>,
+    masked: bool,
+}
+
+impl PsTracker {
+    fn move_to(&mut self, x: Fixed, y: Fixed) {
+        self.moved = Some((x, y));
+        self.at = (x, y);
+    }
+
+    fn accept_line(&mut self, x: Fixed, y: Fixed) -> Option<Option<(Fixed, Fixed)>> {
+        if self.at == (x, y) && !self.masked {
+            return None;
+        }
+        self.masked = false;
+        self.at = (x, y);
+        Some(self.moved.take())
+    }
+
+    fn accept_curve(&mut self, x: Fixed, y: Fixed) -> Option<(Fixed, Fixed)> {
+        self.masked = false;
+        self.at = (x, y);
+        self.moved.take()
+    }
+
+    fn close(&mut self) {
+        self.moved = None;
+    }
+
+    fn hint_mask(&mut self) {
+        self.masked = true;
+    }
+}
+
 /// The box charstring points fit in, each placed where FreeType's CFF and
 /// Type 1 engine places it unscaled (`cf2_glyphpath_hintPoint`, then
 /// `ps_builder_add_point`): a 64th of it rounded, in 16.16, then cut to
@@ -823,9 +960,7 @@ impl OutlinePen for Pen {
 #[derive(Default)]
 struct Points {
     bbox: Option<[i32; 4]>,
-    at: (Fixed, Fixed),
-    moved: Option<(Fixed, Fixed)>,
-    masked: bool,
+    tracker: PsTracker,
     /// The font's matrix, normalized, which FreeType applies to each point
     /// (`FT_Outline_Transform`), then its offset in whole units.
     matrix: Option<FontMatrix>,
@@ -852,13 +987,6 @@ impl Points {
         let (x, y) = (whole(x), whole(y));
         let b = self.bbox.get_or_insert([x, y, x, y]);
         *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
-    }
-
-    /// The move pending, drawn.
-    fn draw_move(&mut self) {
-        if let Some((x, y)) = self.moved.take() {
-            self.add(x, y);
-        }
     }
 
     fn bbox(&self) -> [i32; 4] {
@@ -904,54 +1032,64 @@ fn mul_div(a: i64, b: i64, c: i64) -> i64 {
 
 impl CommandSink for Points {
     fn move_to(&mut self, x: Fixed, y: Fixed) {
-        self.moved = Some((x, y));
-        self.at = (x, y);
+        self.tracker.move_to(x, y);
     }
 
     fn line_to(&mut self, x: Fixed, y: Fixed) {
-        if self.at == (x, y) && !self.masked {
+        let Some(pending) = self.tracker.accept_line(x, y) else {
             return;
+        };
+        if let Some((mx, my)) = pending {
+            self.add(mx, my);
         }
-        self.masked = false;
-        self.draw_move();
         self.add(x, y);
-        self.at = (x, y);
     }
 
     fn curve_to(&mut self, cx0: Fixed, cy0: Fixed, cx1: Fixed, cy1: Fixed, x: Fixed, y: Fixed) {
-        self.masked = false;
-        self.draw_move();
+        if let Some((mx, my)) = self.tracker.accept_curve(x, y) {
+            self.add(mx, my);
+        }
         self.add(cx0, cy0);
         self.add(cx1, cy1);
         self.add(x, y);
-        self.at = (x, y);
     }
 
-    fn close(&mut self) {}
+    fn close(&mut self) {
+        self.tracker.close();
+    }
 
     fn hint_mask(&mut self, _: &[u8]) {
-        self.masked = true;
+        self.tracker.hint_mask();
     }
 }
 
-/// A CFF glyph's box, its charstring evaluated within `fuel` bytes:
-/// `gid` taken for a CID in a CID-keyed font, its glyph `cids` gives, and
-/// its points scaled from its font dictionary's units to the font's
-/// `upem`, as FreeType takes and scales them (`cff_slot_load`). With it,
-/// the charstring evaluated.
-fn draw_cff(
+enum PsRun<S> {
+    Missing,
+    Malformed,
+    OverBudget {
+        spent: usize,
+    },
+    Ok {
+        sink: S,
+        raw_width: Option<Fixed>,
+        spent: usize,
+    },
+}
+
+fn eval_cff<S: CommandSink>(
     cff: &CffFontRef<'_>,
     cids: Option<&[Option<u16>]>,
     gid: u32,
     upem: u16,
     fuel: usize,
-) -> (Drawn, usize) {
+    make_sink: impl FnOnce(Option<FontMatrix>, Option<i64>) -> S,
+) -> PsRun<S> {
     let gid = match cids {
         Some(cids) if gid != 0 => match cids.get(gid as usize).copied().flatten() {
             Some(g) => u32::from(g),
-            None => return (Drawn::Missing, 0),
+            None => return PsRun::Missing,
         },
-        _ if gid >= cff.num_glyphs() => return (Drawn::Missing, 0),
+        _ if gid >= cff.num_glyphs() => return PsRun::Missing,
         _ => gid,
     };
     let glyph = GlyphId::new(gid);
@@ -959,11 +1097,8 @@ fn draw_cff(
         .subfont_index(glyph)
         .and_then(|i| cff.subfont(i, &[]).ok())
     else {
-        return (Drawn::Unknown, 0);
+        return PsRun::Malformed;
     };
-    // The matrix FreeType applies, normalized (`cff_face_init`): the top
-    // dictionary's, or a CID-keyed font's dictionary's of its own, under
-    // the top's where it has one, its units scaled to the top's.
     let top = cff.matrix().copied();
     let top_units = top.map_or(i32::from(upem), |m| m.scale);
     let (matrix, scale) = match (cff.is_cid(), subfont.matrix()) {
@@ -986,42 +1121,102 @@ fn draw_cff(
             .and_then(|d| Index::new(d, false).ok())
         {
             Some(index) => index,
-            None => return (Drawn::Unknown, 0),
+            None => return PsRun::Malformed,
         },
     };
     let Some(charstring) = cff.charstrings().get(gid as usize) else {
-        return (Drawn::Unknown, 0);
+        return PsRun::Malformed;
     };
     let context = Type2 {
         cff,
         subrs: &subrs,
         fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
     };
-    let mut sink = Points {
-        matrix: matrix.filter(|&m| m != FontMatrix::IDENTITY),
-        scale,
-        ..Points::default()
-    };
-    evaluated(&context, &context.fuel, charstring, fuel, &mut sink)
+    let filtered_matrix = matrix.filter(|&m| m != FontMatrix::IDENTITY);
+    if context.fuel.0.get() == 0 {
+        return PsRun::OverBudget { spent: fuel };
+    }
+    let mut sink = make_sink(filtered_matrix, scale);
+    let res = charstring::evaluate(&context, None, charstring, &mut sink);
+    let spent = fuel - context.fuel.0.get();
+    match res {
+        Ok(wx_opt) => {
+            let raw_width = wx_opt
+                .map(|w| w + subfont.nominal_width())
+                .or_else(|| subfont.default_width());
+            PsRun::Ok {
+                sink,
+                raw_width,
+                spent,
+            }
+        }
+        Err(PsError::LimitExceeded) => PsRun::OverBudget { spent },
+        Err(_) if context.fuel.0.get() == 0 => PsRun::OverBudget { spent },
+        Err(_) => PsRun::Malformed,
+    }
 }
 
-/// `charstring` evaluated in `context`, `left` its fuel, what's left of
-/// `fuel` once the charstring's charged: its points' box, or unknown where
-/// it fails, runs out of fuel or passes the evaluator's own million
-/// operations (FreeType's has no such bound); and how much of `fuel` it spent.
-fn evaluated(
-    context: &impl CharstringContext,
-    left: &Fuel,
-    charstring: &[u8],
+fn eval_type1<S: CommandSink>(
+    font: &Type1Font,
+    scanned: &type1::Scanned,
+    gid: u32,
     fuel: usize,
-    sink: &mut Points,
+    make_sink: impl FnOnce(Option<FontMatrix>) -> S,
+) -> PsRun<S> {
+    if gid >= font.num_glyphs() {
+        return PsRun::Missing;
+    }
+    let found = font
+        .glyph_name(GlyphId::new(gid))
+        .and_then(|n| scanned.charstrings.get(n.as_bytes()));
+    let Some(Some(charstring)) = found else {
+        return PsRun::Malformed;
+    };
+    let context = Type1 {
+        font,
+        build_char_len: scanned.build_char_len,
+        fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
+    };
+    let filtered_matrix = font
+        .subfont(0)
+        .map(Subfont::matrix)
+        .filter(|&m| m != FontMatrix::IDENTITY);
+    if context.fuel.0.get() == 0 {
+        return PsRun::OverBudget { spent: fuel };
+    }
+    let mut sink = make_sink(filtered_matrix);
+    let res = charstring::evaluate(&context, None, charstring, &mut sink);
+    let spent = fuel - context.fuel.0.get();
+    match res {
+        Ok(raw_width) => PsRun::Ok {
+            sink,
+            raw_width,
+            spent,
+        },
+        Err(PsError::LimitExceeded) => PsRun::OverBudget { spent },
+        Err(_) if context.fuel.0.get() == 0 => PsRun::OverBudget { spent },
+        Err(_) => PsRun::Malformed,
+    }
+}
+
+/// A CFF glyph's box, its charstring evaluated within `fuel` bytes.
+fn draw_cff(
+    cff: &CffFontRef<'_>,
+    cids: Option<&[Option<u16>]>,
+    gid: u32,
+    upem: u16,
+    fuel: usize,
 ) -> (Drawn, usize) {
-    let drawn =
-        match left.0.get() > 0 && charstring::evaluate(context, None, charstring, sink).is_ok() {
-            true => Drawn::Box(sink.bbox()),
-            false => Drawn::Unknown,
-        };
-    (drawn, fuel - left.0.get())
+    match eval_cff(cff, cids, gid, upem, fuel, |matrix, scale| Points {
+        matrix,
+        scale,
+        ..Points::default()
+    }) {
+        PsRun::Missing => (Drawn::Missing, 0),
+        PsRun::Malformed => (Drawn::Unknown, 0),
+        PsRun::OverBudget { spent } => (Drawn::Unknown, spent),
+        PsRun::Ok { sink, spent, .. } => (Drawn::Box(sink.bbox()), spent),
+    }
 }
 
 /// A CID-keyed CFF's glyph by CID ([`Face::cids`]), as FreeType maps them
@@ -1113,28 +1308,15 @@ impl CharstringContext for Type2<'_, '_> {
 /// glyph's name, evaluated within `fuel` bytes; with it, the charstring
 /// evaluated.
 fn draw_type1(font: &Type1Font, scanned: &type1::Scanned, gid: u32, fuel: usize) -> (Drawn, usize) {
-    if gid >= font.num_glyphs() {
-        return (Drawn::Missing, 0);
-    }
-    let found = font
-        .glyph_name(GlyphId::new(gid))
-        .and_then(|n| scanned.charstrings.get(n.as_bytes()));
-    let Some(Some(charstring)) = found else {
-        return (Drawn::Unknown, 0);
-    };
-    let context = Type1 {
-        font,
-        build_char_len: scanned.build_char_len,
-        fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
-    };
-    let mut sink = Points {
-        matrix: font
-            .subfont(0)
-            .map(Subfont::matrix)
-            .filter(|&m| m != FontMatrix::IDENTITY),
+    match eval_type1(font, scanned, gid, fuel, |matrix| Points {
+        matrix,
         ..Points::default()
-    };
-    evaluated(&context, &context.fuel, charstring, fuel, &mut sink)
+    }) {
+        PsRun::Missing => (Drawn::Missing, 0),
+        PsRun::Malformed => (Drawn::Unknown, 0),
+        PsRun::OverBudget { spent } => (Drawn::Unknown, spent),
+        PsRun::Ok { sink, spent, .. } => (Drawn::Box(sink.bbox()), spent),
+    }
 }
 
 /// Whether the charstrings the scan found are read-fonts': each glyph's that a
@@ -1199,12 +1381,14 @@ impl CharstringContext for Type1<'_> {
 }
 
 /// The glyph PDFium's `glyph_index_` holds for a code: one, `0xffff` for
-/// none, or unknown here.
+/// none, or unknown here (carrying a best-effort glyph ID when available so
+/// [`crate::Font::outline`] can still render the embedded glyph while
+/// [`crate::Font::char_box`] stays conservative).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gid {
     Glyph(u16),
     None,
-    Unknown,
+    Unknown(Option<u16>),
 }
 
 impl Gid {
@@ -1214,6 +1398,36 @@ impl Gid {
             0xffff => Gid::None,
             g => Gid::Glyph(g),
         }
+    }
+
+    fn best_non_zero(self) -> Option<u16> {
+        match self {
+            Gid::Glyph(g) | Gid::Unknown(Some(g)) if g != 0 => Some(g),
+            _ => None,
+        }
+    }
+}
+
+/// ISO 32000-2 Annex D.2 `PDFDocEncoding` scalar lookup for best-effort glyph
+/// resolution when `/BaseEncoding /PDFDocEncoding` is used with an embedded program.
+fn pdf_doc_unicode(code: u8) -> Option<u32> {
+    const LOW: [u32; 8] = [
+        0x02d8, 0x02c7, 0x02c6, 0x02d9, 0x02dd, 0x02db, 0x02da, 0x02dc,
+    ];
+    const HIGH: [u32; 32] = [
+        0x2022, 0x2020, 0x2021, 0x2026, 0x2014, 0x2013, 0x0192, 0x2044, 0x2039, 0x203a, 0x2212,
+        0x2030, 0x201e, 0x201c, 0x201d, 0x2018, 0x2019, 0x201a, 0x2122, 0xfb01, 0xfb02, 0x0141,
+        0x0152, 0x0160, 0x0178, 0x017d, 0x0131, 0x0142, 0x0153, 0x0161, 0x017e, 0,
+    ];
+    match code {
+        0x18..=0x1f => Some(LOW[usize::from(code - 0x18)]),
+        0x80..=0x9f => match HIGH[usize::from(code - 0x80)] {
+            0 => None,
+            u => Some(u),
+        },
+        0x7f | 0xad => None,
+        0x20..=0x7e | 0xa0..=0xff => Some(u32::from(code)),
+        _ => None,
     }
 }
 
@@ -1259,6 +1473,11 @@ impl Face {
                 }
             }
         }
+        map.gids = Box::new(gids.map(|gid| match gid {
+            Gid::Glyph(g) => Some(g),
+            Gid::Unknown(g) => g,
+            Gid::None => None,
+        }));
         // Where its boxes aren't PDFium's, none is said, what has no glyph among them.
         if !self.exact {
             return map;
@@ -1273,7 +1492,7 @@ impl Face {
                     found
                 }),
                 Gid::None => Some(GlyphBox::new(-1.0, -1.0, -1.0, -1.0)),
-                Gid::Unknown => None,
+                Gid::Unknown(_) => None,
             };
         }
         map.cost = cost;
@@ -1382,7 +1601,20 @@ fn truetype_gids(
         for (code, slot) in gids.iter_mut().enumerate() {
             let name = match names.name(code as u8) {
                 Named::Unknown => {
-                    *slot = Gid::Unknown;
+                    let best = (names.base == Base::PdfDoc)
+                        .then(|| pdf_doc_unicode(code as u8))
+                        .flatten()
+                        .and_then(|u| match kind {
+                            Mapped::Unicode => charmaps.gid(u).best_non_zero(),
+                            Mapped::MacRoman => {
+                                mac_roman_code(u).and_then(|m| charmaps.gid(m).best_non_zero())
+                            }
+                            Mapped::Symbol => u8::try_from(u)
+                                .ok()
+                                .and_then(|b| charmaps.ms_symbol(b).best_non_zero()),
+                            Mapped::Other => None,
+                        });
+                    *slot = Gid::Unknown(best);
                     text.push(None);
                     continue;
                 }
@@ -1499,9 +1731,15 @@ fn type1_gids(
                     Gid::Glyph(0) => (Gid::Glyph(0), Some(None)),
                     Gid::Glyph(g) => (Gid::Glyph(g), Some(charmaps.glyph_text(u32::from(g)))),
                     Gid::None => (Gid::None, Some(None)),
-                    Gid::Unknown => (Gid::Unknown, None),
+                    Gid::Unknown(best) => (Gid::Unknown(best), None),
                 },
-                Named::Unknown => (Gid::Unknown, None),
+                Named::Unknown => {
+                    let best = (encoding.base == Base::PdfDoc)
+                        .then(|| pdf_doc_unicode(code as u8))
+                        .flatten()
+                        .and_then(|u| charmaps.gid(u).best_non_zero());
+                    (Gid::Unknown(best), None)
+                }
             };
             *slot = gid;
             text.push(said);
@@ -1517,7 +1755,11 @@ fn type1_gids(
                 continue;
             }
             Named::Unknown => {
-                *slot = Gid::Unknown;
+                let best = (encoding.base == Base::PdfDoc && unicode)
+                    .then(|| pdf_doc_unicode(code as u8))
+                    .flatten()
+                    .and_then(|u| charmaps.gid(u).best_non_zero());
+                *slot = Gid::Unknown(best);
                 text.push(None);
                 continue;
             }
@@ -1862,14 +2104,25 @@ impl<'a> Charmaps<'a> {
             return Gid::Glyph(0);
         };
         let found = match &map.lookup {
-            Lookup::Table(CmapSubtable::Format8(_)) => return Gid::Unknown,
+            Lookup::Table(sub @ CmapSubtable::Format8(_)) => {
+                let best = sub
+                    .map_codepoint(code)
+                    .map(|g| g.to_u32())
+                    .filter(|&g| g < self.glyphs && g as u16 != 0xffff)
+                    .map(|g| g as u16);
+                return Gid::Unknown(best);
+            }
             Lookup::Format2(table) => table.glyph(code),
             Lookup::Table(table) => table.map_codepoint(code).map_or(0, |g| g.to_u32()),
             Lookup::Format4(table) => table.glyph(code, self.glyphs),
             Lookup::Codes(codes) => codes.get(code as usize).copied().unwrap_or(0),
             Lookup::Names(unicodes) => match unicodes.glyph(code) {
-                Some(found) => found,
-                None => return Gid::Unknown,
+                Ok(found) => found,
+                Err(first) => {
+                    let best =
+                        (first < self.glyphs && first as u16 != 0xffff).then_some(first as u16);
+                    return Gid::Unknown(best);
+                }
             },
         };
         Gid::of(if found < self.glyphs { found } else { 0 })
@@ -2114,10 +2367,11 @@ impl<'a> Format4<'a> {
 /// share a code point, which FreeType finds rests on how its sort orders
 /// them, so it's unknown.
 struct PsUnicodes {
-    /// Code points' glyphs: None where more than one has it.
-    plain: HashMap<u32, Option<u32>>,
+    /// Code points' glyphs: `(first_gid, unique)` (`unique == false` when more than one glyph
+    /// shares the code point).
+    plain: HashMap<u32, (u32, bool)>,
     /// Variants' code points' glyphs, the same way.
-    variants: HashMap<u32, Option<u32>>,
+    variants: HashMap<u32, (u32, bool)>,
 }
 
 /// The code points FreeType adds for glyphs by these names, where no name
@@ -2144,10 +2398,10 @@ impl PsUnicodes {
             variants: HashMap::new(),
         };
         let mut extra: [Option<Option<u32>>; 10] = [None; 10];
-        let add = |map: &mut HashMap<u32, Option<u32>>, unicode: u32, gid: u32| {
+        let add = |map: &mut HashMap<u32, (u32, bool)>, unicode: u32, gid: u32| {
             map.entry(unicode)
-                .and_modify(|g| *g = g.filter(|&g| g == gid))
-                .or_insert(Some(gid));
+                .and_modify(|(first, unique)| *unique &= *first == gid)
+                .or_insert((gid, true));
         };
         for (gid, name) in named.iter().filter(|(_, n)| !n.is_empty()) {
             if let Some(n) = EXTRA_GLYPHS.iter().position(|(_, e)| *e == &name[..]) {
@@ -2175,11 +2429,17 @@ impl PsUnicodes {
         (!unicodes.plain.is_empty() || !unicodes.variants.is_empty()).then_some(unicodes)
     }
 
-    /// The glyph `unicode` maps to, 0 for none; None where that can't be said.
-    fn glyph(&self, unicode: u32) -> Option<u32> {
-        match self.plain.get(&unicode) {
-            Some(found) => *found,
-            None => self.variants.get(&unicode).copied().unwrap_or(Some(0)),
+    /// The glyph `unicode` maps to (`Ok(0)` for none), or `Err(first_gid)` when multiple
+    /// glyphs share `unicode` and FreeType's sort order cannot be predicted for `char_box`.
+    fn glyph(&self, unicode: u32) -> Result<u32, u32> {
+        let &(first, unique) = self
+            .plain
+            .get(&unicode)
+            .or_else(|| self.variants.get(&unicode))
+            .unwrap_or(&(0, true));
+        match unique {
+            true => Ok(first),
+            false => Err(first),
         }
     }
 }
@@ -2355,6 +2615,666 @@ impl<'a> Format2<'a> {
         {
             0 => 0,
             g => (i32::from(g) + i32::from(delta)) as u32 & 0xFFFF,
+        }
+    }
+}
+
+impl CidGlyphs {
+    pub(crate) fn outline_status(
+        &self,
+        cid: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
+        let cid_u16 = usize::from(cid as u16);
+        let gid = match &self.to_gid {
+            Some(map) => map
+                .get(cid_u16 * 2..cid_u16 * 2 + 2)
+                .map(|g| u32::from(u16::from_be_bytes([g[0], g[1]]))),
+            None => Some(cid_u16 as u32),
+        };
+        let Some(gid) = gid else {
+            return OutlineOutcome::NoGlyph;
+        };
+        self.face.outline_gid_cached(gid, hint_ppem, out).0
+    }
+}
+
+enum OwnedSubtable {
+    Sfnt { subtable_idx: u16 },
+    Codes(Box<[u32; 256]>),
+    Names(Box<PsUnicodes>),
+}
+
+/// Prebuilt character-to-GID lookup + memoized `(gid, advance)` cache for [`crate::FallbackProgram`],
+/// avoiding per-character `post` glyph-name scans (`Charmaps::of`).
+pub(crate) struct FallbackMap {
+    unicode: Option<OwnedSubtable>,
+    symbol: Option<OwnedSubtable>,
+    glyphs: u32,
+    memo: Mutex<HashMap<char, Option<(u32, f32)>>>,
+}
+
+impl FallbackMap {
+    fn map_subtable(&self, view: &View<'_>, sub: &OwnedSubtable, code: u32) -> Gid {
+        let found = match sub {
+            OwnedSubtable::Codes(codes) => codes.get(code as usize).copied().unwrap_or(0),
+            OwnedSubtable::Names(unicodes) => match unicodes.glyph(code) {
+                Ok(found) => found,
+                Err(first) => {
+                    let best =
+                        (first < self.glyphs && first as u16 != 0xffff).then_some(first as u16);
+                    return Gid::Unknown(best);
+                }
+            },
+            OwnedSubtable::Sfnt { subtable_idx } => {
+                let (View::Glyf(font)
+                | View::Cff {
+                    sfnt: Some(font), ..
+                }) = view
+                else {
+                    return Gid::Glyph(0);
+                };
+                let Ok(cmap) = font.cmap() else {
+                    return Gid::Glyph(0);
+                };
+                let idx = *subtable_idx as usize;
+                let Some(record) = cmap.encoding_records().get(idx) else {
+                    return Gid::Glyph(0);
+                };
+                let Ok(table) = cmap.subtable(*subtable_idx) else {
+                    return Gid::Glyph(0);
+                };
+                let data = cmap.offset_data().as_bytes();
+                let at = record.subtable_offset().to_u32() as usize;
+                match table {
+                    sub @ CmapSubtable::Format8(_) => {
+                        let best = sub
+                            .map_codepoint(code)
+                            .map(|g| g.to_u32())
+                            .filter(|&g| g < self.glyphs && g as u16 != 0xffff)
+                            .map(|g| g as u16);
+                        return Gid::Unknown(best);
+                    }
+                    CmapSubtable::Format2(_) => match data.get(at..).and_then(Format2::read) {
+                        Some(t2) => t2.glyph(code),
+                        None => 0,
+                    },
+                    CmapSubtable::Format4(_) => match data.get(at..).and_then(Format4::read) {
+                        Some(t4) => t4.glyph(code, self.glyphs),
+                        None => 0,
+                    },
+                    other => other.map_codepoint(code).map_or(0, |g| g.to_u32()),
+                }
+            }
+        };
+        Gid::of(if found < self.glyphs { found } else { 0 })
+    }
+
+    fn resolve_gid(&self, view: &View<'_>, ch: char) -> Option<u32> {
+        if let Some(uni) = &self.unicode
+            && let Some(gid) = self.map_subtable(view, uni, u32::from(ch)).best_non_zero()
+        {
+            return Some(u32::from(gid));
+        }
+        if u32::from(ch) <= 0xFF
+            && let Some(sym) = &self.symbol
+        {
+            let byte = ch as u8;
+            for page in [0x00_u32, 0xf0, 0xf1, 0xf2] {
+                if let Some(gid) = self
+                    .map_subtable(view, sym, (page << 8) | u32::from(byte))
+                    .best_non_zero()
+                {
+                    return Some(u32::from(gid));
+                }
+            }
+        }
+        None
+    }
+}
+
+fn capture_owned_subtable(view: &View<'_>, map: &Charmap<'_>) -> Option<OwnedSubtable> {
+    match &map.lookup {
+        Lookup::Codes(codes) => Some(OwnedSubtable::Codes(codes.clone())),
+        Lookup::Names(names) => Some(OwnedSubtable::Names(Box::new(PsUnicodes {
+            plain: names.plain.clone(),
+            variants: names.variants.clone(),
+        }))),
+        Lookup::Table(_) | Lookup::Format2(_) | Lookup::Format4(_) => {
+            let (View::Glyf(font)
+            | View::Cff {
+                sfnt: Some(font), ..
+            }) = view
+            else {
+                return None;
+            };
+            let cmap = font.cmap().ok()?;
+            for (i, record) in cmap.encoding_records().iter().enumerate() {
+                let platform = match record.platform_id() {
+                    PlatformId::Unicode => 0,
+                    PlatformId::Macintosh => 1,
+                    PlatformId::ISO => 2,
+                    PlatformId::Windows => 3,
+                    PlatformId::Custom => 4,
+                    _ => continue,
+                };
+                if platform == map.platform && record.encoding_id() == map.encoding {
+                    return Some(OwnedSubtable::Sfnt {
+                        subtable_idx: i as u16,
+                    });
+                }
+            }
+            None
+        }
+    }
+}
+
+impl Face {
+    pub(crate) fn fallback_map(&self) -> FallbackMap {
+        let Some(view) = self.view() else {
+            return FallbackMap {
+                unicode: None,
+                symbol: None,
+                glyphs: 0,
+                memo: Mutex::new(HashMap::new()),
+            };
+        };
+        let mut charmaps = Charmaps::of(&view, self.glyphs);
+        let unicode = if charmaps.select_unicode() {
+            charmaps
+                .selected
+                .and_then(|i| charmaps.maps.get(i))
+                .and_then(|m| capture_owned_subtable(&view, m))
+        } else {
+            None
+        };
+        let symbol = if charmaps.select_id(3, 0) {
+            charmaps
+                .selected
+                .and_then(|i| charmaps.maps.get(i))
+                .and_then(|m| capture_owned_subtable(&view, m))
+        } else {
+            None
+        };
+        FallbackMap {
+            unicode,
+            symbol,
+            glyphs: charmaps.glyphs,
+            memo: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn effective_ppem_key(&self, hint_ppem: Option<f32>) -> (Option<f32>, u16) {
+        let want_ppem = match (hint_ppem, self.tricky) {
+            (Some(p), _) if p.is_finite() && p >= 4.0 => Some(p.min(512.0)),
+            (None, true) => Some(16.0),
+            _ => None,
+        };
+        match want_ppem {
+            Some(p) => {
+                let key = ((p * 4.0).round() as u16).max(1);
+                (Some(f32::from(key) * 0.25), key)
+            }
+            None => (None, 0),
+        }
+    }
+
+    /// Emits contour verbs in glyph units (`1000.0` = 1 em) for `gid`, consulting and populating
+    /// the bounded per-face `(gid, ppem)` outline cache.
+    fn outline_gid_cached(
+        &self,
+        gid: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> (OutlineOutcome, Option<f32>) {
+        if self.upem == 0 {
+            return (OutlineOutcome::NoGlyph, None);
+        }
+        let (eff_ppem, ppem_key) = self.effective_ppem_key(hint_ppem);
+        {
+            let guard = self
+                .outline_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some((outcome, verbs, ps_adv)) = guard.outlines.get(&(gid, ppem_key)) {
+                out.extend_from_slice(verbs);
+                return (*outcome, *ps_adv);
+            }
+        }
+
+        let Some(view) = self.view() else {
+            return (OutlineOutcome::NoProgram, None);
+        };
+        let mut local_verbs = Vec::new();
+        let (outcome, ps_adv) = match &view {
+            View::Glyf(font) => (
+                self.outline_glyf_cached_hinter(font, gid, eff_ppem, ppem_key, &mut local_verbs),
+                None,
+            ),
+            View::Cff { cff, .. } => outline_cff(
+                cff,
+                self.cids.as_deref(),
+                gid,
+                self.upem,
+                self.fuel,
+                &mut local_verbs,
+            ),
+            View::Type1 { font, scanned } => {
+                outline_type1(font, scanned, gid, self.upem, self.fuel, &mut local_verbs)
+            }
+        };
+        if outcome != OutlineOutcome::Drawn {
+            local_verbs.clear();
+        }
+        out.extend_from_slice(&local_verbs);
+        let shared: Arc<[OutlineVerb]> = local_verbs.into();
+        let mut guard = self
+            .outline_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if guard.outlines.len() >= MAX_CACHED_OUTLINES {
+            guard.outlines.clear();
+        }
+        guard
+            .outlines
+            .insert((gid, ppem_key), (outcome, shared, ps_adv));
+        (outcome, ps_adv)
+    }
+
+    fn outline_glyf_cached_hinter(
+        &self,
+        font: &FontRef<'_>,
+        gid: u32,
+        eff_ppem: Option<f32>,
+        ppem_key: u16,
+        out: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
+        let PreparedGlyf::Ready {
+            outlines, glyph, ..
+        } = prepare_glyf(font, gid, self.glyphs, self.composites)
+        else {
+            return match prepare_glyf(font, gid, self.glyphs, self.composites) {
+                PreparedGlyf::Empty { .. } => OutlineOutcome::Drawn,
+                PreparedGlyf::OverBudget { .. } => OutlineOutcome::BudgetExceeded,
+                _ => OutlineOutcome::NoGlyph,
+            };
+        };
+
+        if let Some(ppem) = eff_ppem {
+            let mut guard = self
+                .outline_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !matches!(guard.hinter.as_ref(), Some((k, _)) if *k == ppem_key) {
+                let opts = HintingOptions::from(HintingMode::Smooth {
+                    lcd_subpixel: None,
+                    preserve_linear_metrics: true,
+                });
+                guard.hinter =
+                    HintingInstance::new(&outlines, Size::new(ppem), LocationRef::default(), opts)
+                        .ok()
+                        .map(|h| (ppem_key, h));
+            }
+            if let Some((_, hinter)) = guard.hinter.as_ref() {
+                let start = out.len();
+                let mut pen = ScaledPen {
+                    scale: 1000.0 / ppem,
+                    out,
+                    ok: true,
+                };
+                if glyph
+                    .draw(DrawSettings::hinted(hinter, false), &mut pen)
+                    .is_ok()
+                    && pen.ok
+                {
+                    return OutlineOutcome::Drawn;
+                }
+                pen.out.truncate(start);
+            }
+        }
+
+        let mut pen = ScaledPen {
+            scale: 1000.0 / f32::from(self.upem),
+            out,
+            ok: true,
+        };
+        if glyph
+            .draw(
+                DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
+                &mut pen,
+            )
+            .is_ok()
+            && pen.ok
+        {
+            OutlineOutcome::Drawn
+        } else {
+            OutlineOutcome::NoGlyph
+        }
+    }
+
+    /// Maps `ch` via `map`, emits its outline in glyph units, and returns its horizontal advance
+    /// in glyph units (`1000.0` = 1 em).
+    pub(crate) fn outline_char(
+        &self,
+        map: &FallbackMap,
+        ch: char,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> Option<f32> {
+        if self.upem == 0 {
+            return None;
+        }
+        let cached = {
+            let guard = map.memo.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.get(&ch).copied()
+        };
+        if let Some(entry) = cached {
+            let (gid, adv) = entry?;
+            let start = out.len();
+            let (outcome, _) = self.outline_gid_cached(gid, hint_ppem, out);
+            if outcome != OutlineOutcome::Drawn {
+                out.truncate(start);
+                return None;
+            }
+            return Some(adv);
+        }
+
+        let view = self.view()?;
+        let Some(gid) = map.resolve_gid(&view, ch) else {
+            let mut guard = map.memo.lock().unwrap_or_else(PoisonError::into_inner);
+            if guard.len() < MAX_CACHED_OUTLINES {
+                guard.insert(ch, None);
+            }
+            return None;
+        };
+
+        let start_len = out.len();
+        let (outcome, ps_adv) = self.outline_gid_cached(gid, hint_ppem, out);
+        if outcome != OutlineOutcome::Drawn {
+            return None;
+        }
+        let scale = 1000.0 / f32::from(self.upem);
+        let advance = match &view {
+            View::Glyf(font)
+            | View::Cff {
+                sfnt: Some(font), ..
+            } => font
+                .hmtx()
+                .ok()
+                .and_then(|hmtx| hmtx.advance(GlyphId::new(gid)))
+                .map(|adv| f32::from(adv) * scale),
+            View::Cff { sfnt: None, .. } | View::Type1 { .. } => ps_adv,
+        };
+        if advance.is_none() {
+            out.truncate(start_len);
+        }
+        let memo_val = advance.map(|a| (gid, a));
+        let mut guard = map.memo.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.len() >= MAX_CACHED_OUTLINES {
+            guard.clear();
+        }
+        guard.insert(ch, memo_val);
+        advance
+    }
+}
+
+struct ScaledPen<'a> {
+    scale: f32,
+    out: &'a mut Vec<OutlineVerb>,
+    ok: bool,
+}
+
+impl ScaledPen<'_> {
+    fn map(&self, x: f32, y: f32) -> (f32, f32) {
+        (x * self.scale, y * self.scale)
+    }
+
+    fn check(&mut self, x: f32, y: f32) -> bool {
+        let finite = x.is_finite() && y.is_finite();
+        self.ok &= finite;
+        finite
+    }
+}
+
+impl OutlinePen for ScaledPen<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map(x, y);
+        if self.check(x, y) {
+            self.out.push(OutlineVerb::MoveTo(x, y));
+        }
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map(x, y);
+        if self.check(x, y) {
+            self.out.push(OutlineVerb::LineTo(x, y));
+        }
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        let (cx0, cy0) = self.map(cx0, cy0);
+        let (x, y) = self.map(x, y);
+        if self.check(cx0, cy0) && self.check(x, y) {
+            self.out.push(OutlineVerb::QuadTo(cx0, cy0, x, y));
+        }
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        let (cx0, cy0) = self.map(cx0, cy0);
+        let (cx1, cy1) = self.map(cx1, cy1);
+        let (x, y) = self.map(x, y);
+        if self.check(cx0, cy0) && self.check(cx1, cy1) && self.check(x, y) {
+            self.out
+                .push(OutlineVerb::CurveTo(cx0, cy0, cx1, cy1, x, y));
+        }
+    }
+
+    fn close(&mut self) {
+        self.out.push(OutlineVerb::Close);
+    }
+}
+
+struct PsOutlineSink<'a> {
+    matrix: Option<FontMatrix>,
+    scale: Option<i64>,
+    to_glyph: f64,
+    tracker: PsTracker,
+    open_contour: bool,
+    out: &'a mut Vec<OutlineVerb>,
+    ok: bool,
+}
+
+impl PsOutlineSink<'_> {
+    fn transform(&mut self, x: Fixed, y: Fixed) -> Option<(f32, f32)> {
+        let (mut xf, mut yf) = (x.to_f64(), y.to_f64());
+        if let Some(m) = self.matrix {
+            (xf, yf) = (
+                xf * m.xx.to_f64() + yf * m.xy.to_f64() + f64::from(m.dx.to_bits()),
+                xf * m.yx.to_f64() + yf * m.yy.to_f64() + f64::from(m.dy.to_bits()),
+            );
+        }
+        if let Some(s) = self.scale {
+            let sf = s as f64 / 65536.0;
+            xf *= sf;
+            yf *= sf;
+        }
+        let (ox, oy) = ((xf * self.to_glyph) as f32, (yf * self.to_glyph) as f32);
+        if ox.is_finite() && oy.is_finite() {
+            Some((ox, oy))
+        } else {
+            self.ok = false;
+            None
+        }
+    }
+
+    fn flush_pending(&mut self, pending: Option<(Fixed, Fixed)>) -> bool {
+        if let Some((mx, my)) = pending {
+            if self.open_contour {
+                self.out.push(OutlineVerb::Close);
+                self.open_contour = false;
+            }
+            if let Some((ox, oy)) = self.transform(mx, my) {
+                self.out.push(OutlineVerb::MoveTo(ox, oy));
+                self.open_contour = true;
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn finish(&mut self) {
+        if self.open_contour {
+            self.out.push(OutlineVerb::Close);
+            self.open_contour = false;
+        }
+    }
+}
+
+impl CommandSink for PsOutlineSink<'_> {
+    fn move_to(&mut self, x: Fixed, y: Fixed) {
+        if self.open_contour {
+            self.out.push(OutlineVerb::Close);
+            self.open_contour = false;
+        }
+        self.tracker.move_to(x, y);
+    }
+
+    fn line_to(&mut self, x: Fixed, y: Fixed) {
+        let Some(pending) = self.tracker.accept_line(x, y) else {
+            return;
+        };
+        if !self.flush_pending(pending) {
+            return;
+        }
+        if let Some((ox, oy)) = self.transform(x, y) {
+            self.out.push(OutlineVerb::LineTo(ox, oy));
+        }
+    }
+
+    fn curve_to(&mut self, cx0: Fixed, cy0: Fixed, cx1: Fixed, cy1: Fixed, x: Fixed, y: Fixed) {
+        let pending = self.tracker.accept_curve(x, y);
+        if !self.flush_pending(pending) {
+            return;
+        }
+        if let (Some((ox0, oy0)), Some((ox1, oy1)), Some((ox, oy))) = (
+            self.transform(cx0, cy0),
+            self.transform(cx1, cy1),
+            self.transform(x, y),
+        ) {
+            self.out
+                .push(OutlineVerb::CurveTo(ox0, oy0, ox1, oy1, ox, oy));
+        }
+    }
+
+    fn close(&mut self) {
+        if self.open_contour {
+            self.out.push(OutlineVerb::Close);
+            self.open_contour = false;
+        }
+        self.tracker.close();
+    }
+
+    fn hint_mask(&mut self, _: &[u8]) {
+        self.tracker.hint_mask();
+    }
+}
+
+fn transform_ps_advance(
+    w: Fixed,
+    matrix: Option<FontMatrix>,
+    scale: Option<i64>,
+    upem: u16,
+) -> Option<f32> {
+    let mut wf = w.to_f64();
+    if let Some(m) = matrix {
+        wf = wf * m.xx.to_f64() + f64::from(m.dx.to_bits());
+    }
+    if let Some(s) = scale {
+        wf *= s as f64 / 65536.0;
+    }
+    let adv = (wf * (1000.0 / f64::from(upem))) as f32;
+    adv.is_finite().then_some(adv)
+}
+
+fn outline_cff(
+    cff: &CffFontRef<'_>,
+    cids: Option<&[Option<u16>]>,
+    gid: u32,
+    upem: u16,
+    fuel: usize,
+    out: &mut Vec<OutlineVerb>,
+) -> (OutlineOutcome, Option<f32>) {
+    let mut captured_matrix = None;
+    let mut captured_scale = None;
+    let run = eval_cff(cff, cids, gid, upem, fuel, |matrix, scale| {
+        captured_matrix = matrix;
+        captured_scale = scale;
+        PsOutlineSink {
+            matrix,
+            scale,
+            to_glyph: 1000.0 / f64::from(upem),
+            tracker: PsTracker::default(),
+            open_contour: false,
+            out,
+            ok: true,
+        }
+    });
+    match run {
+        PsRun::Missing | PsRun::Malformed => (OutlineOutcome::NoGlyph, None),
+        PsRun::OverBudget { .. } => (OutlineOutcome::BudgetExceeded, None),
+        PsRun::Ok {
+            mut sink,
+            raw_width,
+            ..
+        } => {
+            if !sink.ok {
+                return (OutlineOutcome::NoGlyph, None);
+            }
+            sink.finish();
+            let adv = raw_width
+                .and_then(|w| transform_ps_advance(w, captured_matrix, captured_scale, upem));
+            (OutlineOutcome::Drawn, adv)
+        }
+    }
+}
+
+fn outline_type1(
+    font: &Type1Font,
+    scanned: &type1::Scanned,
+    gid: u32,
+    upem: u16,
+    fuel: usize,
+    out: &mut Vec<OutlineVerb>,
+) -> (OutlineOutcome, Option<f32>) {
+    let mut captured_matrix = None;
+    let run = eval_type1(font, scanned, gid, fuel, |matrix| {
+        captured_matrix = matrix;
+        PsOutlineSink {
+            matrix,
+            scale: None,
+            to_glyph: 1000.0 / f64::from(upem),
+            tracker: PsTracker::default(),
+            open_contour: false,
+            out,
+            ok: true,
+        }
+    });
+    match run {
+        PsRun::Missing | PsRun::Malformed => (OutlineOutcome::NoGlyph, None),
+        PsRun::OverBudget { .. } => (OutlineOutcome::BudgetExceeded, None),
+        PsRun::Ok {
+            mut sink,
+            raw_width,
+            ..
+        } => {
+            if !sink.ok {
+                return (OutlineOutcome::NoGlyph, None);
+            }
+            sink.finish();
+            let adv = raw_width.and_then(|w| transform_ps_advance(w, captured_matrix, None, upem));
+            (OutlineOutcome::Drawn, adv)
         }
     }
 }

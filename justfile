@@ -3,11 +3,11 @@
 # `structure-windows` job), which no recipe runs.
 
 # The oldest Rust pdf-tokenizer, pdf-filters, pdf-crypt, pdf-objects,
-# pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-fonts,
-# pdf-gfx, pdf-annots, pdf-forms, pdf-linearize, pdfs, pdf-arlington and pdf-lint
-# support, from their Cargo.toml. pdf-lint's is its library's, and the
-# binary's as `cargo install` builds it; its release archives are built with
-# stable Rust.
+# pdf-structure, pdf-content-streams, pdf-semantics, pdf-color, pdf-images,
+# pdf-fonts, pdf-gfx, pdf-annots, pdf-forms, pdf-raster, pdf-linearize, pdfs,
+# pdf-arlington and pdf-lint support, from their Cargo.toml. pdf-lint's is its
+# library's, and the binary's as `cargo install` builds it; its release
+# archives are built with stable Rust.
 tokenizer_msrv := `grep -m1 '^rust-version' crates/pdf-tokenizer/Cargo.toml | cut -d'"' -f2`
 filters_msrv := `grep -m1 '^rust-version' crates/pdf-filters/Cargo.toml | cut -d'"' -f2`
 crypt_msrv := `grep -m1 '^rust-version' crates/pdf-crypt/Cargo.toml | cut -d'"' -f2`
@@ -16,10 +16,12 @@ structure_msrv := `grep -m1 '^rust-version' crates/pdf-structure/Cargo.toml | cu
 content_msrv := `grep -m1 '^rust-version' crates/pdf-content-streams/Cargo.toml | cut -d'"' -f2`
 semantics_msrv := `grep -m1 '^rust-version' crates/pdf-semantics/Cargo.toml | cut -d'"' -f2`
 color_msrv := `grep -m1 '^rust-version' crates/pdf-color/Cargo.toml | cut -d'"' -f2`
+images_msrv := `grep -m1 '^rust-version' crates/pdf-images/Cargo.toml | cut -d'"' -f2`
 fonts_msrv := `grep -m1 '^rust-version' crates/pdf-fonts/Cargo.toml | cut -d'"' -f2`
 gfx_msrv := `grep -m1 '^rust-version' crates/pdf-gfx/Cargo.toml | cut -d'"' -f2`
 annots_msrv := `grep -m1 '^rust-version' crates/pdf-annots/Cargo.toml | cut -d'"' -f2`
 forms_msrv := `grep -m1 '^rust-version' crates/pdf-forms/Cargo.toml | cut -d'"' -f2`
+raster_msrv := `grep -m1 '^rust-version' crates/pdf-raster/Cargo.toml | cut -d'"' -f2`
 linearize_msrv := `grep -m1 '^rust-version' crates/pdf-linearize/Cargo.toml | cut -d'"' -f2`
 pdfs_msrv := `grep -m1 '^rust-version' crates/pdfs/Cargo.toml | cut -d'"' -f2`
 arlington_msrv := `grep -m1 '^rust-version' crates/pdf-arlington/Cargo.toml | cut -d'"' -f2`
@@ -67,16 +69,23 @@ fmt:
 # alone, without the reading's programs; then pdf-gfx with what lays text out
 # in a font embedded (`embed`), alone and with `text-layout`, without the
 # reading's programs, and pdf-forms with what draws a value in a fallback
-# font (`embed`), alone and with `text-layout`, without them; then
+# font (`embed`), alone and with `text-layout`, without them; then pdf-color,
+# pdf-images and pdf-raster across their default, stripped and optional
+# features (`icc`, `pdfium`, `simd`, `zlib-rs`, `tracing`); then
 # pdf-structure with its spans (`tracing`), which nothing else
-# turns on; then pdfs as a user gets it, with no feature at all, with what
-# embeds a font (`embed`) alone, and with every feature it forwards, which
-# nothing else turns on all at once.
+# turns on; then pdfs as a user gets it, with no feature at all, with
+# `images`, `raster` or `embed` alone, and with every feature it forwards,
+# which nothing else turns on all at once.
 clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo clippy --locked --workspace --lib --bins -- -D warnings
     cargo clippy --locked -p pdf-filters --all-targets -- -D warnings
     cargo clippy --locked -p pdf-filters --no-default-features --features zlib-rs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-color --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-color --features icc --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-images --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-images --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-images --features icc,simd,zlib-rs,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --all-targets -- -D warnings
     cargo clippy --locked -p pdf-content-streams --features simd,image-ends,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-semantics --no-default-features --all-targets -- -D warnings
@@ -103,11 +112,19 @@ clippy:
     cargo clippy --locked -p pdf-forms --no-default-features --features text-layout --all-targets -- -D warnings
     cargo clippy --locked -p pdf-forms --no-default-features --features embed --all-targets -- -D warnings
     cargo clippy --locked -p pdf-forms --no-default-features --features embed,text-layout --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --no-default-features --features programs --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --no-default-features --features text-layout --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --no-default-features --features pdfium --all-targets -- -D warnings
+    cargo clippy --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdf-structure --features tracing --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --no-default-features --features images --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --no-default-features --features raster --all-targets -- -D warnings
     cargo clippy --locked -p pdfs --no-default-features --features embed --all-targets -- -D warnings
-    cargo clippy --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
+    cargo clippy --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing,insecure-test-writer --all-targets -- -D warnings
 
 # Workspace unit and integration tests through cargo-nextest (no doctests;
 # pass extra nextest arguments, e.g. `just test-unit -p pdf-structure`).
@@ -129,11 +146,13 @@ test-unit *args="--workspace":
 # with `embed` alone, without the reading's programs; then pdf-gfx's with what
 # lays text out in a font embedded, alone and with `text-layout`, without the
 # reading's programs, and pdf-forms' with what draws a value in a fallback
-# font, alone and with `text-layout`, without them; then pdf-structure's
+# font, alone and with `text-layout`, without them; then pdf-color's,
+# pdf-images' and pdf-raster's across their default, stripped and optional
+# features; then pdf-structure's
 # with its spans, which only those tests read; then pdfs' as a user gets
 # it, without `image-ends`, which pdf-lint turns on, with no feature at all,
-# with what embeds a font alone, and with every feature it forwards but its
-# test writer.
+# with `images`, `raster` or `embed` alone, and with every feature it forwards
+# but its test writer.
 test:
     cargo nextest run --locked --workspace
     cargo test --locked --workspace --doc
@@ -141,6 +160,16 @@ test:
     cargo test --locked -p pdf-filters --doc
     cargo nextest run --locked -p pdf-filters --no-default-features --features zlib-rs
     cargo test --locked -p pdf-filters --no-default-features --features zlib-rs --doc
+    cargo nextest run --locked -p pdf-color --no-default-features
+    cargo test --locked -p pdf-color --no-default-features --doc
+    cargo nextest run --locked -p pdf-color --features icc
+    cargo test --locked -p pdf-color --features icc --doc
+    cargo nextest run --locked -p pdf-images
+    cargo test --locked -p pdf-images --doc
+    cargo nextest run --locked -p pdf-images --no-default-features
+    cargo test --locked -p pdf-images --no-default-features --doc
+    cargo nextest run --locked -p pdf-images --features icc,simd,zlib-rs,tracing
+    cargo test --locked -p pdf-images --features icc,simd,zlib-rs,tracing --doc
     cargo nextest run --locked -p pdf-content-streams
     cargo test --locked -p pdf-content-streams --doc
     cargo nextest run --locked -p pdf-content-streams --features simd,image-ends,tracing
@@ -182,15 +211,28 @@ test:
     cargo nextest run --locked -p pdf-forms --no-default-features --features embed
     cargo nextest run --locked -p pdf-forms --no-default-features --features embed,text-layout
     cargo test --locked -p pdf-forms --no-default-features --features embed,text-layout --doc
+    cargo nextest run --locked -p pdf-raster
+    cargo test --locked -p pdf-raster --doc
+    cargo nextest run --locked -p pdf-raster --no-default-features
+    cargo test --locked -p pdf-raster --no-default-features --doc
+    cargo nextest run --locked -p pdf-raster --no-default-features --features programs
+    cargo nextest run --locked -p pdf-raster --no-default-features --features text-layout
+    cargo nextest run --locked -p pdf-raster --no-default-features --features pdfium
+    cargo nextest run --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing
+    cargo test --locked -p pdf-raster --features pdfium,predefined-cmaps,simd,zlib-rs,tracing --doc
     cargo nextest run --locked -p pdf-structure --features tracing
     cargo test --locked -p pdf-structure --features tracing --doc
     cargo nextest run --locked -p pdfs
     cargo test --locked -p pdfs --doc
     cargo nextest run --locked -p pdfs --no-default-features
     cargo test --locked -p pdfs --no-default-features --doc
+    cargo nextest run --locked -p pdfs --no-default-features --features images
+    cargo test --locked -p pdfs --no-default-features --features images --doc
+    cargo nextest run --locked -p pdfs --no-default-features --features raster
+    cargo test --locked -p pdfs --no-default-features --features raster --doc
     cargo nextest run --locked -p pdfs --no-default-features --features embed
-    cargo nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
-    cargo test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
+    cargo nextest run --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing
+    cargo test --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing --doc
 
 # qpdf, the tests' oracle: its official Linux x86_64 zip at 12.4.2, at a
 # pinned SHA-256 (from the release's qpdf-12.4.2.sha256), kept in target/.
@@ -285,12 +327,19 @@ test-pdfium:
     set -euo pipefail
     python3 -I -B oracle/pdfium.py cases {{ pdfium_sets }}
     if [ -n "${PDF_LINT_PDFIUM:-}" ]; then
-        env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check "$PDF_LINT_PDFIUM" {{ pdfium_sets }}
+        lib="$PDF_LINT_PDFIUM"
+        env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check "$lib" {{ pdfium_sets }}
     else
         "{{ just_executable() }}" _pdfium
+        lib="$PWD/target/pdfium-{{ pdfium_build }}/lib/libpdfium.so"
         env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/pdfium.py check \
-            "$PWD/target/pdfium-{{ pdfium_build }}/lib/libpdfium.so" {{ pdfium_sets }} --build {{ pdfium_build }}
+            "$lib" {{ pdfium_sets }} --build {{ pdfium_build }}
     fi
+    env -u GH_TOKEN -u GITHUB_TOKEN python3 -I -B oracle/cmyk_lut.py check "$lib"
+    env -u GH_TOKEN -u GITHUB_TOKEN PDF_RASTER_PDFIUM="$lib" cargo nextest run --locked \
+        --run-ignored only -E 'test(pdfium)' -p pdf-raster --features pdfium
+    env -u GH_TOKEN -u GITHUB_TOKEN PDF_RASTER_PDFIUM="$lib" cargo nextest run --locked \
+        --run-ignored only -E 'test(pdfium)' -p pdf-raster-oracle
 
 # Write the crates' PDFium cases anew from their generators, and their
 # answers from the pinned build: when cases are added, and at a bump, once
@@ -328,13 +377,17 @@ fuzzing:
 # and with what embeds a font alone, then pdf-gfx with no feature, and with
 # what lays text out in a font embedded, alone and with `text-layout`, then
 # pdf-forms with no feature, and with what draws a value in a fallback font,
-# alone and with `text-layout`, then pdfs as it's published, with no
-# feature, and with what embeds a font alone, which a link to what only a
-# feature has would fail.
+# alone and with `text-layout`, then pdf-images and pdf-raster with and
+# without their defaults, then pdfs as it's published, with no feature, with
+# `images`, `raster` or `embed` alone, which a link to what only a feature has
+# would fail.
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-color --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-content-streams --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-images --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-images --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-semantics --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-linearize --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-fonts --no-deps --no-default-features
@@ -346,8 +399,13 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features --features embed
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-forms --no-deps --no-default-features --features embed,text-layout
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-raster --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-raster --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdf-raster --no-deps --no-default-features --features pdfium
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features images
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features raster
     RUSTDOCFLAGS="-D warnings" cargo doc --locked -p pdfs --no-deps --no-default-features --features embed
 
 # Build this platform's release archive in dist/, and check it runs as
@@ -532,6 +590,11 @@ crypt-package: (_package "pdf-crypt")
 # version it names isn't published; `_package` says what's checked.
 color-package: (_package "pdf-color" "pdf-objects")
 
+# Package pdf-images as a publish would, pdf-objects, pdf-color,
+# pdf-content-streams and pdf-filters beside it while the versions it and they
+# name aren't published; `_package` says what's checked.
+images-package: (_package "pdf-images" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-filters")
+
 # Package pdf-structure as a publish would, pdf-objects, pdf-crypt and
 # pdf-filters beside it while the versions it names aren't published;
 # `_package` says what's checked.
@@ -569,16 +632,23 @@ annots-package: (_package "pdf-annots" "pdf-objects" "pdf-color" "pdf-content-st
 # `_package` says what's checked.
 forms-package: (_package "pdf-forms" "pdf-objects" "pdf-color" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-filters")
 
+# Package pdf-raster as a publish would, pdf-objects, pdf-color, pdf-images,
+# pdf-content-streams, pdf-semantics, pdf-fonts, pdf-gfx, pdf-annots, pdf-forms
+# and pdf-filters beside it while the versions it and they name aren't
+# published; `_package` says what's checked.
+raster-package: (_package "pdf-raster" "pdf-objects" "pdf-color" "pdf-images" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-forms" "pdf-filters")
+
 # Package pdf-linearize as a publish would, pdf-objects, pdf-crypt,
 # pdf-structure, pdf-semantics and pdf-filters beside it while the versions it
 # and they name aren't published; `_package` says what's checked.
 linearize-package: (_package "pdf-linearize" "pdf-objects" "pdf-crypt" "pdf-structure" "pdf-semantics" "pdf-filters")
 
 # Package pdfs as a publish would, pdf-objects, pdf-crypt, pdf-color,
-# pdf-filters, pdf-structure, pdf-content-streams, pdf-semantics, pdf-fonts,
-# pdf-gfx, pdf-annots, pdf-forms and pdf-linearize beside it while the versions it names
-# aren't published; `_package` says what's checked.
-pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-forms" "pdf-linearize")
+# pdf-images, pdf-filters, pdf-structure, pdf-content-streams, pdf-semantics,
+# pdf-fonts, pdf-gfx, pdf-annots, pdf-forms, pdf-raster and pdf-linearize beside
+# it while the versions it names aren't published; `_package` says what's
+# checked.
+pdfs-package: (_package "pdfs" "pdf-objects" "pdf-crypt" "pdf-color" "pdf-images" "pdf-filters" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-gfx" "pdf-annots" "pdf-forms" "pdf-raster" "pdf-linearize")
 
 # Package pdf-arlington as a publish would, the model it embeds with its
 # licence and notice beside its sources, and pdf-objects and pdf-color
@@ -597,7 +667,7 @@ arlington-package: (_package "pdf-arlington" "pdf-objects" "pdf-color")
 lint-package: (_package "pdf-lint" "pdf-objects" "pdf-filters" "pdf-crypt" "pdf-color" "pdf-structure" "pdf-content-streams" "pdf-semantics" "pdf-fonts" "pdf-linearize" "pdf-arlington")
 
 # Package every published crate as a publish would; `_package` says what's checked.
-package: tokenizer-package objects-package filters-package crypt-package color-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package forms-package linearize-package pdfs-package arlington-package lint-package
+package: tokenizer-package objects-package filters-package crypt-package color-package images-package structure-package content-streams-package semantics-package fonts-package gfx-package annots-package forms-package raster-package linearize-package pdfs-package arlington-package lint-package
 
 # Check the tokenizer's public API against the version published on
 # crates.io, with cargo-semver-checks, which must be installed (CI installs
@@ -704,10 +774,21 @@ semantics-msrv:
     cargo +{{ semantics_msrv }} nextest run --locked -p pdf-semantics --features tracing
     cargo +{{ semantics_msrv }} test --locked -p pdf-semantics --features tracing --doc
 
-# Test pdf-color on its oldest supported Rust, which must be installed.
+# Test pdf-color on its oldest supported Rust, which must be installed, without
+# `icc` and with it.
 color-msrv:
     cargo +{{ color_msrv }} nextest run --locked -p pdf-color
     cargo +{{ color_msrv }} test --locked -p pdf-color --doc
+    cargo +{{ color_msrv }} nextest run --locked -p pdf-color --features icc
+    cargo +{{ color_msrv }} test --locked -p pdf-color --features icc --doc
+
+# Test pdf-images on its oldest supported Rust, which must be installed, with
+# no feature and with every optional feature.
+images-msrv:
+    cargo +{{ images_msrv }} nextest run --locked -p pdf-images
+    cargo +{{ images_msrv }} test --locked -p pdf-images --doc
+    cargo +{{ images_msrv }} nextest run --locked -p pdf-images --features icc,simd,zlib-rs,tracing
+    cargo +{{ images_msrv }} test --locked -p pdf-images --features icc,simd,zlib-rs,tracing --doc
 
 # Test pdf-fonts on its oldest supported Rust, as it's published, skrifa among it,
 # with no feature, with its spans, and with what embeds a font, subsetter among
@@ -786,6 +867,23 @@ forms-cmaps-msrv:
     cargo +{{ forms_msrv }} nextest run --locked -p pdf-forms --features predefined-cmaps
     cargo +{{ forms_msrv }} test --locked -p pdf-forms --features predefined-cmaps --doc
 
+# Test pdf-raster on its oldest supported Rust, as it's published, with no
+# feature, and with its PDFium adapter, SIMD, zlib-rs, and numeric spans
+# (`tracing`), which must be installed.
+raster-msrv:
+    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster
+    cargo +{{ raster_msrv }} test --locked -p pdf-raster --doc
+    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster --no-default-features
+    cargo +{{ raster_msrv }} test --locked -p pdf-raster --no-default-features --doc
+    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster --features pdfium,simd,zlib-rs,tracing
+    cargo +{{ raster_msrv }} test --locked -p pdf-raster --features pdfium,simd,zlib-rs,tracing --doc
+
+# Test pdf-raster with `predefined-cmaps` on that feature's oldest Rust, which
+# must be installed.
+raster-cmaps-msrv:
+    cargo +{{ raster_msrv }} nextest run --locked -p pdf-raster --features predefined-cmaps
+    cargo +{{ raster_msrv }} test --locked -p pdf-raster --features predefined-cmaps --doc
+
 # Test pdf-linearize on its oldest supported Rust, which must be installed,
 # with its adapter and without, and with its spans (`tracing`); and the lopdf
 # adapter's crate, never published, on the same Rust, which its manifest names.
@@ -800,15 +898,17 @@ linearize-msrv:
     cargo +{{ linearize_msrv }} test --locked -p pdf-linearize-lopdf --doc
 
 # Test pdfs on its oldest supported Rust, which must be installed, as it's
-# published, with no feature, and with every feature it forwards but its test
-# writer.
+# published, with no feature, with `images` or `raster` alone, and with every
+# feature it forwards but its test writer.
 pdfs-msrv:
     cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs
     cargo +{{ pdfs_msrv }} test --locked -p pdfs --doc
     cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --no-default-features
     cargo +{{ pdfs_msrv }} test --locked -p pdfs --no-default-features --doc
-    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing
-    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features image-ends,predefined-cmaps,simd,tracing --doc
+    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --no-default-features --features images
+    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --no-default-features --features raster
+    cargo +{{ pdfs_msrv }} nextest run --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing
+    cargo +{{ pdfs_msrv }} test --locked -p pdfs --features pdfium,image-ends,predefined-cmaps,simd,tracing --doc
 
 # Test pdf-arlington on its oldest supported Rust, which must be installed.
 arlington-msrv:
@@ -825,7 +925,7 @@ lint-msrv:
     cargo +{{ lint_msrv }} test --locked -p pdf-lint --no-default-features --doc
 
 # Test every crate on its oldest supported Rust.
-msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv forms-msrv forms-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
+msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content-msrv semantics-msrv color-msrv images-msrv fonts-msrv fonts-cmaps-msrv gfx-msrv gfx-cmaps-msrv annots-msrv annots-cmaps-msrv forms-msrv forms-cmaps-msrv raster-msrv raster-cmaps-msrv linearize-msrv pdfs-msrv arlington-msrv lint-msrv
 
 # Fuzz a target for a while, on nightly with cargo-fuzz: `tokenize`, the
 # tokenizer, by ISO 32000-2's rules and PDFium's; `filters`, the filters,
@@ -840,7 +940,9 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # and in the resources; `semantics`, pdf-semantics' name and number trees,
 # page tree, dates and XMP claims, each read and written, and a file's packet
 # read through its streams; `color`, pdf-color's count of a space's
-# components, its typed spaces and what a resources dictionary names; `fonts`,
+# components, its typed spaces, functions and color evaluation; `images`,
+# pdf-images' codecs, masks, inline images, scrubbing and Flate/JPEG
+# re-encoding; `fonts`,
 # pdf-fonts' scan of a Type 1 program, under any caps, its reading of names, and its
 # reading of a font, its program among them, on any parts and in a file;
 # `embed`, pdf-fonts' embedding of a TrueType program, whole or one table of a
@@ -855,7 +957,9 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # pressed, from plain data too, and its text fields', buttons' and choice
 # fields' appearances made, from plain data (a text field's in a font and a
 # TrueType program the input carries as a fallback) and for each widget
-# read; `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
+# read; `raster`, pdf-raster's page and content rasterizer across viewports,
+# clips, text, images, transparency, patterns, shadings and annotations;
+# `linearize`, pdf-linearize's plan of any graph, what's assembled from it, hint tables from any bytes, any facts of a file,
 # and any bytes as a file, laid out, read back and checked; `pdfs`, a file read
 # through the facade, and written in the clear and encrypted, read locked and
 # unlocked; `arlington`, pdf-arlington's loader on any tables and its
@@ -863,7 +967,7 @@ msrv: tokenizer-msrv filters-msrv crypt-msrv objects-msrv structure-msrv content
 # checker.
 # `structure`, `write` and `check` begin from the seeds pdf-lint's fuzz module
 # makes, `write`'s with the third byte its input has; `content`, `semantics`,
-# `color`, `fonts`, `embed`, `gfx`, `annots`, `forms`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make,
+# `color`, `images`, `fonts`, `embed`, `gfx`, `annots`, `forms`, `raster`, `linearize`, `pdfs` and `arlington` from those their own crates' fuzz modules make,
 # `embed`'s by pdf-fonts with its `embed` feature, without which it has none,
 # and `forms`'s by pdf-forms with its `embed` feature, without which none
 # carries a fallback's program. The nightly is `fuzz_toolchain`. A third
@@ -919,6 +1023,11 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/color
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" color fuzz/corpus/color fuzz/seeds/color -- -dict=fuzz/color.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    images)
+        PDF_IMAGES_FUZZ_SEEDS="$PWD/fuzz/seeds/images" cargo test --locked -q -p pdf-images --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/images
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" images fuzz/corpus/images fuzz/seeds/images -- -dict=fuzz/images.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     fonts)
         PDF_FONTS_FUZZ_SEEDS="$PWD/fuzz/seeds/fonts" cargo test --locked -q -p pdf-fonts --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/fonts
@@ -944,6 +1053,11 @@ fuzz target="tokenize" seconds="60" features="":
         mkdir -p fuzz/corpus/forms
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" forms fuzz/corpus/forms fuzz/seeds/forms -- -dict=fuzz/forms.dict -max_total_time={{ seconds }} -timeout=10
         ;;
+    raster)
+        PDF_RASTER_FUZZ_SEEDS="$PWD/fuzz/seeds/raster" cargo test --locked -q -p pdf-raster --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
+        mkdir -p fuzz/corpus/raster
+        cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" raster fuzz/corpus/raster fuzz/seeds/raster -- -dict=fuzz/raster.dict -max_total_time={{ seconds }} -timeout=10
+        ;;
     linearize)
         PDF_LINEARIZE_FUZZ_SEEDS="$PWD/fuzz/seeds/linearize" cargo test --locked -q -p pdf-linearize --lib fuzz::tests::the_seeds_are_written -- --ignored --exact
         mkdir -p fuzz/corpus/linearize
@@ -965,7 +1079,7 @@ fuzz target="tokenize" seconds="60" features="":
         cargo +{{ fuzz_toolchain }} fuzz run --target "$host" "${built[@]}" check fuzz/corpus/check fuzz/seeds/check -- -dict=fuzz/check.dict -max_total_time={{ seconds }} -timeout=10
         ;;
     *)
-        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, fonts, embed, gfx, annots, forms, linearize, pdfs, arlington or check" >&2
+        echo "just fuzz: tokenize, filters, crypt, objects, structure, write, content, semantics, color, images, fonts, embed, gfx, annots, forms, raster, linearize, pdfs, arlington or check" >&2
         exit 2
         ;;
     esac
