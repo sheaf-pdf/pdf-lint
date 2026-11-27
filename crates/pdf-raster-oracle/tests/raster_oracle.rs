@@ -840,4 +840,283 @@ fn pdfium_and_rust_backends_agree_across_pages_tiles_formats_custom_viewport_and
     for img in &rendered[1..] {
         assert_eq!(img, &rendered[0]);
     }
+
+    // Inherited `/MediaBox` with non-zero origin + direct `/CropBox`, `/UserUnit 2.0` across all
+    // viewports, embedded missing glyph (`'Z'`), and concurrent `Locked` vs corrupt open stress!
+    {
+        let inh_stream =
+            b"0.15 0.45 0.85 rg 30 40 80 60 re f 0.85 0.2 0.15 rg 110 100 80 60 re f\n";
+        let inh_pdf: Arc<[u8]> = Arc::from(build_pdf_bytes(vec![
+            (
+                1,
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+                ),
+            ),
+            (
+                2,
+                Object::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                    "MediaBox" => vec![Object::from(10), Object::from(20), Object::from(210), Object::from(180)],
+                }),
+            ),
+            (
+                3,
+                Object::from(dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => Object::reference(2),
+                    "CropBox" => vec![Object::from(30), Object::from(40), Object::from(190), Object::from(160)],
+                    "UserUnit" => 2.0,
+                    "Contents" => Object::reference(4),
+                }),
+            ),
+            (4, Object::from(Stream::new(dict! {}, inh_stream.to_vec()))),
+        ]));
+
+        let r_inh = rust.open_bytes(inh_pdf.clone(), None).unwrap();
+        let p_inh = pdfium.open_bytes(inh_pdf.clone(), None).unwrap();
+        assert_eq!(
+            r_inh.page_geom(0).unwrap().crop_box,
+            p_inh.page_geom(0).unwrap().crop_box
+        );
+
+        let crop_geom = PageGeom::new(Rect::new(30.0, 40.0, 190.0, 160.0), None, Rotation::R0);
+        for vp in [
+            Viewport::Page {
+                width: 160,
+                rotation: Rotation::R0,
+            },
+            Viewport::Dpi {
+                dpi: 72.0,
+                rotation: Rotation::R0,
+            },
+            Viewport::Tile {
+                page_width: 160,
+                page_height: 120,
+                x: 40,
+                y: 20,
+                w: 80,
+                h: 60,
+                rotation: Rotation::R0,
+            },
+            Viewport::Custom {
+                width: 160,
+                height: 120,
+                page_to_device: crop_geom.to_view(),
+            },
+        ] {
+            let mut opts = RenderOpts::with_viewport(vp);
+            opts.anti_alias = AntiAlias::NONE;
+            opts.draw = Draw::CONTENT_ONLY;
+            let (rp, _) = r_inh.render_page(0, &opts).unwrap();
+            let (pp, _) = p_inh.render_page(0, &opts).unwrap();
+            assert_eq!(
+                (rp.width(), rp.height()),
+                (pp.width(), pp.height()),
+                "viewport {vp:?} pixel size mismatch"
+            );
+            let cmp =
+                compare_backends(&rust, &pdfium, inh_pdf.clone(), None, 0, &opts, &rubric).unwrap();
+            assert!(cmp.passed, "viewport {vp:?} failed: {cmp:?}");
+        }
+    }
+
+    // Embedded TrueType missing `'Z'` draws `.notdef` matching PDFium (`compare_backends`), and
+    // Type 0 out-of-range `<0099>` (`NoGlyph`) draws zero ink in both backends (byte-for-byte):
+    {
+        let ttf = build_fixture_ttf();
+        let z_content = b"0 0 0 rg BT /F1 48 Tf 12 20 Td (Z) Tj ET\n";
+        let z_pdf: Arc<[u8]> = Arc::from(build_pdf_bytes(vec![
+            (
+                1,
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+                ),
+            ),
+            (
+                2,
+                Object::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                    "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(80)],
+                }),
+            ),
+            (
+                3,
+                Object::from(dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => Object::reference(2),
+                    "Resources" => dict! { "Font" => dict! { "F1" => Object::reference(5) } },
+                    "Contents" => Object::reference(4),
+                }),
+            ),
+            (4, Object::from(Stream::new(dict! {}, z_content.to_vec()))),
+            (
+                5,
+                Object::from(dict! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("TrueType"),
+                    "BaseFont" => Object::name("SubsetTest"),
+                    "Encoding" => Object::name("WinAnsiEncoding"),
+                    "FirstChar" => 65,
+                    "LastChar" => 90,
+                    "Widths" => vec![Object::from(700); 26],
+                    "FontDescriptor" => Object::reference(6),
+                }),
+            ),
+            (
+                6,
+                Object::from(dict! {
+                    "Type" => Object::name("FontDescriptor"),
+                    "FontName" => Object::name("SubsetTest"),
+                    "Flags" => 32,
+                    "FontBBox" => vec![Object::from(0), Object::from(0), Object::from(1000), Object::from(1000)],
+                    "Ascent" => 800,
+                    "Descent" => -200,
+                    "CapHeight" => 700,
+                    "StemV" => 80,
+                    "FontFile2" => Object::reference(7),
+                }),
+            ),
+            (
+                7,
+                Object::from(Stream::new(
+                    dict! { "Length1" => ttf.len() as i64 },
+                    ttf.clone(),
+                )),
+            ),
+        ]));
+        let z_opts = RenderOpts::with_viewport(Viewport::Page {
+            width: 100,
+            rotation: Rotation::R0,
+        });
+        let z_cmp = compare_backends(&rust, &pdfium, z_pdf, None, 0, &z_opts, &rubric).unwrap();
+        assert!(
+            z_cmp.passed,
+            "missing 'Z' (.notdef) diverged from PDFium: {z_cmp:?}"
+        );
+
+        let cid_miss = b"0 0 0 rg BT /F1 48 Tf 12 20 Td <0099> Tj ET\n";
+        let cid_pdf: Arc<[u8]> = Arc::from(build_pdf_bytes(vec![
+            (
+                1,
+                Object::from(
+                    dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+                ),
+            ),
+            (
+                2,
+                Object::from(dict! {
+                    "Type" => Object::name("Pages"),
+                    "Kids" => vec![Object::reference(3)],
+                    "Count" => 1,
+                    "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(80)],
+                }),
+            ),
+            (
+                3,
+                Object::from(dict! {
+                    "Type" => Object::name("Page"),
+                    "Parent" => Object::reference(2),
+                    "Resources" => dict! { "Font" => dict! { "F1" => Object::reference(5) } },
+                    "Contents" => Object::reference(4),
+                }),
+            ),
+            (4, Object::from(Stream::new(dict! {}, cid_miss.to_vec()))),
+            (
+                5,
+                Object::from(dict! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("Type0"),
+                    "BaseFont" => Object::name("SubsetCid"),
+                    "Encoding" => Object::name("Identity-H"),
+                    "DescendantFonts" => vec![Object::reference(6)],
+                }),
+            ),
+            (
+                6,
+                Object::from(dict! {
+                    "Type" => Object::name("Font"),
+                    "Subtype" => Object::name("CIDFontType2"),
+                    "BaseFont" => Object::name("SubsetCid"),
+                    "CIDSystemInfo" => dict! {
+                        "Registry" => Object::bytes(&b"Adobe"[..]),
+                        "Ordering" => Object::bytes(&b"Identity"[..]),
+                        "Supplement" => 0,
+                    },
+                    "DW" => 700,
+                    "FontDescriptor" => Object::reference(7),
+                    "CIDToGIDMap" => Object::name("Identity"),
+                }),
+            ),
+            (
+                7,
+                Object::from(dict! {
+                    "Type" => Object::name("FontDescriptor"),
+                    "FontName" => Object::name("SubsetCid"),
+                    "Flags" => 32,
+                    "FontBBox" => vec![Object::from(0), Object::from(0), Object::from(1000), Object::from(1000)],
+                    "Ascent" => 800,
+                    "Descent" => -200,
+                    "CapHeight" => 700,
+                    "StemV" => 80,
+                    "FontFile2" => Object::reference(8),
+                }),
+            ),
+            (
+                8,
+                Object::from(Stream::new(dict! { "Length1" => ttf.len() as i64 }, ttf)),
+            ),
+        ]));
+        let r_cid = rust
+            .open_bytes(cid_pdf.clone(), None)
+            .unwrap()
+            .render_page(0, &z_opts)
+            .unwrap()
+            .0;
+        let p_cid = pdfium
+            .open_bytes(cid_pdf, None)
+            .unwrap()
+            .render_page(0, &z_opts)
+            .unwrap()
+            .0;
+        assert_eq!(r_cid.as_bytes(), p_cid.as_bytes());
+        assert!(r_cid.as_bytes().iter().all(|&b| b == 255));
+    }
+
+    // Concurrent multi-thread `Locked` vs corrupt open stress (`OPEN_LOCK` prevents crossed codes):
+    {
+        let corrupt: Arc<[u8]> = Arc::from(&b"%PDF-1.7\nnot a valid pdf"[..]);
+        let mut threads = Vec::new();
+        for t in 0..8 {
+            let backend = pdfium;
+            let enc = bytes.clone();
+            let bad = corrupt.clone();
+            threads.push(thread::spawn(move || {
+                for _ in 0..24 {
+                    if t % 2 == 0 {
+                        let res = backend.open_bytes(enc.clone(), Some("wrong-pass"));
+                        assert!(
+                            matches!(res, Err(BackendError::Locked)),
+                            "expected Locked, got {}",
+                            res.err().unwrap()
+                        );
+                    } else {
+                        let res = backend.open_bytes(bad.clone(), None);
+                        assert!(
+                            matches!(res, Err(BackendError::Backend(_))),
+                            "expected Backend error on corrupt bytes, got {}",
+                            res.err().unwrap()
+                        );
+                    }
+                }
+            }));
+        }
+        for th in threads {
+            th.join().unwrap();
+        }
+    }
 }

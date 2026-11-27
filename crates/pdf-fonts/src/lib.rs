@@ -115,7 +115,7 @@ pub use error::Error;
 pub use fault::Fault;
 pub use font::{
     Codes, Descendant, FallbackProgram, Font, FontApprox, FontKind, FontMetrics, FontProgram,
-    FontStyle, GlyphBox, OutlineVerb, Type3Glyph, VerticalMetrics,
+    FontStyle, GlyphBox, OutlineOutcome, OutlineVerb, Type3Glyph, VerticalMetrics,
 };
 pub use fonts::{FontId, FontScope, Fonts};
 pub use limits::Limits;

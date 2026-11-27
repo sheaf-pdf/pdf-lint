@@ -472,3 +472,173 @@ fn pdfium_oracle_icc_swatch_strip_matches_chromium_8152() {
     .unwrap();
     assert!(outcome.passed, "{outcome:?}");
 }
+
+#[test]
+#[ignore = "requires libpdfium (run via `just test-pdfium`)"]
+fn pdfium_oracle_verifies_off_grid_cmyk_lab_whitepoint_short_c1_and_indirect_n() {
+    use pdf_color::Function;
+    use pdf_color::pdf_objects::pdf_tokenizer::Rules;
+
+    let pdfium = require_pdfium();
+
+    // 1. Off-grid CMYK `(0.33, 0.67, 0.12, 0.25)`, Lab with non-D65 `/WhitePoint [1.2 1.0 0.5]`,
+    //    Type 2 with short `/C1 [0.8]` on 3-output `/Range`, and Type 2 with absent `/C1`:
+    let cs = dict! {
+        "CK" => Object::name("DeviceCMYK"),
+        "LB" => vec![
+            Object::name("Lab"),
+            Object::from(dict! {
+                "WhitePoint" => vec![Object::from(1.2), Object::from(1.0), Object::from(0.5)],
+                "Range" => vec![Object::from(-100.0), Object::from(100.0), Object::from(-100.0), Object::from(100.0)],
+            }),
+        ],
+        "S1" => vec![
+            Object::name("Separation"),
+            Object::name("ShortC1"),
+            Object::name("DeviceRGB"),
+            Object::reference(5),
+        ],
+        "S2" => vec![
+            Object::name("Separation"),
+            Object::name("AbsentC1"),
+            Object::name("DeviceRGB"),
+            Object::reference(6),
+        ],
+        "SI" => vec![
+            Object::name("Separation"),
+            Object::name("IndirectN"),
+            Object::name("DeviceRGB"),
+            Object::reference(7),
+        ],
+    };
+    let extras = vec![
+        (
+            5,
+            Body::Object(Object::from(dict! {
+                "FunctionType" => 2,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "Range" => vec![
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                ],
+                "C0" => vec![Object::from(0.0), Object::from(0.0), Object::from(0.0)],
+                "C1" => vec![Object::from(0.8)],
+                "N" => 1.0,
+            })),
+        ),
+        (
+            6,
+            Body::Object(Object::from(dict! {
+                "FunctionType" => 2,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "Range" => vec![
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                    Object::from(0.0), Object::from(1.0),
+                ],
+                "C0" => vec![Object::from(0.2), Object::from(0.4), Object::from(0.6)],
+                "N" => 1.0,
+            })),
+        ),
+        (
+            7,
+            Body::Object(Object::from(dict! {
+                "FunctionType" => 2,
+                "Domain" => vec![Object::from(0.0), Object::from(1.0)],
+                "C0" => vec![Object::from(0.0), Object::from(0.0), Object::from(0.0)],
+                "C1" => vec![Object::from(0.9), Object::from(0.1), Object::from(0.2)],
+                "N" => Object::reference(8),
+            })),
+        ),
+        (8, Body::Object(Object::from(1.0))),
+    ];
+    let ops = vec![
+        "/CK cs 0.33 0.67 0.12 0.25 sc".to_string(),
+        "/LB cs 80 0 0 sc".to_string(),
+        "/S1 cs 1.0 scn".to_string(),
+        "/S2 cs 0.5 scn".to_string(),
+        "/SI cs 1.0 scn".to_string(),
+    ];
+    let pdf = build_swatch_pdf(cs, extras, &ops);
+    let ref_img = pdfium
+        .render_page(&pdf, 0, &RenderOptions::crisp_swatches(80, 16))
+        .unwrap();
+
+    // Verify exact recorded `chromium/8152` reference pixels:
+    assert_eq!(ref_img.pixel(8, 8), Some([139, 85, 126, 255]));
+    assert_eq!(ref_img.pixel(24, 8), Some([200, 198, 198, 255]));
+    assert_eq!(ref_img.pixel(40, 8), Some([204, 0, 0, 255]));
+    assert_eq!(ref_img.pixel(56, 8), Some([153, 179, 204, 255]));
+    // Indirect `/N 8 0 R` is refused by PDFium -> swatch 4 stays unpainted white!
+    assert_eq!(ref_img.pixel(72, 8), Some([255, 255, 255, 255]));
+
+    let reading = Reading::open(&pdf, &Options::DEFAULT).unwrap();
+    let page_res = (&reading)
+        .resolve(ObjectId::new(3, 0))
+        .and_then(Object::as_dict)
+        .and_then(|d| d.get(b"Resources"));
+    let spaces = Spaces::read(&reading, page_res).unwrap().unwrap();
+
+    // Indirect `/N` (`SI`, object 7) is refused consistently by `Function::read` and
+    // `PreparedSpace::prepare` under `Rules::Pdfium` (matching `shape` and live PDFium), while
+    // loading under `Rules::Iso`!
+    let si_val = spaces.get(b"SI").unwrap().value;
+    let fn7 = (&reading).resolve(ObjectId::new(7, 0)).unwrap();
+    assert!(
+        Function::read(&reading, fn7, Rules::Pdfium, &Limits::DEFAULT, &mut ())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        PreparedSpace::prepare(
+            &reading,
+            si_val,
+            &EvalOptions::PDFIUM,
+            &Limits::DEFAULT,
+            &mut ()
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        Function::read(&reading, fn7, Rules::Iso, &Limits::DEFAULT, &mut ())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        PreparedSpace::prepare(
+            &reading,
+            si_val,
+            &EvalOptions::ISO,
+            &Limits::DEFAULT,
+            &mut ()
+        )
+        .unwrap()
+        .is_some()
+    );
+
+    let eval_srgb = |name: &[u8], comps: &[f32]| -> [u8; 3] {
+        let sp = spaces.get(name).unwrap().value;
+        let prep = PreparedSpace::prepare(
+            &reading,
+            sp,
+            &EvalOptions::PDFIUM,
+            &Limits::DEFAULT,
+            &mut (),
+        )
+        .unwrap()
+        .unwrap();
+        prep.eval(comps, &Limits::DEFAULT)
+            .unwrap()
+            .srgb8_over([255, 255, 255])
+    };
+    let ck = eval_srgb(b"CK", &[0.33, 0.67, 0.12, 0.25]);
+    assert!(
+        ck[0].abs_diff(139) <= 5 && ck[1].abs_diff(85) <= 5 && ck[2].abs_diff(126) <= 5,
+        "off-grid CMYK quadrilinear vs PDFium axis lookup: {ck:?}"
+    );
+    assert_eq!(eval_srgb(b"LB", &[80.0, 0.0, 0.0]), [200, 198, 198]);
+    assert_eq!(eval_srgb(b"S1", &[1.0]), [204, 0, 0]);
+    assert_eq!(eval_srgb(b"S2", &[0.5]), [153, 179, 204]);
+}

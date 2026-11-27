@@ -417,11 +417,16 @@ impl PreparedSpace {
                         ];
                         adapt_bradford(xyz, *white)
                     }
-                    _ => [
-                        D65_WHITE[0] * inv_f(l),
-                        D65_WHITE[1] * inv_f(m),
-                        D65_WHITE[2] * inv_f(n),
-                    ],
+                    _ => {
+                        // PDFium (`CPDF_LabCS::GetRGB`, as of chromium/8152) ignores `/WhitePoint`
+                        // and evaluates `Lab -> XYZ` with fixed constants `(0.957, 1.0, 1.0889)`.
+                        const PDFIUM_LAB_WHITE: [f32; 3] = [0.957, 1.0, 1.0889];
+                        [
+                            PDFIUM_LAB_WHITE[0] * inv_f(l),
+                            PDFIUM_LAB_WHITE[1] * inv_f(m),
+                            PDFIUM_LAB_WHITE[2] * inv_f(n),
+                        ]
+                    }
                 };
                 Some(Paint::Srgb(xyz_d65_to_srgb(d65)))
             }

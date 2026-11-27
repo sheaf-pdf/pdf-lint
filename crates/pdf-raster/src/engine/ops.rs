@@ -166,44 +166,15 @@ where
         }
         state.glyphs_left -= 1;
         verbs.clear();
-        let mut h_stretch = 1.0f32;
-        if !font.outline(glyph.code, hint_ppem, &mut verbs) {
-            state.substituted_glyphs += 1;
-            state.approximated = true;
-            let decoded_char = glyph.text().and_then(|s| s.chars().next());
-            let target_w = font.width(glyph.code);
-            let used_external = if let (Some(fb), Some(ch)) = (ctx.fallback, decoded_char) {
-                let query = FontQuery::from_font(font);
-                if let Some(prog) =
-                    ctx.cache
-                        .fallback_program(fb, query, &ctx.opts.limits.gfx.fonts)
-                {
-                    if let Some(fb_adv) = prog.outline_char(ch, hint_ppem, &mut verbs) {
-                        if target_w > 10.0 && fb_adv > 10.0 {
-                            h_stretch = (target_w / fb_adv).clamp(0.4, 2.5);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if !used_external {
-                emit_builtin_glyph(
-                    decoded_char,
-                    glyph.code,
-                    target_w,
-                    font.std14(),
-                    font.style(),
-                    font.glyph_box(glyph.code),
-                    &mut verbs,
-                );
-            }
-        }
+        let h_stretch = resolve_glyph_outline(
+            ctx,
+            font,
+            glyph.code,
+            glyph.text().and_then(|s| s.chars().next()),
+            hint_ppem,
+            state,
+            &mut verbs,
+        );
         if verbs.is_empty() {
             continue;
         }
@@ -225,6 +196,68 @@ where
         let _ = outline_verbs_to_bez_path(&verbs, glyph_to_page, bt_clip_bez);
     }
     Ok(())
+}
+
+/// Extracts `code`'s contour from `font`, substituting a fallback or built-in
+/// contour **only** when `font` has no readable embedded program
+/// (`OutlineOutcome::NoProgram`), never when an embedded program simply omits a
+/// glyph (`NoGlyph`, matching PDFium) or hit its per-glyph cap (`BudgetExceeded`).
+fn resolve_glyph_outline<'o, 'a, O>(
+    ctx: &RenderCtx<'o, 'a, O>,
+    font: &Font,
+    code: u32,
+    decoded_char: Option<char>,
+    hint_ppem: Option<f32>,
+    state: &mut RenderState,
+    verbs: &mut Vec<pdf_fonts::OutlineVerb>,
+) -> f32 {
+    use pdf_fonts::OutlineOutcome;
+
+    let mut h_stretch = 1.0_f32;
+    match font.outline_status(code, hint_ppem, verbs) {
+        OutlineOutcome::Drawn | OutlineOutcome::NoGlyph => {}
+        OutlineOutcome::BudgetExceeded => {
+            state.approximated = true;
+        }
+        OutlineOutcome::NoProgram | _ => {
+            state.substituted_glyphs += 1;
+            state.approximated = true;
+            let target_w = font.width(code);
+            let used_external = if let (Some(fb), Some(ch)) = (ctx.fallback, decoded_char) {
+                let query = FontQuery::from_font(font);
+                if let Some(prog) =
+                    ctx.cache
+                        .fallback_program(fb, query, &ctx.opts.limits.gfx.fonts)
+                {
+                    if let Some(fb_adv) = prog.outline_char(ch, hint_ppem, verbs) {
+                        if target_w > 10.0 && fb_adv > 10.0 {
+                            h_stretch = (target_w / fb_adv).clamp(0.4, 2.5);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !used_external {
+                emit_builtin_glyph(
+                    decoded_char,
+                    code,
+                    target_w,
+                    font.std14(),
+                    font.style(),
+                    font.glyph_box(code),
+                    verbs,
+                );
+            }
+        }
+    }
+    h_stretch
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -309,45 +342,15 @@ where
         }
         state.glyphs_left -= 1;
         verbs.clear();
-        let mut h_stretch = 1.0f32;
-        if !font.outline(glyph.code, hint_ppem, &mut verbs) {
-            state.substituted_glyphs += 1;
-            state.approximated = true;
-            let decoded_char = glyph.text().and_then(|s| s.chars().next());
-            let target_w = font.width(glyph.code);
-            let used_external = if let (Some(fb), Some(ch)) = (ctx.fallback, decoded_char) {
-                let query = FontQuery::from_font(font);
-                if let Some(prog) =
-                    ctx.cache
-                        .fallback_program(fb, query, &ctx.opts.limits.gfx.fonts)
-                {
-                    if let Some(fb_adv) = prog.outline_char(ch, hint_ppem, &mut verbs) {
-                        if target_w > 10.0 && fb_adv > 10.0 {
-                            h_stretch = (target_w / fb_adv).clamp(0.4, 2.5);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if !used_external {
-                emit_builtin_glyph(
-                    decoded_char,
-                    glyph.code,
-                    target_w,
-                    font.std14(),
-                    font.style(),
-                    font.glyph_box(glyph.code),
-                    &mut verbs,
-                );
-            }
-        }
+        let h_stretch = resolve_glyph_outline(
+            ctx,
+            font,
+            glyph.code,
+            glyph.text().and_then(|s| s.chars().next()),
+            hint_ppem,
+            state,
+            &mut verbs,
+        );
 
         if verbs.is_empty() {
             continue;

@@ -46,6 +46,10 @@ pub enum Fault {
     /// filled white.
     #[error("truncated CCITTFaxDecode stream; remaining rows filled white")]
     TruncatedFax,
+    /// `CCITTFaxDecode` or `JBIG2Decode` dictionary specified `/BitsPerComponent` other than `1`
+    /// and was forced to `1` under `Rules::Pdfium`.
+    #[error("invalid /BitsPerComponent for bilevel codec; forced to 1")]
+    InvalidBitsPerComponent,
     /// Recoverable departure while parsing or preparing `/ColorSpace`.
     #[error(transparent)]
     Color(#[from] pdf_color::Fault),

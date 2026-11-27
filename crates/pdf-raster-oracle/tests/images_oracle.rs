@@ -475,3 +475,173 @@ fn pdfium_oracle_rubric_verifies_all_codecs_and_masks_against_chromium_8152() {
         assert!(outcome.passed, "case `{name}` failed rubric: {outcome:?}");
     }
 }
+
+#[test]
+#[ignore = "requires libpdfium (run via `just test-pdfium`)"]
+fn pdfium_oracle_verifies_dct_dimension_and_component_mismatch_and_bilevel_bpc_coercion() {
+    let pdfium = require_pdfium();
+
+    // 1. DCT image whose JPEG SOF (`8x8`, left half red, right half green) disagrees with
+    //    dictionary `/Width 2 /Height 2`: PDFium uses the JPEG's SOF dimensions (`8x8`)!
+    let mut split_rgb = Vec::with_capacity(8 * 8 * 3);
+    for _y in 0..8 {
+        for x in 0..8 {
+            if x < 4 {
+                split_rgb.extend_from_slice(&[255, 0, 0]);
+            } else {
+                split_rgb.extend_from_slice(&[0, 255, 0]);
+            }
+        }
+    }
+    let jpg_8x8 = encode_jpeg(&split_rgb, 8, 8, JpegColorSpace::Rgb, 100).unwrap();
+    let dct_mismatch_stream = Stream::new(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Image"),
+            "Width" => 2,
+            "Height" => 2,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Filter" => Object::name("DCTDecode"),
+        },
+        jpg_8x8.data.bytes().unwrap().to_vec(),
+    );
+    let dct_pdf = build_image_page_pdf(16, 16, dct_mismatch_stream, Vec::new());
+    let dct_ref = pdfium
+        .render_page(&dct_pdf, 0, &RenderOptions::crisp_swatches(16, 16))
+        .unwrap();
+    assert!(dct_ref.pixel(2, 8).unwrap()[0] > 240 && dct_ref.pixel(2, 8).unwrap()[1] < 15);
+    assert!(dct_ref.pixel(13, 8).unwrap()[1] > 240 && dct_ref.pixel(13, 8).unwrap()[0] < 15);
+
+    let dct_reading = Reading::open(&dct_pdf, &Options::DEFAULT).unwrap();
+    let mut dct_faults = Vec::new();
+    let dct_decoded = decode_xobject_with(
+        &dct_reading,
+        ObjectId::new(5, 0),
+        None,
+        &DecodeOptions::PDFIUM,
+        &Limits::DEFAULT,
+        &mut dct_faults,
+    )
+    .unwrap();
+    assert_eq!((dct_decoded.width(), dct_decoded.height()), (8, 8));
+    assert!(
+        dct_faults
+            .iter()
+            .any(|(_, f)| *f == Fault::DimensionMismatch)
+    );
+
+    // DCT component mismatch (`1`-channel Gray JPEG declared as `/DeviceRGB`): refused by both!
+    let gray_jpg = encode_jpeg(&[64_u8; 16], 4, 4, JpegColorSpace::Gray, 95).unwrap();
+    let dct_comp_stream = Stream::new(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Image"),
+            "Width" => 4,
+            "Height" => 4,
+            "ColorSpace" => Object::name("DeviceRGB"),
+            "BitsPerComponent" => 8,
+            "Filter" => Object::name("DCTDecode"),
+        },
+        gray_jpg.data.bytes().unwrap().to_vec(),
+    );
+    let comp_pdf = build_image_page_pdf(8, 8, dct_comp_stream, Vec::new());
+    let comp_ref = pdfium
+        .render_page(&comp_pdf, 0, &RenderOptions::crisp_swatches(8, 8))
+        .unwrap();
+    assert_eq!(comp_ref.pixel(4, 4), Some([255, 255, 255, 255]));
+    let comp_reading = Reading::open(&comp_pdf, &Options::DEFAULT).unwrap();
+    assert!(
+        decode_xobject(
+            &comp_reading,
+            ObjectId::new(5, 0),
+            None,
+            &DecodeOptions::PDFIUM,
+            &Limits::DEFAULT,
+        )
+        .is_err()
+    );
+
+    // 2. CCITT Group 4 and JBIG2 with `/BitsPerComponent 8`: forced to `1` under `Rules::Pdfium`
+    //    (matching PDFium `chromium/8152`) and rejected under `Rules::Iso`!
+    let ccitt_bpc8 = Stream::new(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Image"),
+            "Width" => 8,
+            "Height" => 4,
+            "ColorSpace" => Object::name("DeviceGray"),
+            "BitsPerComponent" => 8,
+            "Filter" => Object::name("CCITTFaxDecode"),
+            "DecodeParms" => dict! { "K" => -1, "Columns" => 8, "Rows" => 4 },
+        },
+        ccitt_group4_8x4_checker(),
+    );
+    let ccitt_pdf = build_image_page_pdf(8, 4, ccitt_bpc8, Vec::new());
+    let ccitt_ref = pdfium
+        .render_page(&ccitt_pdf, 0, &RenderOptions::crisp_swatches(8, 4))
+        .unwrap();
+    assert_eq!(ccitt_ref.pixel(0, 0), Some([0, 0, 0, 255]));
+    assert_eq!(ccitt_ref.pixel(7, 0), Some([255, 255, 255, 255]));
+
+    let ccitt_reading = Reading::open(&ccitt_pdf, &Options::DEFAULT).unwrap();
+    let mut bpc_faults = Vec::new();
+    let ccitt_cand = composite_over_white(
+        &decode_xobject_with(
+            &ccitt_reading,
+            ObjectId::new(5, 0),
+            None,
+            &DecodeOptions::PDFIUM,
+            &Limits::DEFAULT,
+            &mut bpc_faults,
+        )
+        .unwrap(),
+    );
+    assert_eq!(ccitt_cand.as_bytes(), ccitt_ref.as_bytes());
+    assert!(
+        bpc_faults
+            .iter()
+            .any(|(_, f)| *f == Fault::InvalidBitsPerComponent)
+    );
+    assert!(
+        decode_xobject(
+            &ccitt_reading,
+            ObjectId::new(5, 0),
+            None,
+            &DecodeOptions::ISO,
+            &Limits::DEFAULT,
+        )
+        .is_err()
+    );
+
+    let (jb_globals, jb_page) = build_jbig2_with_globals_8x4();
+    let jbig2_bpc8 = Stream::new(
+        dict! {
+            "Type" => Object::name("XObject"),
+            "Subtype" => Object::name("Image"),
+            "Width" => 8,
+            "Height" => 4,
+            "ColorSpace" => Object::name("DeviceGray"),
+            "BitsPerComponent" => 8,
+            "Filter" => Object::name("JBIG2Decode"),
+            "DecodeParms" => dict! { "JBIG2Globals" => Object::reference(6) },
+        },
+        jb_page,
+    );
+    let jb_pdf = build_image_page_pdf(8, 4, jbig2_bpc8, vec![Stream::new(Dict::new(), jb_globals)]);
+    let jb_ref = pdfium
+        .render_page(&jb_pdf, 0, &RenderOptions::crisp_swatches(8, 4))
+        .unwrap();
+    let jb_reading = Reading::open(&jb_pdf, &Options::DEFAULT).unwrap();
+    let jb_cand = composite_over_white(
+        &decode_xobject(
+            &jb_reading,
+            ObjectId::new(5, 0),
+            None,
+            &DecodeOptions::PDFIUM,
+            &Limits::DEFAULT,
+        )
+        .unwrap(),
+    );
+    assert_eq!(jb_cand.as_bytes(), jb_ref.as_bytes());
+}

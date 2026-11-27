@@ -932,6 +932,18 @@ where
             self.say(at, Fault::TooManySamples);
             return Ok(None);
         };
+        if self.rules != Rules::Iso {
+            // Match PDFium (`CPDF_SampledFunc::v_Init`): total sample bits (`bps * outputs * prod(sizes)`)
+            // and `(total_bits + 7)` must fit in 32-bit unsigned arithmetic.
+            let mut bits32 = u32::try_from(n).ok().and_then(|no| bps.checked_mul(no));
+            for &s in &sizes {
+                bits32 = bits32.and_then(|acc| u32::try_from(s).ok()?.checked_mul(acc));
+            }
+            if bits32.and_then(|b| b.checked_add(7)).is_none() {
+                self.say(at, Fault::TooManySamples);
+                return Ok(None);
+            }
+        }
         let needed_bytes = total_bits.div_ceil(8);
 
         let encode = match dict.get(b"Encode").filter(|v| !v.is_null()) {
@@ -1001,6 +1013,11 @@ where
             self.say(at, Fault::Exponent);
             return Ok(None);
         };
+        if self.rules != Rules::Iso && n_obj.as_reference().is_some() {
+            // PDFium (`CPDF_ExpIntFunc::v_Init`) reads `/N` without following an indirect reference.
+            self.say(n_obj.at(), Fault::Exponent);
+            return Ok(None);
+        }
         let Some(exponent) = self.num_f32(n_obj, Fault::Exponent)? else {
             return Ok(None);
         };
@@ -1066,8 +1083,17 @@ where
 
         let mut c0 = c0_opt.unwrap_or_else(|| vec![0.0; base_n]);
         c0.resize(base_n, 0.0);
-        let mut c1 = c1_opt.unwrap_or_else(|| vec![1.0; base_n]);
-        c1.resize(base_n, 1.0);
+        let c1 = match c1_opt {
+            Some(mut given) => {
+                // When `/C1` is present with fewer elements than `base_n`, PDFium's
+                // `CPDF_Array::GetFloatAt` returns `0.0` for missing indices, whereas an
+                // absent `/C1` defaults every component to `1.0`.
+                let pad = if self.rules == Rules::Iso { 1.0 } else { 0.0 };
+                given.resize(base_n, pad);
+                given
+            }
+            None => vec![1.0; base_n],
+        };
 
         let Some(outputs) = (base_n as u32).checked_mul(m as u32).filter(|&o| o > 0) else {
             return Ok(None);

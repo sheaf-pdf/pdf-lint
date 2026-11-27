@@ -1,7 +1,7 @@
 //! What stands for the `programs` feature's reading of a font's program, without it:
 //! nothing can be opened, so nothing here is reached.
 
-use crate::font::{OutlineVerb, Simple, SimpleMap};
+use crate::font::{OutlineOutcome, OutlineVerb, Simple, SimpleMap};
 use crate::type1::Refusal;
 use crate::{GlyphBox, Limits};
 
@@ -54,8 +54,13 @@ impl SimpleGlyphs {
         SimpleGlyphs(())
     }
 
-    pub(crate) fn outline(&self, _: u32, _: Option<f32>, _: &mut Vec<OutlineVerb>) -> bool {
-        false
+    pub(crate) fn outline_status(
+        &self,
+        _: u32,
+        _: Option<f32>,
+        _: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
+        OutlineOutcome::NoProgram
     }
 }
 
@@ -80,7 +85,12 @@ impl CidGlyphs {
         (0, None, 0)
     }
 
-    pub(crate) fn outline(&self, _: u32, _: Option<f32>, _: &mut Vec<OutlineVerb>) -> bool {
-        false
+    pub(crate) fn outline_status(
+        &self,
+        _: u32,
+        _: Option<f32>,
+        _: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
+        OutlineOutcome::NoProgram
     }
 }

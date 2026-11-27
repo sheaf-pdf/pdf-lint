@@ -54,8 +54,9 @@ pub enum Viewport {
         /// Extra clockwise rotation added to the page's `/Rotate`.
         rotation: Rotation,
     },
-    /// Dots per inch (`72.0` = 1 pixel per 1/72-inch point, honoring page
-    /// `/UserUnit`), with extra clockwise `rotation`.
+    /// Dots per inch (`72.0` = 1 pixel per user unit; honors page `/UserUnit`
+    /// under [`Rules::Iso`] and ignores `/UserUnit` under [`Rules::Pdfium`] as
+    /// PDFium does), with extra clockwise `rotation`.
     Dpi {
         /// Resolution in dots per inch (`> 0.0`).
         dpi: f32,
@@ -84,7 +85,11 @@ impl Default for Viewport {
 
 impl Viewport {
     /// Resolves pixel dimensions and the closed-form `PageSpace -> DeviceSpace`
-    /// [`Matrix`] from `geom`, checking [`Limits`] before any buffer allocation.
+    /// [`Matrix`] from `geom` under [`Rules::Iso`] (honoring `geom.user_unit`
+    /// on [`Viewport::Dpi`]), checking [`Limits`] before any buffer allocation.
+    ///
+    /// Use [`Viewport::resolve_with_rules`] when matching a specific [`Rules`]
+    /// policy (`Rules::Pdfium` ignores `/UserUnit`, matching PDFium).
     ///
     /// # Errors
     ///
@@ -92,6 +97,27 @@ impl Viewport {
     /// singular transforms, or [`Error::Limit`] when dimensions or byte budgets
     /// exceed `limits`.
     pub fn resolve(&self, geom: &PageGeom, limits: &Limits) -> Result<ResolvedViewport, Error> {
+        self.resolve_with_rules(geom, Rules::Iso, limits)
+    }
+
+    /// Resolves pixel dimensions and the closed-form `PageSpace -> DeviceSpace`
+    /// [`Matrix`] from `geom` under `rules`, checking [`Limits`] before any
+    /// buffer allocation.
+    ///
+    /// On [`Viewport::Dpi`], [`Rules::Iso`] scales by `geom.user_unit`
+    /// (ISO 32000-2, §7.7.3.3, Table 31), whereas [`Rules::Pdfium`] uses a unit
+    /// scale of `1.0` (matching PDFium as of `chromium/8152`, which ignores
+    /// `/UserUnit`).
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`Viewport::resolve`].
+    pub fn resolve_with_rules(
+        &self,
+        geom: &PageGeom,
+        rules: Rules,
+        limits: &Limits,
+    ) -> Result<ResolvedViewport, Error> {
         match *self {
             Viewport::Page { width, rotation } => {
                 if width == 0 {
@@ -173,7 +199,11 @@ impl Viewport {
                 if !(shown.width > 0.0 && shown.height > 0.0) {
                     return Err(Error::InvalidViewport("page visible box has empty extent"));
                 }
-                let unit_scale = f64::from(rotated.user_unit) * f64::from(dpi) / 72.0;
+                let user_unit = match rules {
+                    Rules::Iso => f64::from(rotated.user_unit),
+                    _ => 1.0,
+                };
+                let unit_scale = user_unit * f64::from(dpi) / 72.0;
                 let raw_w = (f64::from(shown.width) * unit_scale).round().max(1.0);
                 let raw_h = (f64::from(shown.height) * unit_scale).round().max(1.0);
                 if raw_w > f64::from(u32::MAX) || raw_h > f64::from(u32::MAX) {

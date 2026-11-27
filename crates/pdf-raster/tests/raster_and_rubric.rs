@@ -1595,6 +1595,174 @@ fn hidden_oc_applies_clips_and_unwinds_unbalanced_form_save_and_pattern_stencil_
     assert_eq!(pix.pixel_rgba8(49, 48), Some([0, 204, 0, 255]));
 }
 
+#[test]
+fn user_unit_dpi_and_embedded_missing_glyph_follow_iso_and_pdfium_rules() {
+    // 1. `/UserUnit 2.0` on `100 × 80` page: `Viewport::Dpi(72)` resolves to `100 × 80` under
+    //    `Rules::Pdfium` (matching PDFium) and `200 × 160` under `Rules::Iso` (ISO 32000-2 §7.7.3.3).
+    let content = b"0.8 0.1 0.1 rg 0 0 100 80 re f\n";
+    let uu_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(80)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "UserUnit" => 2.0,
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (4, Object::from(Stream::new(dict! {}, content.to_vec()))),
+    ]);
+
+    let mut dpi_pdfium = RenderOpts::with_viewport(Viewport::Dpi {
+        dpi: 72.0,
+        rotation: Rotation::R0,
+    });
+    dpi_pdfium.rules = Rules::Pdfium;
+    let (pix_p, _, _) = render_pdf_bytes(&uu_pdf, &dpi_pdfium);
+    assert_eq!((pix_p.width(), pix_p.height()), (100, 80));
+
+    let mut dpi_iso = dpi_pdfium.clone();
+    dpi_iso.rules = Rules::Iso;
+    let (pix_i, _, _) = render_pdf_bytes(&uu_pdf, &dpi_iso);
+    assert_eq!((pix_i.width(), pix_i.height()), (200, 160));
+
+    // 2. Embedded TrueType font missing `'Z'`:
+    //    - With a non-empty `.notdef` box (`TrueType::new`), `'Z'` draws `.notdef` (`substituted_glyphs == 0`).
+    //    - With a blank `.notdef` (`Empty`) or out-of-range CID (`OutlineOutcome::NoGlyph`), nothing
+    //      is drawn (`substituted_glyphs == 0` and canvas stays pure white — never a built-in `?` stick glyph!).
+    let mut blank_notdef_tt = TrueType::new(1000);
+    blank_notdef_tt.glyphs[0] = (FixtureGlyph::Empty, 500);
+    let g_a = blank_notdef_tt.glyph(FixtureGlyph::Box(100, 0, 700, 750), 800);
+    blank_notdef_tt.map('A', g_a);
+    let ttf_bytes = blank_notdef_tt.build();
+    let z_stream = b"0 0 0 rg BT /F1 48 Tf 10 20 Td (Z) Tj /F2 48 Tf <0099> Tj ET\n";
+    let z_pdf = build_pdf_bytes(vec![
+        (
+            1,
+            Object::from(
+                dict! { "Type" => Object::name("Catalog"), "Pages" => Object::reference(2) },
+            ),
+        ),
+        (
+            2,
+            Object::from(dict! {
+                "Type" => Object::name("Pages"),
+                "Kids" => vec![Object::reference(3)],
+                "Count" => 1,
+                "MediaBox" => vec![Object::from(0), Object::from(0), Object::from(100), Object::from(80)],
+            }),
+        ),
+        (
+            3,
+            Object::from(dict! {
+                "Type" => Object::name("Page"),
+                "Parent" => Object::reference(2),
+                "Resources" => dict! {
+                    "Font" => dict! {
+                        "F1" => Object::reference(5),
+                        "F2" => Object::reference(8),
+                    },
+                },
+                "Contents" => Object::reference(4),
+            }),
+        ),
+        (4, Object::from(Stream::new(dict! {}, z_stream.to_vec()))),
+        (
+            5,
+            Object::from(dict! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("TrueType"),
+                "BaseFont" => Object::name("SubsetTest"),
+                "Encoding" => Object::name("WinAnsiEncoding"),
+                "FirstChar" => 65,
+                "LastChar" => 90,
+                "Widths" => vec![Object::from(700); 26],
+                "FontDescriptor" => Object::reference(6),
+            }),
+        ),
+        (
+            6,
+            Object::from(dict! {
+                "Type" => Object::name("FontDescriptor"),
+                "FontName" => Object::name("SubsetTest"),
+                "Flags" => 32,
+                "FontBBox" => vec![Object::from(0), Object::from(0), Object::from(1000), Object::from(1000)],
+                "Ascent" => 800,
+                "Descent" => -200,
+                "CapHeight" => 700,
+                "StemV" => 80,
+                "FontFile2" => Object::reference(7),
+            }),
+        ),
+        (
+            7,
+            Object::from(Stream::new(
+                dict! { "Length1" => ttf_bytes.len() as i64 },
+                ttf_bytes,
+            )),
+        ),
+        (
+            8,
+            Object::from(dict! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("Type0"),
+                "BaseFont" => Object::name("SubsetCid"),
+                "Encoding" => Object::name("Identity-H"),
+                "DescendantFonts" => vec![Object::reference(9)],
+            }),
+        ),
+        (
+            9,
+            Object::from(dict! {
+                "Type" => Object::name("Font"),
+                "Subtype" => Object::name("CIDFontType2"),
+                "BaseFont" => Object::name("SubsetCid"),
+                "CIDSystemInfo" => dict! {
+                    "Registry" => Object::bytes(&b"Adobe"[..]),
+                    "Ordering" => Object::bytes(&b"Identity"[..]),
+                    "Supplement" => 0,
+                },
+                "DW" => 700,
+                "FontDescriptor" => Object::reference(6),
+                "CIDToGIDMap" => Object::name("Identity"),
+            }),
+        ),
+    ]);
+    let z_opts = RenderOpts::with_viewport(Viewport::Page {
+        width: 100,
+        rotation: Rotation::R0,
+    });
+    let (z_pix, z_sum, _) = render_pdf_bytes(&z_pdf, &z_opts);
+    #[cfg(feature = "programs")]
+    {
+        assert_eq!(z_sum.substituted_glyphs, 0);
+        assert!(
+            z_pix.as_bytes().iter().all(|&b| b == 255),
+            "embedded font with blank .notdef must not draw built-in stick glyph"
+        );
+    }
+    #[cfg(not(feature = "programs"))]
+    {
+        assert_eq!(z_sum.substituted_glyphs, 2);
+        let _ = z_pix;
+    }
+}
+
 #[cfg(feature = "pdfium")]
 #[test]
 #[ignore = "requires libpdfium (run via `just test-pdfium`)"]

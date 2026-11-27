@@ -928,19 +928,22 @@ impl<'o, O: Resolve<'o> + Streams + Copy, S: Sink<Fault> + ?Sized> Run<'_, '_, '
                     .get(b"G")
                     .and_then(Object::as_reference)
                     .filter(|&id| self.reader.stream(id).is_some());
-                let backdrop = self.reader.array_for(smask_dict, b"BC").and_then(|arr| {
-                    let mut vals = Vec::with_capacity(arr.len().min(16));
-                    for item in arr.iter().take(16) {
-                        let v = self.reader.float_of(item)?;
-                        if !v.is_finite() {
-                            return None;
+                let backdrop = self
+                    .reader
+                    .quiet_array_for(smask_dict, b"BC")
+                    .and_then(|arr| {
+                        let mut vals = Vec::with_capacity(arr.len().min(16));
+                        for item in arr.iter().take(16) {
+                            let v = self.reader.quiet_float_of(item)?;
+                            if !v.is_finite() {
+                                return None;
+                            }
+                            vals.push(v);
                         }
-                        vals.push(v);
-                    }
-                    Some(ColorValues::from_slice(&vals))
-                });
+                        Some(ColorValues::from_slice(&vals))
+                    });
                 let transfer = smask_dict.get(b"TR").and_then(|tr| {
-                    let seen_name = self.reader.seen(tr).and_then(Object::as_name);
+                    let seen_name = self.reader.quiet_seen(tr).and_then(Object::as_name);
                     if matches!(seen_name, Some(b"Identity" | b"Default")) {
                         None
                     } else {

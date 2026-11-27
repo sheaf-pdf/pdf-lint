@@ -74,6 +74,24 @@ pub enum OutlineVerb {
     Close,
 }
 
+/// Outcome of extracting a glyph contour via [`Font::outline_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OutlineOutcome {
+    /// Contour extracted from the embedded font program (may append zero verbs
+    /// for whitespace or blank `.notdef` glyphs).
+    Drawn,
+    /// Embedded font program is present, but `code` has no glyph in the program
+    /// or its glyph data is missing/malformed.
+    NoGlyph,
+    /// No readable font program is embedded on this font (`FontProgram::None`,
+    /// `Malformed`, or `Capped`), or the `programs` feature is disabled.
+    NoProgram,
+    /// Embedded font program is present, but evaluating `code`'s glyph exceeded
+    /// composite/point or charstring fuel limits.
+    BudgetExceeded,
+}
+
 /// Glyph stream and coloring mode for a Type 3 font character code
 /// (ISO 32000-2, §9.6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -966,16 +984,31 @@ impl Font {
     /// `false` when no program was read, `code` has no glyph, or evaluation
     /// exceeded resource bounds (leaving `out` unchanged).
     pub fn outline(&self, code: u32, hint_ppem: Option<f32>, out: &mut Vec<OutlineVerb>) -> bool {
+        self.outline_status(code, hint_ppem, out) == OutlineOutcome::Drawn
+    }
+
+    /// Appends the contour of `code`'s glyph in glyph units (`1000.0` = 1 em)
+    /// to `out` and reports why no contour was produced when unsuccessful
+    /// ([`OutlineOutcome`]), distinguishing fonts without an embedded program
+    /// ([`OutlineOutcome::NoProgram`]) from missing glyphs
+    /// ([`OutlineOutcome::NoGlyph`]) and per-glyph resource caps
+    /// ([`OutlineOutcome::BudgetExceeded`]).
+    pub fn outline_status(
+        &self,
+        code: u32,
+        hint_ppem: Option<f32>,
+        out: &mut Vec<OutlineVerb>,
+    ) -> OutlineOutcome {
         match &self.outlines {
-            Outlines::None => false,
+            Outlines::None => OutlineOutcome::NoProgram,
             Outlines::Codes {
                 glyphs: Some(glyphs),
                 ..
-            } => glyphs.outline(code, hint_ppem, out),
-            Outlines::Codes { glyphs: None, .. } => false,
+            } => glyphs.outline_status(code, hint_ppem, out),
+            Outlines::Codes { glyphs: None, .. } => OutlineOutcome::NoProgram,
             Outlines::Glyphs(glyphs) => match self.cid(code) {
-                Some(cid) => glyphs.outline(cid, hint_ppem, out),
-                None => false,
+                Some(cid) => glyphs.outline_status(cid, hint_ppem, out),
+                None => OutlineOutcome::NoGlyph,
             },
         }
     }

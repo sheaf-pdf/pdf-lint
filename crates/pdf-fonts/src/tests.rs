@@ -1203,4 +1203,53 @@ fn outline_bounds_match_char_box_with_shifted_matrices_and_fallback_advances_are
     verbs = sentinel.clone();
     assert_eq!(fb_cff_no_w.outline_char('A', None, &mut verbs), None);
     assert_eq!(verbs, sentinel);
+
+    // 5. `Font::outline_status` distinguishes `Drawn`, `NoGlyph`, `NoProgram`, and `BudgetExceeded`!
+    let unembedded_dict = dict! {
+        "Type" => Object::name("Font"),
+        "Subtype" => Object::name("Type1"),
+        "BaseFont" => Object::name("Helvetica"),
+    };
+    let unembedded_font = Font::read(
+        streams2,
+        &unembedded_dict,
+        &Limits::DEFAULT,
+        &mut budget,
+        &mut (),
+    )
+    .unwrap();
+    verbs.clear();
+    assert_eq!(
+        unembedded_font.outline_status(u32::from(b'A'), None, &mut verbs),
+        crate::OutlineOutcome::NoProgram
+    );
+    verbs.clear();
+    assert_eq!(
+        t1_font.outline_status(u32::from(b'A'), None, &mut verbs),
+        crate::OutlineOutcome::Drawn
+    );
+    verbs.clear();
+    assert_eq!(
+        t1_font.outline_status(u32::from(b'Z'), None, &mut verbs),
+        crate::OutlineOutcome::Drawn
+    );
+    assert!(
+        verbs.is_empty(),
+        "unmapped named code maps to empty .notdef"
+    );
+    verbs.clear();
+    assert_eq!(
+        t1_font.outline_status(300, None, &mut verbs),
+        crate::OutlineOutcome::NoGlyph
+    );
+    verbs.clear();
+    assert_eq!(
+        cid_font.outline_status(99, None, &mut verbs),
+        crate::OutlineOutcome::NoGlyph
+    );
+    verbs.clear();
+    assert_eq!(
+        heavy_font.outline_status(u32::from(b'A'), None, &mut verbs),
+        crate::OutlineOutcome::BudgetExceeded
+    );
 }

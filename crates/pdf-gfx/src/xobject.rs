@@ -377,13 +377,13 @@ fn read_transparency_group<'o, O: Resolve<'o> + Streams, S: Sink<Fault> + ?Sized
     reader: &ObjReader<'_, O, S>,
     dict: &'o Dict,
 ) -> Option<TransparencyGroup<'o>> {
-    let group = reader.dict_of_value(dict.get(b"Group")?)?;
-    if reader.name_or_bytes_for(group, b"S") != Some(b"Transparency") {
+    let group = reader.quiet_dict_of_value(dict.get(b"Group")?)?;
+    if reader.quiet_name_or_bytes_for(group, b"S") != Some(b"Transparency") {
         return None;
     }
     Some(TransparencyGroup {
-        isolated: reader.bool_for(group, b"I").unwrap_or(false),
-        knockout: reader.bool_for(group, b"K").unwrap_or(false),
+        isolated: reader.quiet_bool_for(group, b"I").unwrap_or(false),
+        knockout: reader.quiet_bool_for(group, b"K").unwrap_or(false),
         color_space: group.get(b"CS"),
     })
 }

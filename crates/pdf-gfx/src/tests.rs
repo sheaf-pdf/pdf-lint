@@ -3076,6 +3076,139 @@ fn default_appearance_parse_is_refused_past_a_content_cap() {
     );
 }
 
+#[test]
+fn unreadable_or_damaged_group_bc_and_tr_do_not_disturb_non_rasterizing_callers() {
+    use std::collections::BTreeMap;
+    use std::ops::ControlFlow;
+
+    use pdf_content_streams::Concat;
+    use pdf_fonts::Fonts;
+    use pdf_objects::{Object, ObjectId, Stream, Unreadable, Why, dict};
+
+    struct SelectiveResolver {
+        good: BTreeMap<ObjectId, Object>,
+        damaged_id: ObjectId,
+        capped_id: ObjectId,
+    }
+
+    impl<'a> pdf_objects::Resolve<'a> for &'a SelectiveResolver {
+        fn resolve(&self, id: ObjectId) -> Option<&'a Object> {
+            self.good.get(&id)
+        }
+
+        fn try_resolve(&self, id: ObjectId) -> Result<Option<&'a Object>, Unreadable> {
+            if id == self.damaged_id {
+                Err(Unreadable::new(id, Why::Damaged, "damaged object"))
+            } else if id == self.capped_id {
+                Err(Unreadable::new(id, Why::Capped, "capped object"))
+            } else {
+                Ok(self.good.get(&id))
+            }
+        }
+    }
+
+    let form_id = ObjectId::new(10, 0);
+    let smask_form_id = ObjectId::new(11, 0);
+    let damaged_id = ObjectId::new(90, 0);
+    let capped_id = ObjectId::new(91, 0);
+
+    let mut good = BTreeMap::new();
+    let form_bytes = b"0 0 10 10 re f".to_vec();
+    good.insert(
+        form_id,
+        Object::from(Stream::new(
+            dict! {
+                "Type" => Object::name("XObject"),
+                "Subtype" => Object::name("Form"),
+                "BBox" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+                "Group" => Object::from(capped_id),
+            },
+            form_bytes.clone(),
+        )),
+    );
+    good.insert(
+        smask_form_id,
+        Object::from(Stream::new(
+            dict! {
+                "Type" => Object::name("XObject"),
+                "Subtype" => Object::name("Form"),
+                "BBox" => vec![Object::from(0), Object::from(0), Object::from(10), Object::from(10)],
+                "Group" => dict! {
+                    "S" => Object::name("Transparency"),
+                    "I" => Object::from(damaged_id),
+                    "K" => Object::from(capped_id),
+                },
+            },
+            form_bytes.clone(),
+        )),
+    );
+
+    let resolver = SelectiveResolver {
+        good,
+        damaged_id,
+        capped_id,
+    };
+    let streams = pdf_objects::WithStreams::new(&resolver, |id, _| {
+        if id == form_id || id == smask_form_id {
+            Ok(form_bytes.clone())
+        } else {
+            Err(Unreadable::new(id, Why::Damaged, "missing stream"))
+        }
+    });
+
+    let resources = Object::from(dict! {
+        "XObject" => dict! {
+            "Fm0" => Object::from(form_id),
+            "Fm1" => Object::from(smask_form_id),
+        },
+        "ExtGState" => dict! {
+            "GS0" => dict! {
+                "SMask" => dict! {
+                    "S" => Object::name("Alpha"),
+                    "G" => Object::from(smask_form_id),
+                    "BC" => Object::from(damaged_id),
+                    "TR" => Object::from(capped_id),
+                },
+            },
+            "GS1" => dict! {
+                "SMask" => dict! {
+                    "S" => Object::name("Luminosity"),
+                    "G" => Object::from(smask_form_id),
+                    "BC" => vec![Object::from(0.5), Object::from(capped_id)],
+                },
+            },
+        },
+    });
+
+    let content = b"/GS0 gs /GS1 gs /Fm0 Do /Fm1 Do";
+    let concat = Concat::new(&[&content[..]]);
+    let fonts = Fonts::default();
+    let mut faults = Vec::new();
+    let mut forms_entered = 0_usize;
+    let summary = crate::interpret_with(
+        streams,
+        &concat,
+        Some(&resources),
+        &crate::Limits::DEFAULT,
+        &fonts,
+        crate::Opts::default(),
+        &mut faults,
+        |ev| {
+            if matches!(ev.kind, crate::Kind::FormBegin(_)) {
+                forms_entered += 1;
+            }
+            ControlFlow::Continue(())
+        },
+    )
+    .expect("auxiliary /Group, /BC, and /TR failures must not fail non-rasterizing callers");
+    assert_eq!(forms_entered, 2);
+    assert!(
+        faults.is_empty(),
+        "auxiliary /Group, /BC, and /TR must not add Fault::Damaged: {faults:?}"
+    );
+    assert!(summary.segments >= 2);
+}
+
 const BOX_BORDER_STYLES: [BoxBorderStyle; 5] = [
     BoxBorderStyle::Solid,
     BoxBorderStyle::Dashed,

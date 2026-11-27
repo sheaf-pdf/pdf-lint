@@ -70,6 +70,7 @@ pub enum Error {
 }
 
 static INIT_LOCK: Mutex<()> = Mutex::new(());
+static OPEN_LOCK: Mutex<()> = Mutex::new(());
 static GLOBAL_PDFIUM: OnceLock<&'static RawPdfium> = OnceLock::new();
 
 fn try_init_global(
@@ -166,6 +167,15 @@ fn map_doc_err(err: PdfiumError) -> Error {
 /// for reuse across the process), or bound dynamically via
 /// [`PdfiumBackend::bind_to_library`], [`PdfiumBackend::bind_to_system_library`],
 /// and [`PdfiumBackend::from_env`].
+///
+/// # Page Geometry Notes
+///
+/// PDFium's C API resolves inherited `/MediaBox` and `/CropBox` entries via
+/// `FPDF_GetPageBoundingBox` (`crop_box`), whereas `FPDFPage_GetMediaBox` reads
+/// the leaf `/Page` dictionary alone and PDFium ignores `/UserUnit`:
+/// [`RenderedDoc::page_geom`] therefore populates `crop_box` from the effective
+/// bounding box, falls back to `crop_box` for `media_box` when `/MediaBox` is
+/// inherited from an ancestor `/Pages` node, and sets `user_unit = 1.0`.
 #[derive(Clone, Copy)]
 pub struct PdfiumBackend {
     pdfium: &'static RawPdfium,
@@ -317,9 +327,15 @@ impl RenderedDoc for PdfiumRenderedDoc {
         }
 
         let geom = self.page_geom(page_index)?;
+        // PDFium always ignores `/UserUnit`, so resolve `Viewport::Dpi` under
+        // PDFium's unscaled user-unit policy (`Rules::Pdfium`).
         let resolved = opts
             .viewport
-            .resolve(&geom, &opts.limits)
+            .resolve_with_rules(
+                &geom,
+                pdf_objects::pdf_tokenizer::Rules::Pdfium,
+                &opts.limits,
+            )
             .map_err(BackendError::Raster)?;
 
         let idx =
@@ -534,13 +550,21 @@ impl RenderBackend for PdfiumBackend {
         if password.is_some_and(|pw| pw.contains('\0')) {
             return Err(BackendError::custom(Error::InvalidPassword));
         }
-        let doc = self
-            .pdfium
-            .load_pdf_from_reader(Cursor::new(bytes), password)
-            .map_err(|e| match map_doc_err(e) {
-                Error::DocumentLoad { locked: true, .. } => BackendError::Locked,
-                other => BackendError::custom(other),
-            })?;
+        // `pdfium-render`'s `thread_safe` feature locks each FFI call
+        // individually, so `FPDF_LoadCustomDocument` and the subsequent
+        // `FPDF_GetLastError` acquire separate locks; hold `OPEN_LOCK` across
+        // the pair so concurrent document opens cannot cross error codes.
+        let doc = {
+            let _open_guard = OPEN_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.pdfium
+                .load_pdf_from_reader(Cursor::new(bytes), password)
+        }
+        .map_err(|e| match map_doc_err(e) {
+            Error::DocumentLoad { locked: true, .. } => BackendError::Locked,
+            other => BackendError::custom(other),
+        })?;
         let page_count = usize::try_from(doc.pages().len()).unwrap_or(0);
         Ok(Box::new(PdfiumRenderedDoc {
             doc,

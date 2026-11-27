@@ -7,7 +7,7 @@ Zero-I/O pure-Rust PDF 2D page, Form XObject, annotation, and interactive form r
 ## Core Concepts
 
 - **Viewer-aligned `Viewport`s & `Pixmap` formats:**
-  - `Viewport::Page` (whole-page width fit), `Viewport::Tile` (zoomed sub-rectangle tile), `Viewport::Dpi` (physical DPI honoring page `/UserUnit`), and `Viewport::Custom` (explicit affine `PageSpace -> DeviceSpace` matrix) resolve closed-form transforms over `PageGeom` and check `Limits` before allocating pixel buffers.
+  - `Viewport::Page` (whole-page width fit), `Viewport::Tile` (zoomed sub-rectangle tile), `Viewport::Dpi` (physical DPI, honoring page `/UserUnit` under `Rules::Iso` and matching PDFium's unscaled user units under `Rules::Pdfium`), and `Viewport::Custom` (explicit affine `PageSpace -> DeviceSpace` matrix) resolve closed-form transforms over `PageGeom` and check `Limits` before allocating pixel buffers.
   - Outputs straight `RGBA8` (`PixelFormat::Rgba8`), native `BGRA8` (`PixelFormat::Bgra8`), or premultiplied `RGBA8` (`PixelFormat::Rgba8Premul`), with redacted `Debug` formatting that never prints pixel contents.
 - **Complete 2D PDF imaging pipeline (`render_page`, `render_page_with`, `render_content`, `render_content_with`):**
   - **Paths & clips:** `NonZero` and `EvenOdd` fills, anisotropic user-space strokes, caps, joins, miter limits, dash patterns, `0 w` device hairlines, `W`/`W*` path clips, `4..=7 Tr` glyph-outline text clips, and Form XObject `/BBox` clips.
@@ -98,7 +98,7 @@ assert_eq!(pixmap.pixel_rgba8(5, 5), Some([255, 255, 255, 255]));
 - **`programs`** *(default)*: Enables embedded TrueType, OpenType/CFF, CFF, and Type 1 glyph outline evaluation via `pdf-fonts/programs`.
 - **`text-layout`** *(default)*: Enables on-the-fly synthesis of FreeText annotation and AcroForm text, button, and choice widget appearances.
 - **`icc`** *(default)*: Enables pure-Rust `ICCBased` and `/OutputIntents` profile conversion via `pdf-color/icc` (`moxcms`).
-- **`pdfium`** *(optional)*: Enables `pdf_raster::pdfium` and `PdfiumBackend`, a thin `#![forbid(unsafe_code)]` dynamic-library `RenderBackend` adapter over `pdfium-render` (`0.9.6`, `thread_safe`; semver-tied to `pdfium-render` `0.9`) so callers can swap between `pdfs::Pdf` / `pdfs::RustBackend` and PDFium at runtime.
+- **`pdfium`** *(optional)*: Enables `pdf_raster::pdfium` and `PdfiumBackend`, a thin `#![forbid(unsafe_code)]` dynamic-library `RenderBackend` adapter over `pdfium-render` (`=0.9.6`, `thread_safe`, `pdfium_8125` C ABI, tested against `chromium/8152`) so callers can swap between `pdfs::Pdf` / `pdfs::RustBackend` and PDFium at runtime.
 - **`predefined-cmaps`** *(optional)*: Bundles Adobe CJK CMaps via `pdf-fonts/predefined-cmaps`.
 - **`simd`** *(optional)*: Enables runtime CPU SIMD dispatch in the 2D compositor and image codecs.
 - **`zlib-rs`** *(optional)*: Enables `zlib-rs` in `pdf-images` inline filter chains.

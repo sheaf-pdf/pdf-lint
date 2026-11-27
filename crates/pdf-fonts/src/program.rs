@@ -52,7 +52,7 @@ use skrifa::raw::tables::glyf::{Anchor, Glyph};
 use skrifa::raw::types::{CFF_SFNT_VERSION, Fixed, GlyphId, Tag};
 use skrifa::raw::{FileRef, FontRead, FontRef, TableProvider};
 
-use crate::font::{Base, OutlineVerb, OwnText, Simple, SimpleMap};
+use crate::font::{Base, OutlineOutcome, OutlineVerb, OwnText, Simple, SimpleMap};
 use crate::type1::Refusal;
 use crate::{Encoding, GlyphBox, Limits, glyph_text, name_code_point, type1};
 
@@ -449,19 +449,20 @@ impl SimpleGlyphs {
         SimpleGlyphs { face, gids }
     }
 
-    pub(crate) fn outline(
+    pub(crate) fn outline_status(
         &self,
         code: u32,
         hint_ppem: Option<f32>,
         out: &mut Vec<OutlineVerb>,
-    ) -> bool {
+    ) -> OutlineOutcome {
         let Some(&Some(gid)) = self.gids.get(code as usize) else {
-            return false;
+            return OutlineOutcome::NoGlyph;
         };
         let Some(view) = self.face.view() else {
-            return false;
+            return OutlineOutcome::NoProgram;
         };
-        self.face.outline_gid(&view, u32::from(gid), hint_ppem, out)
+        self.face
+            .outline_gid_status(&view, u32::from(gid), hint_ppem, out)
     }
 }
 
@@ -2482,12 +2483,12 @@ impl<'a> Format2<'a> {
 }
 
 impl CidGlyphs {
-    pub(crate) fn outline(
+    pub(crate) fn outline_status(
         &self,
         cid: u32,
         hint_ppem: Option<f32>,
         out: &mut Vec<OutlineVerb>,
-    ) -> bool {
+    ) -> OutlineOutcome {
         let cid_u16 = usize::from(cid as u16);
         let gid = match &self.to_gid {
             Some(map) => map
@@ -2496,24 +2497,24 @@ impl CidGlyphs {
             None => Some(cid_u16 as u32),
         };
         let Some(gid) = gid else {
-            return false;
+            return OutlineOutcome::NoGlyph;
         };
         let Some(view) = self.face.view() else {
-            return false;
+            return OutlineOutcome::NoProgram;
         };
-        self.face.outline_gid(&view, gid, hint_ppem, out)
+        self.face.outline_gid_status(&view, gid, hint_ppem, out)
     }
 }
 
 impl Face {
     /// Emits contour verbs in glyph units (`1000.0` = 1 em) for `gid`.
-    fn outline_gid(
+    fn outline_gid_status(
         &self,
         view: &View<'_>,
         gid: u32,
         hint_ppem: Option<f32>,
         out: &mut Vec<OutlineVerb>,
-    ) -> bool {
+    ) -> OutlineOutcome {
         self.outline_gid_with_advance(view, gid, hint_ppem, out).0
     }
 
@@ -2523,12 +2524,12 @@ impl Face {
         gid: u32,
         hint_ppem: Option<f32>,
         out: &mut Vec<OutlineVerb>,
-    ) -> (bool, Option<f32>) {
+    ) -> (OutlineOutcome, Option<f32>) {
         if self.upem == 0 {
-            return (false, None);
+            return (OutlineOutcome::NoGlyph, None);
         }
         let start_len = out.len();
-        let (ok, ps_adv) = match view {
+        let (outcome, ps_adv) = match view {
             View::Glyf(font) => (
                 outline_glyf(
                     font,
@@ -2549,10 +2550,10 @@ impl Face {
                 outline_type1(font, scanned, gid, self.upem, self.fuel, out)
             }
         };
-        if !ok {
+        if outcome != OutlineOutcome::Drawn {
             out.truncate(start_len);
         }
-        (ok, ps_adv)
+        (outcome, ps_adv)
     }
 
     /// Maps `ch` via this face's charmaps, emits its outline in glyph units, and
@@ -2582,8 +2583,8 @@ impl Face {
         })?;
 
         let start_len = out.len();
-        let (ok, ps_adv) = self.outline_gid_with_advance(&view, gid, hint_ppem, out);
-        if !ok {
+        let (outcome, ps_adv) = self.outline_gid_with_advance(&view, gid, hint_ppem, out);
+        if outcome != OutlineOutcome::Drawn {
             return None;
         }
         let scale = 1000.0 / f32::from(self.upem);
@@ -2671,12 +2672,12 @@ fn outline_glyf(
     tricky_font: bool,
     hint_ppem: Option<f32>,
     out: &mut Vec<OutlineVerb>,
-) -> bool {
+) -> OutlineOutcome {
     if gid >= glyphs {
-        return false;
+        return OutlineOutcome::NoGlyph;
     }
     let Some((loca, glyf)) = font.loca(None).ok().zip(font.glyf().ok()) else {
-        return false;
+        return OutlineOutcome::NoGlyph;
     };
     let data = font
         .table_data(Tag::new(b"glyf"))
@@ -2686,8 +2687,8 @@ fn outline_glyf(
         .get(at..at + 2)
         .map(|c| i16::from_be_bytes([c[0], c[1]]));
     match (len, contours) {
-        (0, _) | (_, Some(0)) => return true,
-        (1..10, _) => return false,
+        (0, _) | (_, Some(0)) => return OutlineOutcome::Drawn,
+        (1..10, _) => return OutlineOutcome::NoGlyph,
         _ => {}
     }
     let mut counted = HashMap::new();
@@ -2701,14 +2702,14 @@ fn outline_glyf(
         &mut counted,
         &mut read,
     ) else {
-        return false;
+        return OutlineOutcome::NoGlyph;
     };
     if nodes > most.0 || points > u64::from(u16::MAX) {
-        return false;
+        return OutlineOutcome::BudgetExceeded;
     }
     let outlines = font.outline_glyphs();
     let Some(glyph) = outlines.get(GlyphId::new(gid)) else {
-        return false;
+        return OutlineOutcome::NoGlyph;
     };
 
     let want_ppem = match (hint_ppem, tricky_font) {
@@ -2735,7 +2736,7 @@ fn outline_glyf(
                 .is_ok()
                 && pen.ok
             {
-                return true;
+                return OutlineOutcome::Drawn;
             }
             pen.out.truncate(start);
         }
@@ -2746,13 +2747,18 @@ fn outline_glyf(
         out,
         ok: true,
     };
-    glyph
+    if glyph
         .draw(
             DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
             &mut pen,
         )
         .is_ok()
         && pen.ok
+    {
+        OutlineOutcome::Drawn
+    } else {
+        OutlineOutcome::NoGlyph
+    }
 }
 
 struct PsOutlineSink<'a> {
@@ -2891,13 +2897,13 @@ fn outline_cff(
     upem: u16,
     fuel: usize,
     out: &mut Vec<OutlineVerb>,
-) -> (bool, Option<f32>) {
+) -> (OutlineOutcome, Option<f32>) {
     let gid = match cids {
         Some(cids) if gid != 0 => match cids.get(gid as usize).copied().flatten() {
             Some(g) => u32::from(g),
-            None => return (false, None),
+            None => return (OutlineOutcome::NoGlyph, None),
         },
-        _ if gid >= cff.num_glyphs() => return (false, None),
+        _ if gid >= cff.num_glyphs() => return (OutlineOutcome::NoGlyph, None),
         _ => gid,
     };
     let glyph = GlyphId::new(gid);
@@ -2905,7 +2911,7 @@ fn outline_cff(
         .subfont_index(glyph)
         .and_then(|i| cff.subfont(i, &[]).ok())
     else {
-        return (false, None);
+        return (OutlineOutcome::NoGlyph, None);
     };
     let top = cff.matrix().copied();
     let top_units = top.map_or(i32::from(upem), |m| m.scale);
@@ -2929,11 +2935,11 @@ fn outline_cff(
             .and_then(|d| Index::new(d, false).ok())
         {
             Some(index) => index,
-            None => return (false, None),
+            None => return (OutlineOutcome::NoGlyph, None),
         },
     };
     let Some(charstring) = cff.charstrings().get(gid as usize) else {
-        return (false, None);
+        return (OutlineOutcome::NoGlyph, None);
     };
     let context = Type2 {
         cff,
@@ -2941,7 +2947,7 @@ fn outline_cff(
         fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
     };
     if context.fuel.0.get() == 0 {
-        return (false, None);
+        return (OutlineOutcome::BudgetExceeded, None);
     }
     let filtered_matrix = matrix.filter(|&m| m != FontMatrix::IDENTITY);
     let mut sink = PsOutlineSink {
@@ -2962,9 +2968,11 @@ fn outline_cff(
                 .map(|w| w + subfont.nominal_width())
                 .or_else(|| subfont.default_width());
             let adv = raw_w.and_then(|w| transform_ps_advance(w, filtered_matrix, scale, upem));
-            (true, adv)
+            (OutlineOutcome::Drawn, adv)
         }
-        _ => (false, None),
+        Err(PsError::LimitExceeded) => (OutlineOutcome::BudgetExceeded, None),
+        _ if context.fuel.0.get() == 0 => (OutlineOutcome::BudgetExceeded, None),
+        _ => (OutlineOutcome::NoGlyph, None),
     }
 }
 
@@ -2975,15 +2983,15 @@ fn outline_type1(
     upem: u16,
     fuel: usize,
     out: &mut Vec<OutlineVerb>,
-) -> (bool, Option<f32>) {
+) -> (OutlineOutcome, Option<f32>) {
     if gid >= font.num_glyphs() {
-        return (false, None);
+        return (OutlineOutcome::NoGlyph, None);
     }
     let found = font
         .glyph_name(GlyphId::new(gid))
         .and_then(|n| scanned.charstrings.get(n.as_bytes()));
     let Some(Some(charstring)) = found else {
-        return (false, None);
+        return (OutlineOutcome::NoGlyph, None);
     };
     let context = Type1 {
         font,
@@ -2991,7 +2999,7 @@ fn outline_type1(
         fuel: Fuel(Cell::new(fuel.saturating_sub(charstring.len()))),
     };
     if context.fuel.0.get() == 0 {
-        return (false, None);
+        return (OutlineOutcome::BudgetExceeded, None);
     }
     let filtered_matrix = font
         .subfont(0)
@@ -3012,8 +3020,10 @@ fn outline_type1(
         Ok(wx_opt) if sink.ok => {
             sink.finish();
             let adv = wx_opt.and_then(|w| transform_ps_advance(w, filtered_matrix, None, upem));
-            (true, adv)
+            (OutlineOutcome::Drawn, adv)
         }
-        _ => (false, None),
+        Err(PsError::LimitExceeded) => (OutlineOutcome::BudgetExceeded, None),
+        _ if context.fuel.0.get() == 0 => (OutlineOutcome::BudgetExceeded, None),
+        _ => (OutlineOutcome::NoGlyph, None),
     }
 }

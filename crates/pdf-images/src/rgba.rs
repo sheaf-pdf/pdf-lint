@@ -1243,8 +1243,21 @@ where
 
     // Validate initial `/BitsPerComponent` before running codecs.
     // Per ISO 32000-2 §7.4.9, `/BitsPerComponent` is optional and ignored for `JPXDecode`.
+    // Under `Rules::Pdfium`, PDFium (`CPDF_DIB::CreateDecoder`) also forces `bpc = 1` on
+    // `CCITTFaxDecode` and `JBIG2Decode` regardless of `/BitsPerComponent`.
     let initial_bpc: u8 = if codec == ImageCodec::Jpx {
         if stencil { 1 } else { 8 }
+    } else if matches!(codec, ImageCodec::CcittFax | ImageCodec::Jbig2) {
+        match dict_bpc {
+            None | Some(1) => 1,
+            Some(other) if eval_opts.rules == Rules::Iso => {
+                return Err(Error::InvalidBitsPerComponent { bpc: other });
+            }
+            Some(_) => {
+                sink.fault(place_or_nowhere, Fault::InvalidBitsPerComponent);
+                1
+            }
+        }
     } else if stencil {
         match dict_bpc {
             None | Some(1) => 1,
@@ -1252,7 +1265,6 @@ where
         }
     } else {
         match (codec, dict_bpc) {
-            (ImageCodec::CcittFax | ImageCodec::Jbig2, None) => 1,
             (ImageCodec::Dct, None) => 8,
             (_, Some(v @ (1 | 2 | 4 | 8 | 16))) => v as u8,
             (_, Some(other)) => return Err(Error::InvalidBitsPerComponent { bpc: other }),

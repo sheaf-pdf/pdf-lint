@@ -175,7 +175,9 @@ where
     if let Some(dict) = page.dict {
         geom = geom.with_page_boxes(objects, dict);
     }
-    let resolved_vp = opts.viewport.resolve(&geom, &opts.limits)?;
+    let resolved_vp = opts
+        .viewport
+        .resolve_with_rules(&geom, opts.rules, &opts.limits)?;
     phase!(
         DEBUG,
         "render_page",
@@ -315,7 +317,9 @@ where
     O: Resolve<'o> + Streams + Copy,
     S: Sink<Fault> + ?Sized,
 {
-    let resolved_vp = opts.viewport.resolve(geom, &opts.limits)?;
+    let resolved_vp = opts
+        .viewport
+        .resolve_with_rules(geom, opts.rules, &opts.limits)?;
     let ctx = RenderCtx {
         objects: Narrow::new(objects),
         oc_state: None,
