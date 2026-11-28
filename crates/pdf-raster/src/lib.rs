@@ -166,8 +166,9 @@ mod paint;
 pub mod pdfium;
 mod phases;
 mod pixmap;
+mod source;
 
-pub use backend::{BackendError, RenderBackend, RenderedDoc};
+pub use backend::{BackendError, Refusal, RenderBackend, RenderedDoc};
 pub use engine::{Renderer, render_content, render_content_with, render_page, render_page_with};
 pub use error::Error;
 pub use fallback::{FontFallback, FontQuery, RenderCache};
@@ -180,6 +181,7 @@ pub use opts::{
 #[cfg(feature = "pdfium")]
 pub use pdfium::PdfiumBackend;
 pub use pixmap::{PixelFormat, Pixmap};
+pub use source::{Parts, RenderSource};
 
 #[cfg(test)]
 mod doc_tests {
@@ -206,12 +208,16 @@ mod doc_tests {
         check::<FontQuery>();
         check::<RenderCache>();
         check::<BackendError>();
+        check::<Refusal>();
+        check::<Parts>();
+        check::<std::sync::Arc<dyn RenderSource>>();
         check::<Box<dyn RenderedDoc>>();
         check::<Box<dyn RenderBackend>>();
         #[cfg(feature = "pdfium")]
         {
             check::<PdfiumBackend>();
             check::<pdfium::Error>();
+            check::<pdfium::LoadFailure>();
         }
     }
 

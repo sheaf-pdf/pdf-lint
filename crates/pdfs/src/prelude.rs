@@ -8,7 +8,8 @@
 //! `Color`, `Paint`, `Password`, `Protection`, `Permissions`, `Encryption`,
 //! `Object`, `Dict`, `ImageDrawn`, `ImageOf`, `RawImage` / `RgbaImage` with
 //! `images`, `Pixmap` / `RenderOpts` / `RenderSummary` / `Renderer` / `Viewport`
-//! / `RenderBackend` / `RenderedDoc` with `raster`, etc.) and annotation builder
+//! / `RenderBackend` / `RenderedDoc` / `RenderSource` / `Parts` / `Refusal` with
+//! `raster`, etc.) and annotation builder
 //! types (`BuiltAnnot`, `RedactMark`, `DefaultAppearance`, `Quadding`,
 //! `QuadPoints`, `PaintStyle`).
 
@@ -48,8 +49,8 @@ pub use pdf_objects::version::Version;
 pub use pdf_objects::{Dict, Object, ObjectId, Why};
 #[cfg(feature = "raster")]
 pub use pdf_raster::{
-    BackendError, PixelFormat, Pixmap, RenderBackend, RenderOpts, RenderSummary, RenderedDoc,
-    Renderer, Viewport,
+    BackendError, Parts, PixelFormat, Pixmap, Refusal, RenderBackend, RenderOpts, RenderSummary,
+    RenderedDoc, Renderer, Viewport,
 };
 pub use pdf_semantics::action::{Action, OpenAction};
 pub use pdf_semantics::dest::{Dest, DestFit, DestTable, ResolvedDest};

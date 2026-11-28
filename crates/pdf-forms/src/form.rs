@@ -35,6 +35,7 @@ pub struct Form<'o> {
     quadding: Option<Quadding>,
     need_appearances: bool,
     sig_flags: u32,
+    has_xfa: bool,
     resources: Option<DictAt<'o>>,
     fonts: Option<DictAt<'o>>,
 }
@@ -227,10 +228,17 @@ impl<'o> Form<'o> {
         self.sig_flags
     }
 
-    /// Whether the form holds an XFA form too (`/XFA`).
+    /// Whether the form holds an XFA form too, by the rules the form was
+    /// read under, as [`FormKind::read`] counts it by the same rules: by
+    /// [`Rules::Pdfium`] an `/XFA` entry is written, whatever it holds; by
+    /// [`Rules::Iso`] it is, or refers to, a stream or an array (ISO 32000-2
+    /// §12.7.3, Table 224). [`FormKind::read`] says too whether the XFA is
+    /// the whole form.
+    ///
+    /// [`FormKind::read`]: crate::FormKind::read
     #[must_use]
-    pub fn has_xfa(&self) -> bool {
-        self.dict.get("XFA").is_some()
+    pub const fn has_xfa(&self) -> bool {
+        self.has_xfa
     }
 
     /// The form's default resources (`/DR`), with the dictionary's object
@@ -398,6 +406,7 @@ fn read_form<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
     let sig_flags = reader
         .int_entry(dict, id, "SigFlags")?
         .map_or(0, |n| n as u32);
+    let has_xfa = crate::kind::has_xfa(reader, dict, id)?;
     let (resources, fonts) = default_resources(reader, dict, id)?;
 
     let mut walk = Walk {
@@ -446,6 +455,7 @@ fn read_form<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
         quadding,
         need_appearances,
         sig_flags,
+        has_xfa,
         resources,
         fonts,
     })

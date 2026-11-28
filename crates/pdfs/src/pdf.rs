@@ -1412,15 +1412,41 @@ impl<'a, S: ByteSource> Page<'a, S> {
 }
 
 #[cfg(feature = "raster")]
+impl<S: ByteSource> Pdf<S> {
+    /// What a backend's open says of this file's encryption, said when a
+    /// page is asked of a `Pdf` opened without one: locked where no password
+    /// opened it, refused for its security where the reader doesn't open its
+    /// encryption whatever the password, as [`RustBackend`](crate::RustBackend)
+    /// says both.
+    fn drawable(&self) -> Result<(), pdf_raster::BackendError> {
+        match self.encryption() {
+            Encryption::Locked => Err(pdf_raster::BackendError::Locked),
+            Encryption::Unsupported(unsupported) => Err(pdf_raster::BackendError::refused(
+                pdf_raster::Refusal::Security,
+                unsupported.clone(),
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A `Pdf` opened by [`open`](crate::open) or [`from_bytes`](crate::from_bytes)
+/// is a document a host renders through the trait as it does a backend's. It
+/// had no open through a backend to fail, so what
+/// [`RustBackend`](crate::RustBackend) says at its open this says when a page
+/// is asked of it: [`BackendError::Locked`](pdf_raster::BackendError::Locked)
+/// for a file no password opened, and
+/// [`BackendError::Refused`](pdf_raster::BackendError::Refused) with
+/// [`Refusal::Security`](pdf_raster::Refusal::Security) for an encryption the
+/// reader doesn't open.
+#[cfg(feature = "raster")]
 impl<S: ByteSource> pdf_raster::RenderedDoc for Pdf<S> {
     fn page_count(&self) -> usize {
         self.cached_page_table().map_or(0, pages::PageTable::len)
     }
 
     fn page_geom(&self, page_index: usize) -> Result<pdf_gfx::PageGeom, pdf_raster::BackendError> {
-        if *self.encryption() == Encryption::Locked {
-            return Err(pdf_raster::BackendError::Locked);
-        }
+        self.drawable()?;
         let tbl = self
             .cached_page_table()
             .map_err(pdf_raster::BackendError::custom)?;
@@ -1438,9 +1464,7 @@ impl<S: ByteSource> pdf_raster::RenderedDoc for Pdf<S> {
         page_index: usize,
         opts: &pdf_raster::RenderOpts,
     ) -> Result<(pdf_raster::Pixmap, pdf_raster::RenderSummary), pdf_raster::BackendError> {
-        if *self.encryption() == Encryption::Locked {
-            return Err(pdf_raster::BackendError::Locked);
-        }
+        self.drawable()?;
         let tbl = self
             .cached_page_table()
             .map_err(pdf_raster::BackendError::custom)?;
@@ -1468,10 +1492,12 @@ impl<S: ByteSource> pdf_raster::RenderedDoc for Pdf<S> {
             &mut (),
         )
         .map_err(|err| match err {
-            Error::Raster(r) => pdf_raster::BackendError::Raster(r),
-            Error::Unreadable(u) if u.why == pdf_objects::Why::Locked => {
+            Error::Unreadable(u) | Error::Raster(pdf_raster::Error::Unreadable(u))
+                if u.why == pdf_objects::Why::Locked =>
+            {
                 pdf_raster::BackendError::Locked
             }
+            Error::Raster(r) => pdf_raster::BackendError::Raster(r),
             other => pdf_raster::BackendError::custom(other),
         })
     }

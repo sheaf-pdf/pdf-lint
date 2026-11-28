@@ -74,7 +74,7 @@ impl<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized> Reader<'_, R, S> {
         Ok(None)
     }
 
-    fn entry(
+    pub(crate) fn entry(
         &mut self,
         dict: &'o Dict,
         within: Option<ObjectId>,

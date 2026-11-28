@@ -111,7 +111,7 @@ use pdf_objects::{
     Dict, Object, ObjectId, Resolve, Stream, Streams, Unreadable, Value, Why, WithStreams,
 };
 
-use crate::{Fault, Form, Limits};
+use crate::{Fault, Form, FormKind, Limits};
 
 /// Built-in seed inputs: a catalog, then objects 1, 2, … split on `0xFF`, an
 /// object holding `\nstream\n` a stream of the bytes after it. The last are
@@ -294,6 +294,22 @@ fn read<'o, R: Resolve<'o> + Streams + Copy>(objects: R, catalog: &'o Dict) {
         let _ = format!("{faults:?}");
         for (_, fault) in &faults {
             let _ = fault.to_string();
+        }
+
+        // The document's kind of form: read or refused, never a panic, the
+        // same with a sink as without; none exactly where no form is read,
+        // and of XFA what the form itself says by the same rules.
+        let kind = FormKind::read(objects, catalog, rules, &limits);
+        let mut kind_faults: Vec<(Place, Fault)> = Vec::new();
+        let kind_told = FormKind::read_with(objects, catalog, rules, &limits, &mut kind_faults);
+        assert_eq!(format!("{kind:?}"), format!("{kind_told:?}"));
+        match (&quiet, &kind) {
+            (Ok(None), kind) => assert!(matches!(kind, Ok(FormKind::None)), "{kind:?}"),
+            (Ok(Some(form)), Ok(kind)) => {
+                assert_ne!(*kind, FormKind::None);
+                assert_eq!(form.has_xfa(), kind.has_xfa());
+            }
+            (Err(_), Ok(_)) | (_, Err(_)) => {}
         }
 
         let Ok(Some(form)) = quiet else { continue };

@@ -1,7 +1,8 @@
 """pdf-forms's PDFium oracle cases: `forms`, how PDFium reads the field tree;
-`forms-ap`, the appearance PDFium makes for a text field that has none; and
-`forms-ap-all` and `forms-press`, every appearance PDFium makes for a button
-or a choice field that has none, and its widgets' states after a press.
+`forms-kind`, the kind of form PDFium says a document holds; `forms-ap`, the
+appearance PDFium makes for a text field that has none; and `forms-ap-all`
+and `forms-press`, every appearance PDFium makes for a button or a choice
+field that has none, and its widgets' states after a press.
 
 Written using Python's standard library alone; `oracle/pdfium.py cases --write`
 materializes `cases/*.pdf` and `cases.tsv`, and `oracle/pdfium.py record`
@@ -55,6 +56,32 @@ def add(name, fields, annots, objs, acroform_extra=b""):
     """A file whose form lists `fields` and whose one page lists `annots`."""
     acroform = b"<< /Fields " + fields + (b" " + acroform_extra if acroform_extra else b"") + b" >>"
     ROWS.append((name, "forms", {"pdf": build_doc(acroform, annots, objs)}))
+
+
+def kind(name, catalog, objs=None):
+    """A file whose catalog holds `catalog` beside its /Type and /Pages, for
+    the kind of form PDFium says it has."""
+    objects = {
+        1: b"<< /Type /Catalog /Pages 2 0 R " + catalog + b" >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+    }
+    objects.update(objs or {})
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = {}
+    for number in sorted(objects):
+        offsets[number] = len(out)
+        out += b"%d 0 obj\n" % number + objects[number] + b"\nendobj\n"
+    xref = len(out)
+    size = max(objects) + 1
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+    for number in range(1, size):
+        if number in offsets:
+            out += b"%010d 00000 n \n" % offsets[number]
+        else:
+            out += b"0000000000 65535 f \n"
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, xref)
+    ROWS.append((name, "forms-kind", {"pdf": bytes(out)}))
 
 
 def merged(name, rest, row=0):
@@ -336,6 +363,7 @@ def cases():
     ap_cases()
     written()
     button_choice_cases()
+    kind_cases()
     return list(ROWS)
 
 
@@ -1198,6 +1226,49 @@ def ap_cases():
     ap("ap-nfd-helvetica", [tx(value=utf16("Cafe\u0301"), da=b"/Helv 12 Tf 0 g"),
                             tx(MULTILINE, value=utf16("Cafe\u0301 au lait"), da=b"/Helv 12 Tf 0 g",
                                rect=b"[10 40 110 90]")])
+
+
+def kind_cases():
+    # The kind of form a document holds (FPDF_GetFormType): none, an
+    # AcroForm, XFA beside an AcroForm, or XFA that is the whole form, which
+    # the catalog's /NeedsRendering says.
+    xdp = b"<< /Length 6 >>\nstream\n<xdp/>\nendstream"
+    kind("kind-no-acroform", b"")
+    kind("kind-no-acroform-needs-rendering", b"/NeedsRendering true")
+    kind("kind-acroform", b"/AcroForm << /Fields [] >>")
+    kind("kind-acroform-empty", b"/AcroForm << >>")
+    kind("kind-acroform-by-reference", b"/AcroForm 5 0 R", {5: b"<< /Fields [] >>"})
+    kind("kind-acroform-needs-rendering", b"/AcroForm << /Fields [] >> /NeedsRendering true")
+    # An /AcroForm that isn't a dictionary, or names no object.
+    kind("kind-acroform-an-array", b"/AcroForm [] /NeedsRendering true")
+    kind("kind-acroform-null", b"/AcroForm null")
+    kind("kind-acroform-missing", b"/AcroForm 9 0 R")
+    kind("kind-acroform-a-stream", b"/AcroForm 5 0 R", {5: b"<< /XFA [] /Length 0 >>\nstream\n\nendstream"})
+    # /XFA in each form it's written in, and in forms it shouldn't be.
+    kind("kind-xfa-array", b"/AcroForm << /Fields [] /XFA [(template) 5 0 R] >>", {5: xdp})
+    kind("kind-xfa-stream", b"/AcroForm << /Fields [] /XFA 5 0 R >>", {5: xdp})
+    kind("kind-xfa-empty-array", b"/AcroForm << /XFA [] >>")
+    kind("kind-xfa-a-number", b"/AcroForm << /XFA 7 >>")
+    kind("kind-xfa-null", b"/AcroForm << /XFA null >>")
+    kind("kind-xfa-null-needs-rendering", b"/AcroForm << /XFA null >> /NeedsRendering true")
+    kind("kind-xfa-missing", b"/AcroForm << /XFA 9 0 R >>")
+    kind("kind-xfa-missing-needs-rendering", b"/AcroForm << /XFA 9 0 R >> /NeedsRendering true")
+    kind("kind-xfa-by-reference-to-null", b"/AcroForm << /XFA 5 0 R >>", {5: b"null"})
+    kind("kind-xfa-in-acroform-by-reference", b"/AcroForm 5 0 R /NeedsRendering true",
+         {5: b"<< /XFA [] >>"})
+    # /NeedsRendering beside /XFA: true, false, and what isn't a boolean
+    # written directly.
+    kind("kind-xfa-needs-rendering", b"/AcroForm << /XFA [] >> /NeedsRendering true")
+    kind("kind-xfa-needs-rendering-false", b"/AcroForm << /XFA [] >> /NeedsRendering false")
+    kind("kind-xfa-needs-rendering-by-reference", b"/AcroForm << /XFA [] >> /NeedsRendering 5 0 R",
+         {5: b"true"})
+    kind("kind-xfa-needs-rendering-a-number", b"/AcroForm << /XFA [] >> /NeedsRendering 1")
+    kind("kind-xfa-needs-rendering-a-name", b"/AcroForm << /XFA [] >> /NeedsRendering /true")
+    kind("kind-xfa-needs-rendering-a-string", b"/AcroForm << /XFA [] >> /NeedsRendering (true)")
+    kind("kind-xfa-needs-rendering-null", b"/AcroForm << /XFA [] >> /NeedsRendering null")
+    kind("kind-xfa-needs-rendering-twice", b"/AcroForm << /XFA [] >> /NeedsRendering false /NeedsRendering true")
+    kind("kind-xfa-twice", b"/AcroForm << /XFA null /XFA [] >> /NeedsRendering true")
+    kind("kind-acroform-twice", b"/AcroForm << >> /AcroForm << /XFA [] >>")
 
 
 def written():

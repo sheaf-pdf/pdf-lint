@@ -370,6 +370,13 @@ pub fn encode_jpeg(
 /// `quality` (`1..=100`), containing only a standard JFIF or Adobe `APP14` header and no EXIF,
 /// XMP, IPTC, or comment metadata.
 ///
+/// [`JpegColorSpace::Cmyk`] samples are written as a PDF holds them (255 for full ink) under an
+/// Adobe `APP14` segment. Adobe's applications, and the image viewers that follow them, read a
+/// four-component JPEG with that segment as inverted (0 for full ink), so these bytes are right
+/// in a `/DCTDecode` stream with no `/Decode`, as [`encode_jpeg`] writes them, and show inverted
+/// as a `.jpg` file of their own. Wrapped again by [`wrap_jpeg_with`](crate::wrap_jpeg_with) they
+/// are [`JpegCmyk::AsStored`](crate::JpegCmyk::AsStored).
+///
 /// # Errors
 ///
 /// Returns [`EncodeError::Dimensions`] if `width` or `height` is `0` or `> 65_535`, or
