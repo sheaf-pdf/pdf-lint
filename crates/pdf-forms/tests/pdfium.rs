@@ -260,11 +260,13 @@ fn kind_answer(bytes: &[u8], rules: Rules) -> String {
 }
 
 /// Every `forms-kind` case reads, by PDFium's rules, as the kind PDFium says;
-/// and by ISO 32000-2's the same, but the cases named here, where a `null`
-/// `/XFA` is no entry and `/NeedsRendering` is read through a reference.
+/// and by ISO 32000-2's the same, but the cases named here, where an `/XFA`
+/// that is `null` or neither a stream nor an array is no entry, and
+/// `/NeedsRendering` is read through a reference.
 #[test]
 fn pdfium_recorded_form_kinds_agree() {
     const ISO_DIFFERS: &[(&str, &str)] = &[
+        ("kind-xfa-a-number", "kind 1"),
         ("kind-xfa-null", "kind 1"),
         ("kind-xfa-null-needs-rendering", "kind 1"),
         ("kind-xfa-missing", "kind 1"),

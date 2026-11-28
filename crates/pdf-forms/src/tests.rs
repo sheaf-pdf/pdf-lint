@@ -74,6 +74,7 @@ fn public_types_are_send_and_sync() {
     check::<Field<'static>>();
     check::<Widget<'static>>();
     check::<Form<'static>>();
+    check::<crate::FormKind>();
 }
 
 #[test]

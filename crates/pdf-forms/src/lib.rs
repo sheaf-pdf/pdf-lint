@@ -4,7 +4,10 @@
 //! [`Form::read`] takes a catalog and gives its `/AcroForm` with the field tree
 //! read, under ISO 32000-2's rules or PDFium's as of chromium/8152. It works
 //! over borrowed [`pdf_objects::Dict`] values and any [`pdf_objects::Resolve`]
-//! provider, and does no file I/O.
+//! provider, and does no file I/O. [`FormKind::read`] says the kind of form
+//! a document holds before any of it is read: none, an AcroForm, XFA beside
+//! one, or XFA that is the whole form, as PDFium's `FPDF_GetFormType` tells
+//! them apart or as ISO 32000-2 types the entries.
 //!
 //! - A [`Field`]'s type, flags, value, default value, default appearance,
 //!   quadding, and maximum length are the effective ones: its own, else its

@@ -1,18 +1,22 @@
 //! The kind of form a document holds: none, an AcroForm, or XFA beside or in
 //! place of one.
 
+use pdf_objects::fault::Sink;
 use pdf_objects::pdf_tokenizer::Rules;
-use pdf_objects::{Dict, Object, Resolve};
+use pdf_objects::{Dict, Object, ObjectId, Resolve};
 
 use crate::error::Error;
+use crate::fault::Fault;
 use crate::limits::Limits;
 use crate::read::Reader;
 
 /// The kind of interactive form a document holds, as a viewer tells them
 /// apart before it offers to fill one: what PDFium's `FPDF_GetFormType`
 /// answers, read from the catalog's `/AcroForm`, its `/XFA`, and the
-/// catalog's `/NeedsRendering` (ISO 32000-1 §12.7.8, deprecated by
-/// ISO 32000-2).
+/// catalog's `/NeedsRendering`. XFA came with ISO 32000-1 (§12.7.8);
+/// ISO 32000-2 keeps both entries, deprecated (§7.7.2, Table 29, and
+/// §12.7.3, Table 224), and what a PDF 2.0 file may still hold of XFA in
+/// Annex K.
 ///
 /// A host says different things for each. An [`AcroForm`](Self::AcroForm) is
 /// filled through [`Form`](crate::Form). With
@@ -23,9 +27,9 @@ use crate::read::Reader;
 /// nothing to fill as an AcroForm.
 ///
 /// ```
-/// use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
 /// use std::collections::HashMap;
 ///
+/// use pdf_forms::pdf_objects::pdf_tokenizer::Rules;
 /// use pdf_forms::pdf_objects::{Object, ObjectId, dict};
 /// use pdf_forms::{FormKind, Limits};
 ///
@@ -64,19 +68,25 @@ pub enum FormKind {
 }
 
 impl FormKind {
-    /// The kind of form the document whose catalog is `catalog` holds.
+    /// The kind of form the document whose catalog is `catalog` holds,
+    /// without collecting non-fatal [`Fault`]s.
     ///
     /// The form dictionary is found as [`Form::read`](crate::Form::read) finds
-    /// it, so this is [`FormKind::None`] exactly where that reads no form.
-    /// What counts as `/XFA` and as a true `/NeedsRendering` goes by `rules`:
+    /// it, so this is [`FormKind::None`] exactly where that reads no form,
+    /// and [`has_xfa`](Self::has_xfa) is what the form's own
+    /// [`Form::has_xfa`](crate::Form::has_xfa) says by the same rules. What
+    /// counts as `/XFA` and as a true `/NeedsRendering` goes by `rules`:
     ///
     /// - [`Rules::Pdfium`], as of chromium/8152: an `/XFA` entry counts
     ///   whatever it holds, `null` and a reference to no object among them;
     ///   `/NeedsRendering` counts only as the boolean `true` written in the
     ///   catalog itself, not one reached by reference.
-    /// - [`Rules::Iso`]: an `/XFA` that is `null`, or a reference to `null` or
-    ///   to no object, is no entry (ISO 32000-2 §7.3.9), and
-    ///   `/NeedsRendering` is read through a reference as any entry is.
+    /// - [`Rules::Iso`]: `/XFA` counts where it is, or refers to, a stream
+    ///   or an array, the two types the entry has (ISO 32000-2 §12.7.3,
+    ///   Table 224). One that is `null`, or a reference to `null` or to no
+    ///   object, is no entry (§7.3.9, §7.3.10); one of another type is none
+    ///   either, and a [`Fault::WrongType`]. `/NeedsRendering` is read
+    ///   through a reference as any entry is, and is true only as a boolean.
     ///
     /// By either, the last of an entry written twice is the one read.
     ///
@@ -89,25 +99,37 @@ impl FormKind {
         rules: Rules,
         limits: &Limits,
     ) -> Result<Self, Error> {
+        Self::read_with(objects, catalog, rules, limits, &mut ())
+    }
+
+    /// The kind of form a document holds, as [`read`](Self::read) reads it,
+    /// reporting recoverable ISO 32000-2 departures to `sink`: an
+    /// `/AcroForm` that is no dictionary, and by [`Rules::Iso`] an `/XFA`
+    /// that is neither a stream nor an array.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as [`Self::read`].
+    pub fn read_with<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+        objects: R,
+        catalog: &'o Dict,
+        rules: Rules,
+        limits: &Limits,
+        sink: &mut S,
+    ) -> Result<Self, Error> {
         let mut reader = Reader {
             objects,
             rules,
             limits,
-            sink: &mut (),
+            sink,
         };
         let Some((form, id)) = reader.dict_entry(catalog, None, "AcroForm")? else {
             return Ok(Self::None);
         };
-        let pdfium = rules == Rules::Pdfium;
-        let has_xfa = if pdfium {
-            form.get("XFA").is_some()
-        } else {
-            reader.entry(form, id, "XFA")?.is_some()
-        };
-        if !has_xfa {
+        if !has_xfa(&mut reader, form, id)? {
             return Ok(Self::AcroForm);
         }
-        let needs_rendering = if pdfium {
+        let needs_rendering = if rules == Rules::Pdfium {
             catalog.get("NeedsRendering").and_then(Object::as_bool)
         } else {
             reader
@@ -127,6 +149,28 @@ impl FormKind {
     pub const fn has_xfa(self) -> bool {
         matches!(self, Self::XfaForeground | Self::XfaFull)
     }
+}
+
+/// Whether the form dictionary `form`, `id` its number when it's indirect,
+/// holds XFA by the reader's rules: by PDFium's, an `/XFA` entry whatever it
+/// holds; by ISO 32000-2's, one that reaches a stream or an array
+/// (§12.7.3, Table 224).
+pub(crate) fn has_xfa<'o, R: Resolve<'o>, S: Sink<Fault> + ?Sized>(
+    reader: &mut Reader<'_, R, S>,
+    form: &'o Dict,
+    id: Option<ObjectId>,
+) -> Result<bool, Error> {
+    if reader.rules == Rules::Pdfium {
+        return Ok(form.get("XFA").is_some());
+    }
+    let Some((xfa, within)) = reader.entry(form, id, "XFA")? else {
+        return Ok(false);
+    };
+    if xfa.as_array().is_some() || xfa.as_stream().is_some() {
+        return Ok(true);
+    }
+    reader.say(within, xfa.at(), Fault::WrongType { key: "XFA" });
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -242,6 +286,101 @@ mod tests {
             kinds(&catalog, &objects),
             (FormKind::XfaForeground, FormKind::XfaFull)
         );
+    }
+
+    #[test]
+    fn by_isos_rules_xfa_is_a_stream_or_an_array_and_another_type_is_a_fault() {
+        use pdf_objects::Stream;
+        use pdf_objects::fault::Place;
+
+        let objects = HashMap::from([
+            (
+                id(5),
+                Object::from(Stream::new(dict! {}, b"<xdp/>".to_vec())),
+            ),
+            (id(6), Object::from(vec![Object::from(1)])),
+            (id(7), Object::name("No")),
+        ]);
+        let told = |xfa: Object, rules| {
+            let catalog = dict! { "AcroForm" => dict! { "XFA" => xfa } };
+            let mut faults: Vec<(Place, Fault)> = Vec::new();
+            let kind =
+                FormKind::read_with(&objects, &catalog, rules, &Limits::DEFAULT, &mut faults)
+                    .unwrap();
+            // A sink changes nothing of what's read.
+            let quiet = FormKind::read(&objects, &catalog, rules, &Limits::DEFAULT).unwrap();
+            assert_eq!(kind, quiet);
+            let faults: Vec<Fault> = faults.into_iter().map(|(_, fault)| fault).collect();
+            (kind, faults)
+        };
+        // The entry's two types, held directly or by reference.
+        for xfa in [
+            Object::from(Vec::<Object>::new()),
+            Object::reference(5),
+            Object::reference(6),
+        ] {
+            for rules in [Rules::Iso, Rules::Pdfium] {
+                assert_eq!(
+                    told(xfa.clone(), rules),
+                    (FormKind::XfaForeground, Vec::new())
+                );
+            }
+        }
+        // Any other type: an entry to PDFium, none and a fault by ISO's.
+        for xfa in [
+            Object::from(7),
+            Object::name("No"),
+            Object::from(false),
+            Object::from(dict! {}),
+            Object::reference(7),
+        ] {
+            assert_eq!(
+                told(xfa.clone(), Rules::Pdfium),
+                (FormKind::XfaForeground, Vec::new())
+            );
+            assert_eq!(
+                told(xfa, Rules::Iso),
+                (FormKind::AcroForm, vec![Fault::WrongType { key: "XFA" }])
+            );
+        }
+        // An `/AcroForm` that is no dictionary is told, by either rules.
+        let catalog = dict! { "AcroForm" => 1 };
+        for rules in [Rules::Iso, Rules::Pdfium] {
+            let mut faults: Vec<(Place, Fault)> = Vec::new();
+            let kind =
+                FormKind::read_with(&objects, &catalog, rules, &Limits::DEFAULT, &mut faults);
+            assert_eq!(kind.unwrap(), FormKind::None);
+            assert!(matches!(
+                faults[..],
+                [(_, Fault::WrongType { key: "AcroForm" })]
+            ));
+        }
+    }
+
+    #[test]
+    fn a_form_says_of_xfa_what_its_kind_says_by_the_same_rules() {
+        use crate::Form;
+
+        let objects = HashMap::from([(id(5), Object::null())]);
+        for (xfa, pdfium, iso) in [
+            (Object::from(Vec::<Object>::new()), true, true),
+            (Object::null(), true, false),
+            (Object::reference(5), true, false),
+            (Object::reference(9), true, false),
+            (Object::from(7), true, false),
+        ] {
+            let catalog = dict! { "AcroForm" => dict! { "XFA" => xfa } };
+            for (rules, expected) in [(Rules::Pdfium, pdfium), (Rules::Iso, iso)] {
+                let form = Form::read(&objects, &catalog, rules, &Limits::DEFAULT)
+                    .unwrap()
+                    .unwrap();
+                let kind = FormKind::read(&objects, &catalog, rules, &Limits::DEFAULT).unwrap();
+                assert_eq!((form.has_xfa(), kind.has_xfa()), (expected, expected));
+            }
+        }
+        let bare = dict! { "AcroForm" => dict! {} };
+        let form = Form::read(&objects, &bare, Rules::Iso, &Limits::DEFAULT);
+        assert!(!form.unwrap().unwrap().has_xfa());
     }
 
     #[test]

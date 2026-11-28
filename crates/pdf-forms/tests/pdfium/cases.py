@@ -1,7 +1,8 @@
 """pdf-forms's PDFium oracle cases: `forms`, how PDFium reads the field tree;
-`forms-kind`, the kind of form PDFium says a document holds; `forms-ap`, the appearance PDFium makes for a text field that has none; and
-`forms-ap-all` and `forms-press`, every appearance PDFium makes for a button
-or a choice field that has none, and its widgets' states after a press.
+`forms-kind`, the kind of form PDFium says a document holds; `forms-ap`, the
+appearance PDFium makes for a text field that has none; and `forms-ap-all`
+and `forms-press`, every appearance PDFium makes for a button or a choice
+field that has none, and its widgets' states after a press.
 
 Written using Python's standard library alone; `oracle/pdfium.py cases --write`
 materializes `cases/*.pdf` and `cases.tsv`, and `oracle/pdfium.py record`
