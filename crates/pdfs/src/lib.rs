@@ -133,7 +133,7 @@
 //! ```
 
 #[cfg(feature = "raster")]
-pub use backend::RustBackend;
+pub use backend::{AsRenderSource, RustBackend};
 pub use build::standard_font;
 pub use document::Document;
 #[cfg(feature = "embed")]
@@ -593,9 +593,12 @@ mod tests {
             ))
         ));
 
-        // `From<BackendError> for Error` unwraps a boxed `pdfs::Error` directly:
+        // `From<BackendError> for Error` unwraps a boxed `pdfs::Error` directly,
+        // from the engine's own failure and from a refusal alike:
         let wrapped = BackendError::custom(Error::NoCatalog);
         assert!(matches!(Error::from(wrapped), Error::NoCatalog));
+        let refused = BackendError::refused(crate::pdf_raster::Refusal::Format, Error::NoCatalog);
+        assert!(matches!(Error::from(refused), Error::NoCatalog));
     }
 
     #[test]

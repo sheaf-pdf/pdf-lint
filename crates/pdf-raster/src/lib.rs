@@ -208,12 +208,16 @@ mod doc_tests {
         check::<FontQuery>();
         check::<RenderCache>();
         check::<BackendError>();
+        check::<Refusal>();
+        check::<Parts>();
+        check::<std::sync::Arc<dyn RenderSource>>();
         check::<Box<dyn RenderedDoc>>();
         check::<Box<dyn RenderBackend>>();
         #[cfg(feature = "pdfium")]
         {
             check::<PdfiumBackend>();
             check::<pdfium::Error>();
+            check::<pdfium::LoadFailure>();
         }
     }
 

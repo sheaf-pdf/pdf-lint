@@ -49,8 +49,8 @@ pub use pdf_objects::version::Version;
 pub use pdf_objects::{Dict, Object, ObjectId, Why};
 #[cfg(feature = "raster")]
 pub use pdf_raster::{
-    BackendError, Parts, PixelFormat, Pixmap, Refusal, RenderBackend, RenderOpts, RenderSource,
-    RenderSummary, RenderedDoc, Renderer, Viewport,
+    BackendError, Parts, PixelFormat, Pixmap, Refusal, RenderBackend, RenderOpts, RenderSummary,
+    RenderedDoc, Renderer, Viewport,
 };
 pub use pdf_semantics::action::{Action, OpenAction};
 pub use pdf_semantics::dest::{Dest, DestFit, DestTable, ResolvedDest};

@@ -30,7 +30,8 @@ pub enum Refusal {
     /// dictionary, the engine doesn't open, whatever the password. PDFium's
     /// `FPDF_ERR_SECURITY`.
     Security,
-    /// The source didn't give the bytes asked of it. PDFium's `FPDF_ERR_FILE`.
+    /// The source didn't give the bytes asked of it: a read of a
+    /// [`RenderSource`] that failed, or PDFium's `FPDF_ERR_FILE`.
     Source,
     /// The engine refused the document and named no reason this enum has.
     /// PDFium's `FPDF_ERR_UNKNOWN` and `FPDF_ERR_PAGE`.
@@ -60,17 +61,23 @@ pub enum BackendError {
     /// Document is encrypted and none of the supplied passwords opened it.
     #[error("PDF document is encrypted and locked")]
     Locked,
-    /// The engine refused the document on open for a reason of the file's
-    /// own that no password changes: `reason` names it, and `source` is the
-    /// engine's own error (`pdfs::Error` from the pure-Rust engine,
-    /// `pdf_raster::pdfium::Error` from PDFium), for its words or a downcast.
-    #[error("the document was refused: {reason}")]
+    /// The engine refused the document for a reason of the file's own that
+    /// no password changes, on open (or, from a `pdfs::Pdf` opened without a
+    /// backend, when a page is first asked of it): `reason` names it, and
+    /// `error` is the engine's own error, for a downcast. From the pure-Rust
+    /// engine that is `pdfs::Error`, or pdf-structure's
+    /// `source::Unsupported` where the reason is [`Refusal::Security`]; from
+    /// PDFium, `pdf_raster::pdfium::Error`; from the default
+    /// [`RenderBackend::open_source`], the source's [`std::io::Error`].
+    ///
+    /// The message is whole, the engine's words after the reason, so the
+    /// engine's error isn't this error's `source()` too.
+    #[error("the document was refused: {reason}: {error}")]
     Refused {
         /// Why, in the terms every engine shares.
         reason: Refusal,
         /// The engine's own error.
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        error: Box<dyn std::error::Error + Send + Sync>,
     },
     /// Requested zero-based `page_index` is out of range (`>= page_count`).
     #[error("page index {page_index} out of bounds (page count: {page_count})")]
@@ -103,7 +110,7 @@ impl BackendError {
     pub fn refused(reason: Refusal, err: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Refused {
             reason,
-            source: Box::new(err),
+            error: Box::new(err),
         }
     }
 
@@ -219,9 +226,10 @@ pub trait RenderBackend: Send + Sync {
     /// Both of the family's engines open a source where it is
     /// (`pdfs::RustBackend` through its reader's byte source, `PdfiumBackend`
     /// through PDFium's custom file access). The default, for a backend that
-    /// opens one buffer alone, reads the whole source into one and opens it
-    /// by [`RenderBackend::open_bytes`]: a copy, where the source doesn't hold
-    /// its bytes in one buffer already.
+    /// opens one buffer alone, copies the whole source into a buffer of its
+    /// own and opens that by [`RenderBackend::open_bytes`]: always a copy,
+    /// one buffer or not, since a source can't hand over the `Arc` it's
+    /// held by. A caller with an `Arc<[u8]>` calls `open_bytes`.
     ///
     /// # Errors
     ///
@@ -232,19 +240,20 @@ pub trait RenderBackend: Send + Sync {
         source: Arc<dyn RenderSource>,
         password: Option<&str>,
     ) -> Result<Box<dyn RenderedDoc>, BackendError> {
-        let bytes: Arc<[u8]> = match source.whole() {
-            Some(whole) => Arc::from(whole),
-            None => match source.read_at(0..source.len()) {
-                Ok(read) => Arc::from(read),
-                Err(err) => return Err(BackendError::refused(Refusal::Source, err)),
-            },
-        };
-        self.open_bytes(bytes, password)
+        self.open_bytes(joined(&*source)?, password)
     }
 
     /// Opens `source` trying the empty password first and then each candidate
     /// in `passwords` in order until one unlocks the document, as
     /// [`RenderBackend::open_bytes_with_passwords`] does bytes.
+    ///
+    /// The default is for a backend that opens one buffer alone, as
+    /// [`RenderBackend::open_source`]'s is: it copies the source into one
+    /// buffer, once, and tries the passwords on that by
+    /// [`RenderBackend::open_bytes_with_passwords`]. It doesn't call
+    /// `open_source`, so a backend with an `open_source` of its own, which
+    /// reads a source where it is, writes this one too (both of the
+    /// family's engines do), or its passwords are tried on a copy.
     ///
     /// # Errors
     ///
@@ -256,15 +265,24 @@ pub trait RenderBackend: Send + Sync {
         source: Arc<dyn RenderSource>,
         passwords: &[&str],
     ) -> Result<Box<dyn RenderedDoc>, BackendError> {
-        each_password(passwords, |password| {
-            self.open_source(Arc::clone(&source), password)
-        })
+        self.open_bytes_with_passwords(joined(&*source)?, passwords)
+    }
+}
+
+/// Every byte of `source`, copied into one buffer.
+fn joined(source: &dyn RenderSource) -> Result<Arc<[u8]>, BackendError> {
+    match source.whole() {
+        Some(whole) => Ok(Arc::from(whole)),
+        None => match source.read_at(0..source.len()) {
+            Ok(read) => Ok(Arc::from(read)),
+            Err(err) => Err(BackendError::refused(Refusal::Source, err)),
+        },
     }
 }
 
 /// `open` with no password, then with each of `passwords` in order, until one
 /// opens the document or it fails for another reason than its lock.
-fn each_password(
+pub(crate) fn each_password(
     passwords: &[&str],
     mut open: impl FnMut(Option<&str>) -> Result<Box<dyn RenderedDoc>, BackendError>,
 ) -> Result<Box<dyn RenderedDoc>, BackendError> {
@@ -376,13 +394,22 @@ mod tests {
         let backend = OneBuffer::default();
         let err = backend.open_source(Arc::new(Failing), None).err().unwrap();
         assert_eq!(err.refusal(), Some(Refusal::Source));
+        // The message is whole, and the source's error is there to downcast.
         assert_eq!(
             err.to_string(),
-            "the document was refused: its bytes didn't read"
+            "the document was refused: its bytes didn't read: the disk went away"
         );
-        let source = std::error::Error::source(&err).unwrap();
-        assert_eq!(source.to_string(), "the disk went away");
+        assert!(std::error::Error::source(&err).is_none());
+        let BackendError::Refused { error, .. } = &err else {
+            unreachable!()
+        };
+        assert!(error.downcast_ref::<io::Error>().is_some());
         assert!(backend.opened.lock().unwrap().is_empty());
+        let with_passwords = backend.open_source_with_passwords(Arc::new(Failing), &["a"]);
+        assert_eq!(
+            with_passwords.err().unwrap().refusal(),
+            Some(Refusal::Source)
+        );
         assert_eq!(BackendError::Locked.refusal(), None);
     }
 

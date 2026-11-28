@@ -214,6 +214,16 @@ impl From<pdf_raster::BackendError> for Error {
                 Ok(inner) => *inner,
                 Err(other) => Error::Backend(pdf_raster::BackendError::Backend(other)),
             },
+            // A refusal of the pure-Rust engine's holds the reader's own
+            // error, which is what this is; another's stays a refusal.
+            pdf_raster::BackendError::Refused { reason, error } => {
+                match error.downcast::<Error>() {
+                    Ok(inner) => *inner,
+                    Err(error) => {
+                        Error::Backend(pdf_raster::BackendError::Refused { reason, error })
+                    }
+                }
+            }
             other => Error::Backend(other),
         }
     }

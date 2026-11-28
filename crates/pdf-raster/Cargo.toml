@@ -72,7 +72,8 @@ tracing = [
     "pdf-forms/tracing",
 ]
 # Optional thin adapter (`pdf_raster::pdfium`, `PdfiumBackend`) over
-# `pdfium-render` (`thread_safe`, runtime dynamic binding by default).
+# `pdfium-render` (`thread_safe`, runtime dynamic binding by default), with
+# `parking_lot` for the adapter's one fair lock over PDFium.
 pdfium = ["dep:pdfium-render", "dep:parking_lot"]
 
 [package.metadata.docs.rs]

@@ -36,11 +36,22 @@ use crate::open::Options;
 /// [`BackendError::Refused`] where the file can't be drawn whatever the
 /// password, with [`Refusal::Security`] for an encryption the reader doesn't
 /// open, [`Refusal::Source`] for bytes that didn't read, and
-/// [`Refusal::Format`] for a file with no catalog or no page tree, its
-/// source the [`Error`](crate::Error); and [`BackendError::Backend`] for the
-/// rest, a cap the reader reads under among them. An unsupported
-/// encryption's source is pdf-structure's
-/// [`Unsupported`](pdf_structure::source::Unsupported).
+/// [`Refusal::Format`] for a file with no catalog or no page tree; and
+/// [`BackendError::Backend`] for the rest, a cap the reader reads under
+/// among them. The error a refusal holds is the [`Error`](crate::Error),
+/// and converting the [`BackendError`] to an `Error` (by `?`, say) gives it
+/// back as it was; an unsupported encryption's is pdf-structure's
+/// [`Unsupported`](pdf_structure::source::Unsupported). A [`Pdf`](crate::Pdf)
+/// opened without a backend answers the same of an encryption when a page
+/// is asked of it as a [`RenderedDoc`].
+///
+/// An `/Encrypt` entry that isn't a dictionary is refused for its security
+/// too, as the reader reads it; PDFium reads such a file as one that isn't
+/// encrypted, and draws it.
+///
+/// A host with a source of the reader's own kind
+/// ([`ByteSource`](pdf_structure::read::ByteSource)) gives it to any backend
+/// as [`AsRenderSource`].
 ///
 /// ```
 /// use std::sync::Arc;
@@ -202,6 +213,48 @@ fn open_err(err: Error) -> BackendError {
     match refusal {
         Some(reason) => BackendError::refused(reason, err),
         None => BackendError::custom(err),
+    }
+}
+
+/// A reader's byte source ([`ByteSource`]) as a render backend's
+/// ([`RenderSource`]): what a host that reads a file through
+/// [`from_bytes`](crate::from_bytes) by a source of its own gives
+/// [`RenderBackend::open_source`], with one implementation for both.
+///
+/// The two traits read alike (`len`, `whole`, `read_at`); this forwards
+/// each. What a `ByteSource` says beside them (its first window, whether its
+/// file changed) isn't asked through a `RenderSource`: a [`Pdf`](crate::Pdf)
+/// opened from the source itself, which is a [`RenderedDoc`] too, keeps
+/// them.
+///
+/// ```
+/// use std::sync::Arc;
+/// use pdfs::prelude::*;
+/// use pdfs::AsRenderSource;
+///
+/// let mut doc = Document::new();
+/// doc.add_page(Rect::new(0.0, 0.0, 72.0, 72.0));
+/// // Any `ByteSource`: a host's segmented buffer, a file read by position.
+/// let source: Vec<u8> = doc.to_bytes().unwrap();
+///
+/// let backend: &dyn RenderBackend = &RustBackend::new();
+/// let rendered = backend.open_source(Arc::new(AsRenderSource(source)), None).unwrap();
+/// assert_eq!(rendered.page_count(), 1);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AsRenderSource<S>(pub S);
+
+impl<S: ByteSource> RenderSource for AsRenderSource<S> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn whole(&self) -> Option<&[u8]> {
+        self.0.whole()
+    }
+
+    fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
+        self.0.read_at(range)
     }
 }
 
@@ -377,10 +430,16 @@ mod tests {
         let backend = RustBackend::new();
         let refusal = |bytes: &[u8]| {
             let err = backend.open_bytes(Arc::from(bytes), None).err().unwrap();
-            let BackendError::Refused { reason, source } = &err else {
+            let BackendError::Refused { reason, error } = &err else {
                 panic!("not refused: {err}");
             };
-            (*reason, source.to_string())
+            // The message is whole: the reason, then the reader's words.
+            assert_eq!(
+                err.to_string(),
+                format!("the document was refused: {reason}: {error}")
+            );
+            assert!(std::error::Error::source(&err).is_none());
+            (*reason, error.to_string())
         };
 
         // Not a PDF, and a PDF with a catalog and no pages: its format.
@@ -425,14 +484,28 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(with_password.refusal(), Some(Refusal::Security));
-        let BackendError::Refused { source, .. } = &with_password else {
+        let BackendError::Refused { error, .. } = &with_password else {
             unreachable!()
         };
         assert!(
-            source
+            error
                 .downcast_ref::<pdf_structure::source::Unsupported>()
                 .is_some()
         );
+        // A `Pdf` opened without the backend says the same when a page is
+        // asked of it, where a locked one says locked.
+        let direct = Options::DEFAULT
+            .from_bytes(other_handler.as_slice())
+            .unwrap();
+        let direct: &dyn RenderedDoc = &direct;
+        assert_eq!(direct.page_count(), 0);
+        for err in [
+            direct.page_geom(0).err().unwrap(),
+            direct.render_page(0, &RenderOpts::dpi(72.0)).err().unwrap(),
+        ] {
+            assert_eq!(err.refusal(), Some(Refusal::Security), "{err}");
+            assert_eq!(err.to_string(), with_password.to_string());
+        }
 
         // A source that doesn't read: its source, the reader's error kept.
         let bytes = two_pages(64);
@@ -443,12 +516,94 @@ mod tests {
         });
         let err = backend.open_source(failing, None).err().unwrap();
         assert_eq!(err.refusal(), Some(Refusal::Source));
-        let BackendError::Refused { source, .. } = &err else {
+        let BackendError::Refused { error, .. } = &err else {
             unreachable!()
         };
         assert!(matches!(
-            source.downcast_ref::<Error>(),
+            error.downcast_ref::<Error>(),
             Some(Error::Read(read::Error::Io(_)))
         ));
+        assert!(err.to_string().ends_with("the disk went away"), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_converts_back_to_the_readers_error() {
+        let backend = RustBackend::new();
+        let from = |bytes: &[u8]| {
+            let err = backend.open_bytes(Arc::from(bytes), None).err().unwrap();
+            Error::from(err)
+        };
+        // The reader's own error, as `?` into `pdfs::Error` gave it before
+        // refusals were named.
+        let no_catalog = from(b"%PDF-1.7\nnot a valid pdf");
+        assert!(matches!(no_catalog, Error::NoCatalog), "{no_catalog:?}");
+        let no_pages = file(
+            "1.7",
+            &[(
+                1,
+                Body::Object(Object::from(dict! { "Type" => Object::name("Catalog") })),
+            )],
+            dict! { "Root" => Object::reference(1) },
+            Xref::Table,
+        );
+        let no_pages = from(&no_pages);
+        assert!(
+            matches!(no_pages, Error::Pages(pages::Error::NoPages)),
+            "{no_pages:?}"
+        );
+        assert_eq!(no_pages.to_string(), "the file has no pages");
+
+        // A refusal whose error isn't the reader's stays a backend's error,
+        // its message whole.
+        let other = BackendError::refused(Refusal::Source, io::Error::other("the disk went away"));
+        let other = Error::from(other);
+        assert!(matches!(
+            &other,
+            Error::Backend(BackendError::Refused {
+                reason: Refusal::Source,
+                ..
+            })
+        ));
+        assert_eq!(
+            other.to_string(),
+            "the document was refused: its bytes didn't read: the disk went away"
+        );
+    }
+
+    #[test]
+    fn a_byte_source_is_given_to_a_backend_as_a_render_source() {
+        let bytes = two_pages(64);
+        let backend: &dyn RenderBackend = &RustBackend::new();
+        let opts = RenderOpts::dpi(72.0);
+        let whole = backend
+            .open_bytes(Arc::from(bytes.as_slice()), None)
+            .unwrap();
+        // Bytes in memory, read where they are.
+        let in_memory = AsRenderSource(bytes.clone());
+        assert_eq!(RenderSource::whole(&in_memory), Some(bytes.as_slice()));
+        let doc = backend.open_source(Arc::new(in_memory), None).unwrap();
+        assert_eq!(
+            doc.render_page(0, &opts).unwrap(),
+            whole.render_page(0, &opts).unwrap()
+        );
+        // A source read by position, through both traits' `read_at`.
+        struct ByPosition(Vec<u8>);
+        impl ByteSource for ByPosition {
+            fn len(&self) -> usize {
+                self.0.len()
+            }
+            fn read_at(&self, range: Range<usize>) -> io::Result<Cow<'_, [u8]>> {
+                ByteSource::read_at(&self.0, range)
+            }
+        }
+        let by_position = AsRenderSource(ByPosition(bytes.clone()));
+        assert_eq!(RenderSource::len(&by_position), bytes.len());
+        assert!(RenderSource::whole(&by_position).is_none());
+        let doc = backend.open_source(Arc::new(by_position), None).unwrap();
+        assert_eq!(doc.page_count(), 2);
+        assert_eq!(
+            doc.render_page(1, &opts).unwrap(),
+            whole.render_page(1, &opts).unwrap()
+        );
     }
 }

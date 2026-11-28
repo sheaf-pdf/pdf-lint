@@ -404,12 +404,40 @@ pub fn read(data: &[u8]) -> Reached {
     answers(&pdf_capped, &mut Reached::default());
     #[cfg(feature = "raster")]
     {
-        use pdf_raster::RenderBackend;
+        use std::sync::Arc;
+
+        use pdf_raster::{Parts, RenderBackend, RenderOpts};
         let backend = crate::RustBackend::new().with_options(capped);
-        if let Ok(doc) = backend.open_bytes(std::sync::Arc::from(data), None)
-            && doc.page_count() > 0
-        {
-            let _ = doc.render_page(0, &pdf_raster::RenderOpts::page_width(16));
+        let opts = RenderOpts::page_width(16);
+        let whole = backend.open_bytes(Arc::from(data), None);
+        let drawn = match &whole {
+            Ok(doc) if doc.page_count() > 0 => Some(doc.render_page(0, &opts)),
+            _ => None,
+        };
+        // The same bytes as a source in two parts, read by position: opened
+        // or failed the same way, with the same pages, the first drawn the
+        // same. What a cap stops may differ, as a read by position reads an
+        // object at a time where bytes in memory are read where they are.
+        let cut = data.len() / 2;
+        let parts = Parts::new(vec![Arc::from(&data[..cut]), Arc::from(&data[cut..])]);
+        let in_parts = backend.open_source(Arc::new(parts), None);
+        let capped = |err: &pdf_raster::BackendError| err.refusal().is_none();
+        match (&whole, &in_parts) {
+            (Ok(whole), Ok(in_parts)) => {
+                assert_eq!(whole.page_count(), in_parts.page_count(), "pages in parts");
+                if let Some(Ok((pixmap, _))) = &drawn
+                    && let Ok((again, _)) = in_parts.render_page(0, &opts)
+                {
+                    assert_eq!(*pixmap, again, "a source in parts drawn");
+                }
+            }
+            (Err(whole), Err(in_parts)) => assert!(
+                whole.refusal() == in_parts.refusal() || capped(whole) || capped(in_parts),
+                "refused as {whole}, in parts as {in_parts}"
+            ),
+            (Err(err), Ok(_)) | (Ok(_), Err(err)) => {
+                assert!(capped(err), "opened one way and refused the other: {err}");
+            }
         }
     }
     edited(&pdf, &mut reached);

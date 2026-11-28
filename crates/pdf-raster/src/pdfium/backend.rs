@@ -1,15 +1,16 @@
 //! Safe [`RenderBackend`] adapter over [`pdfium_render`].
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use parking_lot::{FairMutex, FairMutexGuard};
+use parking_lot::lock_api::{GetThreadId, RawMutex, ReentrantMutex, ReentrantMutexGuard};
+use parking_lot::{RawFairMutex, RawThreadId};
 use pdf_gfx::{PageGeom, Rect, Rotation};
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfDocument, PdfMatrix, PdfPage, PdfPageIndex,
@@ -17,9 +18,8 @@ use pdfium_render::prelude::{
     PdfiumLibraryBindings, Pixels,
 };
 
-use crate::backend::{BackendError, Refusal, RenderBackend, RenderedDoc};
+use crate::backend::{BackendError, Refusal, RenderBackend, RenderedDoc, each_password};
 use crate::engine::check_cancelled;
-use crate::limits::Limits;
 use crate::opts::{RenderMedium, RenderOpts, RenderSummary, Viewport};
 use crate::pixmap::{PixelFormat, Pixmap};
 use crate::source::RenderSource;
@@ -107,7 +107,7 @@ pub enum Error {
     /// PDFium refused a document on open, and why, as its
     /// `FPDF_GetLastError` said. A host matching on [`BackendError`] sees
     /// [`LoadFailure::Password`] as [`BackendError::Locked`] and the rest as
-    /// [`BackendError::Refused`], this its source.
+    /// [`BackendError::Refused`], this the engine's error it holds.
     #[error("PDFium refused the document: {reason}")]
     DocumentLoad {
         /// PDFium's reason.
@@ -140,35 +140,45 @@ pub enum Error {
     /// Password contained an interior NUL byte.
     #[error("password contains an interior NUL byte")]
     InvalidPassword,
+    /// The [`RenderSource`] a document was opened from failed a read, or
+    /// panicked in one. PDFium is told only that a block didn't read and
+    /// goes on with what it has (a page drawn blank, a file called damaged),
+    /// so the adapter keeps the first failure and answers with it: an open
+    /// is [`BackendError::Refused`] with [`Refusal::Source`], and a page's
+    /// geometry or render then, and every one after it on that document,
+    /// fails with this.
+    #[error("the document's source didn't read: {detail}")]
+    Source {
+        /// The kind of the source's error.
+        kind: io::ErrorKind,
+        /// The source's error, as it said it.
+        detail: String,
+    },
 }
 
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 static GLOBAL_PDFIUM: OnceLock<&'static RawPdfium> = OnceLock::new();
 
+/// A fair mutex a thread may take again while it holds it.
+type Lock = ReentrantMutex<RawFairMutex, RawThreadId, ()>;
+
 /// The one lock over PDFium in the process ([`PdfiumBackend::lock`]): fair,
-/// so threads take it in the order they asked.
-static PDFIUM_LOCK: FairMutex<()> = parking_lot::const_fair_mutex(());
-
-/// What this thread holds of [`PDFIUM_LOCK`]: the guard, and how many
-/// [`PdfiumLock`]s share it, so the lock is released when the last is dropped
-/// in whatever order they are.
-struct Held {
-    depth: usize,
-    guard: Option<FairMutexGuard<'static, ()>>,
-}
-
-thread_local! {
-    static HELD: RefCell<Held> = const { RefCell::new(Held { depth: 0, guard: None }) };
-}
+/// so threads take it in the order they asked, and re-entrant, so a thread
+/// that holds it takes it again. It keeps the holding thread and its count
+/// itself and has no thread-local of the adapter's with a destructor, so it
+/// can be taken and given up while a thread's locals are being destroyed.
+static PDFIUM_LOCK: Lock = ReentrantMutex::from_raw(RawFairMutex::INIT, RawThreadId::INIT, ());
 
 /// The process-wide PDFium lock, held: [`PdfiumBackend::lock`] gives it, and
 /// dropping it gives the lock up.
 ///
-/// It's held by a thread, so it isn't `Send`; a thread that holds one may
-/// take more (each of the adapter's own calls does), and the lock is free
-/// again once the thread has dropped them all.
+/// It's held by a thread, so it's neither `Send` nor `Sync`; a thread that
+/// holds one may take more (each of the adapter's own calls does), and the
+/// lock is free again once the thread has dropped them all, in whatever
+/// order.
 #[must_use = "the lock is given up when this is dropped"]
 pub struct PdfiumLock {
+    _held: ReentrantMutexGuard<'static, RawFairMutex, RawThreadId, ()>,
     /// Held by the thread that took it: neither `Send` nor `Sync`.
     _thread: PhantomData<*const ()>,
 }
@@ -183,30 +193,10 @@ impl PdfiumLock {
     /// The lock, taken: at once where this thread holds it already, else
     /// after every thread that asked before.
     fn take() -> Self {
-        HELD.with(|held| {
-            let mut held = held.borrow_mut();
-            if held.depth == 0 {
-                held.guard = Some(PDFIUM_LOCK.lock());
-            }
-            held.depth += 1;
-        });
         Self {
+            _held: PDFIUM_LOCK.lock(),
             _thread: PhantomData,
         }
-    }
-}
-
-impl Drop for PdfiumLock {
-    fn drop(&mut self) {
-        // A thread's locals are gone only once the thread is ending, and
-        // their own drop has given the lock up by then.
-        let _ = HELD.try_with(|held| {
-            let mut held = held.borrow_mut();
-            held.depth = held.depth.saturating_sub(1);
-            if held.depth == 0 {
-                held.guard = None;
-            }
-        });
     }
 }
 
@@ -306,32 +296,86 @@ fn open_err(err: Error) -> BackendError {
     }
 }
 
+/// The first read a document's source failed, kept where the document sees
+/// it: PDFium's block callback has no way to say why a block didn't read.
+#[derive(Default)]
+struct Unread(Mutex<Option<Error>>);
+
+impl Unread {
+    /// The failure kept, if a read failed.
+    fn get(&self) -> Option<Error> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Keeps `err` as the failure, where none is kept yet.
+    fn keep(&self, err: &io::Error) {
+        let mut kept = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        kept.get_or_insert_with(|| Error::Source {
+            kind: err.kind(),
+            detail: err.to_string(),
+        });
+    }
+}
+
 /// A [`RenderSource`] as PDFium reads a file: by `Read` and `Seek`, each of
-/// its block requests one read, filled whole (PDFium takes a short count for
-/// a failed read).
+/// its block requests one read, filled whole (PDFium takes any count but
+/// zero for the whole block read). A read that fails, or panics (it runs
+/// inside PDFium's callback, which a panic can't unwind out of), is kept in
+/// `unread` and told to PDFium as a block that didn't read.
 struct SourceReader {
     source: Arc<dyn RenderSource>,
+    /// The source's length, asked once before PDFium is entered.
+    len: usize,
     pos: u64,
+    unread: Arc<Unread>,
+}
+
+impl SourceReader {
+    fn new(source: Arc<dyn RenderSource>, unread: Arc<Unread>) -> Self {
+        let len = source.len();
+        Self {
+            source,
+            len,
+            pos: 0,
+            unread,
+        }
+    }
+
+    /// Bytes `start..start + buf.len()` of the source, all of them.
+    fn fill(&self, start: usize, buf: &mut [u8]) -> io::Result<()> {
+        let range = start..start + buf.len();
+        let read = catch_unwind(AssertUnwindSafe(|| {
+            let read = self.source.read_at(range)?;
+            if read.len() != buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the source gave fewer bytes than it was asked for",
+                ));
+            }
+            buf.copy_from_slice(&read);
+            Ok(())
+        }));
+        read.unwrap_or_else(|_| Err(io::Error::other("the source's read panicked")))
+    }
 }
 
 impl Read for SourceReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let len = self.source.len();
         let Ok(start) = usize::try_from(self.pos) else {
             return Ok(0);
         };
-        if start >= len || buf.is_empty() {
+        if start >= self.len || buf.is_empty() {
             return Ok(0);
         }
-        let n = buf.len().min(len - start);
-        let read = self.source.read_at(start..start + n)?;
-        if read.len() != n {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the source gave fewer bytes than it was asked for",
-            ));
-        }
-        buf[..n].copy_from_slice(&read);
+        let n = buf.len().min(self.len - start);
+        self.fill(start, &mut buf[..n])
+            .inspect_err(|err| self.unread.keep(err))?;
         self.pos += n as u64;
         Ok(n)
     }
@@ -341,7 +385,7 @@ impl Seek for SourceReader {
     fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
         let pos = match to {
             SeekFrom::Start(pos) => Some(pos),
-            SeekFrom::End(by) => (self.source.len() as u64).checked_add_signed(by),
+            SeekFrom::End(by) => (self.len as u64).checked_add_signed(by),
             SeekFrom::Current(by) => self.pos.checked_add_signed(by),
         };
         self.pos = pos.ok_or_else(|| {
@@ -390,11 +434,28 @@ impl Seek for SourceReader {
 /// The lock is fair (threads take it in the order they asked, so a long walk
 /// that gives it up between pages lets a waiting render in) and a thread may
 /// take it again while it holds it, so the adapter's calls can be made under
-/// it. A host that made its `Pdfium` itself and gave it to
-/// [`PdfiumBackend::new`] has one library and one lock as long as every call
-/// it makes on that `Pdfium` is under this lock. A [`RenderSource`] an open
-/// was given is read inside PDFium's calls, under the lock: its `read_at`
-/// must not call PDFium or wait on a thread that does.
+/// it, and from a thread-local's destructor as its thread ends. A host that
+/// made its `Pdfium` itself and gave it to [`PdfiumBackend::new`] has one
+/// library and one lock as long as every call it makes on that `Pdfium` is
+/// under this lock.
+///
+/// A render holds the lock for PDFium's own work (a page's load, the draw,
+/// the page's close), not while it makes the pixel buffer or finishes it, so
+/// that much of each render runs beside the others.
+///
+/// # Sources
+///
+/// A [`RenderSource`] an open was given is read inside PDFium's calls, under
+/// the lock, for as long as the document lives: its `read_at` must not call
+/// PDFium or wait on a thread that does. PDFium takes a block that didn't
+/// read as a damaged file or as nothing to draw, so the adapter keeps the
+/// first read a source fails and answers with it instead of with what PDFium
+/// made of the gap: the open is [`BackendError::Refused`] with
+/// [`Refusal::Source`], and a page's geometry or render during which a read
+/// failed, and every one after it on that document, fails with
+/// [`Error::Source`]. A `read_at` that panics is caught and counted as a
+/// read that failed (a panic can't unwind through PDFium), unless panics
+/// abort.
 ///
 /// # Page Geometry Notes
 ///
@@ -507,10 +568,12 @@ impl PdfiumBackend {
         PdfiumLock::take()
     }
 
-    /// The document `reader` gives, loaded under the lock.
+    /// The document `reader` gives, loaded under the lock; `unread` is where
+    /// `reader` keeps a read its source failed.
     fn load<R: Read + Seek + Send + 'static>(
         &self,
         reader: R,
+        unread: Arc<Unread>,
         password: Option<&str>,
     ) -> Result<Box<dyn RenderedDoc>, BackendError> {
         if password.is_some_and(|pw| pw.contains('\0')) {
@@ -520,16 +583,24 @@ impl PdfiumBackend {
         // this load's code and no other thread's; taken before `doc` is
         // made, so a `doc` dropped on the way out is dropped under it.
         let _pdfium = self.lock();
-        let doc = self
-            .pdfium
-            .load_pdf_from_reader(reader, password)
-            .map_err(|err| open_err(map_doc_err(err)))?;
+        let loaded = self.pdfium.load_pdf_from_reader(reader, password);
+        // A read the source failed is the source's trouble, whatever PDFium
+        // made of the bytes it didn't get: a format error, or a document.
+        if let Some(err) = unread.get() {
+            return Err(BackendError::refused(Refusal::Source, err));
+        }
+        let doc = loaded.map_err(|err| open_err(map_doc_err(err)))?;
         let page_count = usize::try_from(doc.pages().len()).unwrap_or(0);
-        Ok(Box::new(PdfiumRenderedDoc {
+        let doc = PdfiumRenderedDoc {
             doc: Some(doc),
             page_count,
             geoms: Mutex::new(HashMap::new()),
-        }))
+            unread,
+        };
+        match doc.unread.get() {
+            Some(err) => Err(BackendError::refused(Refusal::Source, err)),
+            None => Ok(Box::new(doc)),
+        }
     }
 }
 
@@ -538,6 +609,8 @@ struct PdfiumRenderedDoc {
     doc: Option<PdfDocument<'static>>,
     page_count: usize,
     geoms: Mutex<HashMap<usize, PageGeom>>,
+    /// A read the document's source failed, once one has.
+    unread: Arc<Unread>,
 }
 
 impl Drop for PdfiumRenderedDoc {
@@ -547,14 +620,43 @@ impl Drop for PdfiumRenderedDoc {
     }
 }
 
+/// A loaded page, closed under the lock wherever it's dropped: so a render
+/// can read a page's geometry, give the lock up while it makes its buffer,
+/// and draw the page it loaded. Every other call on the page is made under
+/// the lock by whoever holds this.
+struct LoadedPage<'a>(Option<PdfPage<'a>>);
+
+impl<'a> LoadedPage<'a> {
+    fn get(&self) -> &PdfPage<'a> {
+        self.0.as_ref().expect("the page is held until drop")
+    }
+}
+
+impl Drop for LoadedPage<'_> {
+    fn drop(&mut self) {
+        let _pdfium = PdfiumLock::take();
+        self.0 = None;
+    }
+}
+
 impl PdfiumRenderedDoc {
     fn doc(&self) -> &PdfDocument<'static> {
         self.doc.as_ref().expect("the document is held until drop")
     }
 
-    /// Page `page_index`, loaded. The caller holds the lock, from before
-    /// this call until the page is dropped.
-    fn page(&self, page_index: usize) -> Result<PdfPage<'_>, BackendError> {
+    /// `result`, unless the document's source has failed a read: what PDFium
+    /// made without the bytes (a page it couldn't load, a box it defaulted,
+    /// a page drawn blank) isn't the document's, so the failure is the
+    /// answer, then and for every call after.
+    fn unless_unread<T>(&self, result: Result<T, BackendError>) -> Result<T, BackendError> {
+        match self.unread.get() {
+            Some(err) => Err(BackendError::custom(err)),
+            None => result,
+        }
+    }
+
+    /// Page `page_index`, loaded. The caller holds the lock.
+    fn page(&self, page_index: usize) -> Result<LoadedPage<'_>, BackendError> {
         let out_of_bounds = || BackendError::PageOutOfBounds {
             page_index,
             page_count: self.page_count,
@@ -563,12 +665,13 @@ impl PdfiumRenderedDoc {
             return Err(out_of_bounds());
         }
         let idx = PdfPageIndex::try_from(page_index).map_err(|_| out_of_bounds())?;
-        self.doc().pages().get(idx).map_err(|e| {
+        let page = self.doc().pages().get(idx).map_err(|e| {
             BackendError::custom(Error::PageLoad {
                 page_index,
                 detail: e.to_string(),
             })
-        })
+        });
+        self.unless_unread(page).map(|page| LoadedPage(Some(page)))
     }
 
     /// A page's geometry as it was read before, if it was.
@@ -581,17 +684,39 @@ impl PdfiumRenderedDoc {
     }
 
     /// `page`'s geometry, read and kept. The caller holds the lock.
-    fn read_geom(&self, page_index: usize, page: &PdfPage<'_>) -> PageGeom {
+    fn read_geom(&self, page_index: usize, page: &PdfPage<'_>) -> Result<PageGeom, BackendError> {
         if let Some(geom) = self.known_geom(page_index) {
-            return geom;
+            return Ok(geom);
         }
-        let geom = extract_pdf_page_geom(page);
+        let geom = self.unless_unread(Ok(extract_pdf_page_geom(page)))?;
         let mut geoms = self
             .geoms
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         geoms.insert(page_index, geom);
-        geom
+        Ok(geom)
+    }
+
+    /// What `draw` makes of page `page_index`, under the lock from the
+    /// page's load (unless `loaded` is it already) to its close, the lock
+    /// given up before this returns.
+    fn drawn<T>(
+        &self,
+        page_index: usize,
+        loaded: Option<LoadedPage<'_>>,
+        opts: &RenderOpts,
+        draw: impl FnOnce(&PdfPage<'_>) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let _pdfium = PdfiumLock::take();
+        // A render that waited its turn may have been cancelled meanwhile.
+        check_cancelled(opts).map_err(BackendError::Raster)?;
+        let page = match loaded {
+            Some(page) => page,
+            None => self.page(page_index)?,
+        };
+        let drawn = draw(page.get());
+        drop(page);
+        self.unless_unread(drawn)
     }
 }
 
@@ -612,7 +737,7 @@ impl RenderedDoc for PdfiumRenderedDoc {
         }
         let _pdfium = PdfiumLock::take();
         let page = self.page(page_index)?;
-        Ok(self.read_geom(page_index, &page))
+        self.read_geom(page_index, page.get())
     }
 
     fn render_page(
@@ -634,12 +759,21 @@ impl RenderedDoc for PdfiumRenderedDoc {
             });
         }
 
-        // Held from the page's load to its drop at the end of the render.
-        let _pdfium = PdfiumLock::take();
-        // A render that waited its turn may have been cancelled meanwhile.
-        check_cancelled(opts).map_err(BackendError::Raster)?;
-        let page = self.page(page_index)?;
-        let geom = self.read_geom(page_index, &page);
+        // The lock is held for PDFium's own work alone (the page's load, its
+        // geometry where that isn't known yet, the draw, the page's close),
+        // not while the pixel buffer is made and filled before the draw or
+        // finished after it: renders on other threads wait for no more.
+        let mut loaded = None;
+        let geom = match self.known_geom(page_index) {
+            Some(geom) => geom,
+            None => {
+                let _pdfium = PdfiumLock::take();
+                let page = self.page(page_index)?;
+                let geom = self.read_geom(page_index, page.get())?;
+                loaded = Some(page);
+                geom
+            }
+        };
         // PDFium always ignores `/UserUnit`, so resolve `Viewport::Dpi` under
         // PDFium's unscaled user-unit policy (`Rules::Pdfium`).
         let resolved = opts
@@ -656,7 +790,7 @@ impl RenderedDoc for PdfiumRenderedDoc {
         let h_px = Pixels::try_from(resolved.height)
             .map_err(|_| BackendError::Raster(crate::Error::Limit(crate::LimitKind::Dimensions)))?;
 
-        let [br, bg, bb, ba] = opts.background.unwrap_or([0, 0, 0, 0]);
+        let background = opts.background.unwrap_or([0, 0, 0, 0]);
         let want_bgra = opts.format == PixelFormat::Bgra8;
 
         let mut cfg = PdfRenderConfig::new()
@@ -670,16 +804,14 @@ impl RenderedDoc for PdfiumRenderedDoc {
 
         cfg = configure_viewport_render(cfg, opts, &geom, &resolved, w_px, h_px)?;
 
-        let pixmap = render_into_pixmap(
-            &page,
+        let pixmap = self.render_into_pixmap(
+            page_index,
+            loaded,
+            opts,
             cfg,
-            resolved.width,
-            resolved.height,
-            w_px,
-            h_px,
-            [br, bg, bb, ba],
-            opts.format,
-            &opts.limits,
+            (resolved.width, resolved.height),
+            (w_px, h_px),
+            background,
         )?;
         Ok((pixmap, RenderSummary::unreported()))
     }
@@ -753,97 +885,106 @@ fn configure_viewport_render(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn render_into_pixmap(
-    page: &PdfPage<'_>,
-    cfg: PdfRenderConfig,
-    width: u32,
-    height: u32,
-    w_px: Pixels,
-    h_px: Pixels,
-    [br, bg, bb, ba]: [u8; 4],
-    format: PixelFormat,
-    limits: &Limits,
-) -> Result<Pixmap, BackendError> {
-    let pixel_count = (width as usize) * (height as usize);
-    let fill = if format == PixelFormat::Bgra8 {
-        [bb, bg, br, ba]
-    } else {
-        [br, bg, bb, ba]
-    };
-    // Pre-fill a single tightly packed pixel buffer directly in Rust so overhang
-    // tiles are cleared cleanly and `Rgba8` / `Bgra8` require zero extra copies!
-    let byte_len = pixel_count * 4;
-    let mut buf = if fill == [0, 0, 0, 0] {
-        vec![0_u8; byte_len]
-    } else if fill == [255, 255, 255, 255] {
-        vec![255_u8; byte_len]
-    } else {
-        let mut v = vec![0_u8; byte_len];
-        for px in v.as_chunks_mut::<4>().0 {
-            *px = fill;
-        }
-        v
-    };
-    let cfg = cfg.clear_before_rendering(false);
-    {
-        let mut bitmap =
-            PdfBitmap::from_bytes(w_px, h_px, PdfBitmapFormat::BGRA, buf.as_mut_slice())
-                .map_err(BackendError::custom)?;
-        page.render_into_bitmap_with_config(&mut bitmap, &cfg)
-            .map_err(BackendError::custom)?;
+/// `buf`'s color channels multiplied by its alpha, in place.
+fn premultiply(buf: &mut [u8]) {
+    for px in buf.as_chunks_mut::<4>().0 {
+        let a = u16::from(px[3]);
+        px[0] = ((u16::from(px[0]) * a + 127) / 255) as u8;
+        px[1] = ((u16::from(px[1]) * a + 127) / 255) as u8;
+        px[2] = ((u16::from(px[2]) * a + 127) / 255) as u8;
     }
-    if format == PixelFormat::Rgba8Premul {
-        for px in buf.as_chunks_mut::<4>().0 {
-            let a = u16::from(px[3]);
-            px[0] = ((u16::from(px[0]) * a + 127) / 255) as u8;
-            px[1] = ((u16::from(px[1]) * a + 127) / 255) as u8;
-            px[2] = ((u16::from(px[2]) * a + 127) / 255) as u8;
-        }
-    }
-    Pixmap::from_bytes(width, height, format, buf, limits).map_err(BackendError::Raster)
 }
 
-#[cfg(target_arch = "wasm32")]
-#[allow(clippy::too_many_arguments)]
-fn render_into_pixmap(
-    page: &PdfPage<'_>,
-    cfg: PdfRenderConfig,
-    width: u32,
-    height: u32,
-    w_px: Pixels,
-    h_px: Pixels,
-    [br, bg, bb, ba]: [u8; 4],
-    format: PixelFormat,
-    limits: &Limits,
-) -> Result<Pixmap, BackendError> {
-    let cfg = cfg
-        .set_reverse_byte_order(true)
-        .clear_before_rendering(true)
-        .set_clear_color(pdfium_render::prelude::PdfColor::new(br, bg, bb, ba));
-    let mut bitmap =
-        PdfBitmap::empty(w_px, h_px, PdfBitmapFormat::BGRA).map_err(BackendError::custom)?;
-    page.render_into_bitmap_with_config(&mut bitmap, &cfg)
-        .map_err(BackendError::custom)?;
-    let mut buf = bitmap.as_rgba_bytes();
-    match format {
-        PixelFormat::Rgba8 => {}
-        PixelFormat::Bgra8 => {
-            for px in buf.as_chunks_mut::<4>().0 {
-                px.swap(0, 2);
+impl PdfiumRenderedDoc {
+    /// Page `page_index` drawn under `cfg` over `background`, as a pixmap of
+    /// `opts.format`. PDFium draws straight into the pixmap's own buffer,
+    /// made and filled before the lock is taken and finished after it's
+    /// given up.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_pixmap(
+        &self,
+        page_index: usize,
+        loaded: Option<LoadedPage<'_>>,
+        opts: &RenderOpts,
+        cfg: PdfRenderConfig,
+        (width, height): (u32, u32),
+        (w_px, h_px): (Pixels, Pixels),
+        [br, bg, bb, ba]: [u8; 4],
+    ) -> Result<Pixmap, BackendError> {
+        let pixel_count = (width as usize) * (height as usize);
+        let fill = if opts.format == PixelFormat::Bgra8 {
+            [bb, bg, br, ba]
+        } else {
+            [br, bg, bb, ba]
+        };
+        // Pre-fill a single tightly packed pixel buffer directly in Rust so overhang
+        // tiles are cleared cleanly and `Rgba8` / `Bgra8` require zero extra copies!
+        let byte_len = pixel_count * 4;
+        let mut buf = if fill == [0, 0, 0, 0] {
+            vec![0_u8; byte_len]
+        } else if fill == [255, 255, 255, 255] {
+            vec![255_u8; byte_len]
+        } else {
+            let mut v = vec![0_u8; byte_len];
+            for px in v.as_chunks_mut::<4>().0 {
+                *px = fill;
             }
+            v
+        };
+        let cfg = cfg.clear_before_rendering(false);
+        self.drawn(page_index, loaded, opts, |page| {
+            let mut bitmap =
+                PdfBitmap::from_bytes(w_px, h_px, PdfBitmapFormat::BGRA, buf.as_mut_slice())
+                    .map_err(BackendError::custom)?;
+            page.render_into_bitmap_with_config(&mut bitmap, &cfg)
+                .map_err(BackendError::custom)
+        })?;
+        if opts.format == PixelFormat::Rgba8Premul {
+            premultiply(&mut buf);
         }
-        PixelFormat::Rgba8Premul => {
-            for px in buf.as_chunks_mut::<4>().0 {
-                let a = u16::from(px[3]);
-                px[0] = ((u16::from(px[0]) * a + 127) / 255) as u8;
-                px[1] = ((u16::from(px[1]) * a + 127) / 255) as u8;
-                px[2] = ((u16::from(px[2]) * a + 127) / 255) as u8;
-            }
-        }
+        Pixmap::from_bytes(width, height, opts.format, buf, &opts.limits)
+            .map_err(BackendError::Raster)
     }
-    Pixmap::from_bytes(width, height, format, buf, limits).map_err(BackendError::Raster)
+
+    /// Page `page_index` drawn under `cfg` over `background`, as a pixmap of
+    /// `opts.format`. PDFium draws into a bitmap of its own, copied out
+    /// under the lock and finished after it's given up.
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_pixmap(
+        &self,
+        page_index: usize,
+        loaded: Option<LoadedPage<'_>>,
+        opts: &RenderOpts,
+        cfg: PdfRenderConfig,
+        (width, height): (u32, u32),
+        (w_px, h_px): (Pixels, Pixels),
+        [br, bg, bb, ba]: [u8; 4],
+    ) -> Result<Pixmap, BackendError> {
+        let cfg = cfg
+            .set_reverse_byte_order(true)
+            .clear_before_rendering(true)
+            .set_clear_color(pdfium_render::prelude::PdfColor::new(br, bg, bb, ba));
+        let mut buf = self.drawn(page_index, loaded, opts, |page| {
+            let mut bitmap = PdfBitmap::empty(w_px, h_px, PdfBitmapFormat::BGRA)
+                .map_err(BackendError::custom)?;
+            page.render_into_bitmap_with_config(&mut bitmap, &cfg)
+                .map_err(BackendError::custom)?;
+            Ok(bitmap.as_rgba_bytes())
+        })?;
+        match opts.format {
+            PixelFormat::Rgba8 => {}
+            PixelFormat::Bgra8 => {
+                for px in buf.as_chunks_mut::<4>().0 {
+                    px.swap(0, 2);
+                }
+            }
+            PixelFormat::Rgba8Premul => premultiply(&mut buf),
+        }
+        Pixmap::from_bytes(width, height, opts.format, buf, &opts.limits)
+            .map_err(BackendError::Raster)
+    }
 }
 
 impl RenderBackend for PdfiumBackend {
@@ -856,7 +997,7 @@ impl RenderBackend for PdfiumBackend {
         bytes: Arc<[u8]>,
         password: Option<&str>,
     ) -> Result<Box<dyn RenderedDoc>, BackendError> {
-        self.load(Cursor::new(bytes), password)
+        self.load(Cursor::new(bytes), Arc::default(), password)
     }
 
     /// Opens `source` where it is, through PDFium's custom file access:
@@ -867,7 +1008,24 @@ impl RenderBackend for PdfiumBackend {
         source: Arc<dyn RenderSource>,
         password: Option<&str>,
     ) -> Result<Box<dyn RenderedDoc>, BackendError> {
-        self.load(SourceReader { source, pos: 0 }, password)
+        let unread = Arc::<Unread>::default();
+        self.load(
+            SourceReader::new(source, Arc::clone(&unread)),
+            unread,
+            password,
+        )
+    }
+
+    /// Tries each password on `source` where it is, by
+    /// [`open_source`](RenderBackend::open_source): no try copies the whole.
+    fn open_source_with_passwords(
+        &self,
+        source: Arc<dyn RenderSource>,
+        passwords: &[&str],
+    ) -> Result<Box<dyn RenderedDoc>, BackendError> {
+        each_password(passwords, |password| {
+            self.open_source(Arc::clone(&source), password)
+        })
     }
 }
 
@@ -953,7 +1111,7 @@ mod tests {
         ));
         assert_eq!(LoadFailure::Password.refusal(), None);
 
-        // The file's own trouble: refused, named, PDFium's code its source.
+        // The file's own trouble: refused, named, PDFium's code kept.
         for (code, refusal, failure) in [
             (
                 PdfiumInternalError::FormatError,
@@ -983,17 +1141,19 @@ mod tests {
         ] {
             let err = internal(code);
             assert_eq!(err.refusal(), Some(refusal));
-            let BackendError::Refused { source, .. } = &err else {
+            let BackendError::Refused { error, .. } = &err else {
                 panic!("{err}");
             };
             assert_eq!(
-                source.downcast_ref::<Error>(),
+                error.downcast_ref::<Error>(),
                 Some(&Error::DocumentLoad { reason: failure })
             );
         }
+        // The message is whole: the shared reason, then PDFium's own words.
         assert_eq!(
             internal(PdfiumInternalError::FormatError).to_string(),
-            "the document was refused: it isn't a PDF the engine can read"
+            "the document was refused: it isn't a PDF the engine can read: \
+             PDFium refused the document: a format error (FPDF_ERR_FORMAT)"
         );
         assert_eq!(
             Error::DocumentLoad {
@@ -1022,10 +1182,7 @@ mod tests {
             Arc::from(&whole[50..51]),
             Arc::from(&whole[51..]),
         ]);
-        let mut reader = SourceReader {
-            source: Arc::new(parts),
-            pos: 0,
-        };
+        let mut reader = SourceReader::new(Arc::new(parts), Arc::default());
         // A block across every part is filled whole by one read.
         let mut block = [0_u8; 120];
         assert_eq!(reader.seek(SeekFrom::Start(40)).unwrap(), 40);
@@ -1047,21 +1204,127 @@ mod tests {
     }
 
     #[test]
-    fn a_sources_error_is_the_reads() {
-        struct Failing;
+    fn a_read_the_source_fails_is_kept_and_the_first_stays() {
+        /// Fails each read with its number, and panics in the third.
+        struct Failing(AtomicUsize);
         impl RenderSource for Failing {
             fn len(&self) -> usize {
                 64
             }
             fn read_at(&self, _: std::ops::Range<usize>) -> io::Result<std::borrow::Cow<'_, [u8]>> {
-                Err(io::Error::other("gone"))
+                match self.0.fetch_add(1, Ordering::SeqCst) {
+                    2 => panic!("the source's own trouble"),
+                    n => Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("gone at read {n}"),
+                    )),
+                }
             }
         }
-        let mut reader = SourceReader {
-            source: Arc::new(Failing),
-            pos: 0,
+        let unread = Arc::<Unread>::default();
+        let source = Arc::new(Failing(AtomicUsize::new(0)));
+        let mut reader = SourceReader::new(source, Arc::clone(&unread));
+        assert_eq!(unread.get(), None);
+        let err = reader.read(&mut [0; 8]).unwrap_err();
+        assert_eq!(err.to_string(), "gone at read 0");
+        let kept = Error::Source {
+            kind: io::ErrorKind::TimedOut,
+            detail: "gone at read 0".to_owned(),
         };
-        assert_eq!(reader.read(&mut [0; 8]).unwrap_err().to_string(), "gone");
+        assert_eq!(unread.get(), Some(kept.clone()));
+        assert_eq!(
+            kept.to_string(),
+            "the document's source didn't read: gone at read 0"
+        );
+        // A later failure doesn't take the first one's place, and a panic
+        // in a read is a read that failed, not an unwind into PDFium.
+        assert!(reader.read(&mut [0; 8]).is_err());
+        let panicked = reader.read(&mut [0; 8]).unwrap_err();
+        assert_eq!(panicked.to_string(), "the source's read panicked");
+        assert_eq!(unread.get(), Some(kept));
+
+        // A source that gives fewer bytes than asked has failed the read.
+        struct Short;
+        impl RenderSource for Short {
+            fn len(&self) -> usize {
+                64
+            }
+            fn read_at(&self, _: std::ops::Range<usize>) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+                Ok(std::borrow::Cow::Borrowed(&[1, 2, 3]))
+            }
+        }
+        let unread = Arc::<Unread>::default();
+        let mut reader = SourceReader::new(Arc::new(Short), Arc::clone(&unread));
+        let mut block = [0_u8; 8];
+        assert_eq!(
+            reader.read(&mut block).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(block, [0; 8]);
+        assert!(matches!(
+            unread.get(),
+            Some(Error::Source {
+                kind: io::ErrorKind::UnexpectedEof,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_lock_is_neither_send_nor_sync() {
+        // Each of these has one implementation for every type and one more
+        // for a type that is `Send` (or `Sync`): naming the method without
+        // saying which is ambiguous, so doesn't compile, for a type that is.
+        trait NotSend<A> {
+            fn held_by_its_thread() {}
+        }
+        impl<T: ?Sized> NotSend<()> for T {}
+        impl<T: ?Sized + Send> NotSend<u8> for T {}
+        trait NotSync<A> {
+            fn held_by_its_thread() {}
+        }
+        impl<T: ?Sized> NotSync<()> for T {}
+        impl<T: ?Sized + Sync> NotSync<u8> for T {}
+        <PdfiumLock as NotSend<_>>::held_by_its_thread();
+        <PdfiumLock as NotSync<_>>::held_by_its_thread();
+    }
+
+    #[test]
+    fn the_lock_is_taken_and_given_up_as_a_threads_locals_are_destroyed() {
+        /// What a host's per-thread cache of documents does as its thread
+        /// ends: takes the lock in a thread-local's destructor.
+        struct TakesOnDrop(Arc<AtomicUsize>);
+        impl Drop for TakesOnDrop {
+            fn drop(&mut self) {
+                let outer = PdfiumLock::take();
+                let inner = PdfiumLock::take();
+                drop(outer);
+                drop(inner);
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        thread_local! {
+            static EARLY: std::cell::RefCell<Option<TakesOnDrop>> =
+                const { std::cell::RefCell::new(None) };
+            static LATE: std::cell::RefCell<Option<TakesOnDrop>> =
+                const { std::cell::RefCell::new(None) };
+        }
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let worker = {
+            let dropped = Arc::clone(&dropped);
+            thread::spawn(move || {
+                // One local registered before this thread first takes the
+                // lock and one after, so one is destroyed on each side of
+                // whatever the lock keeps for the thread.
+                EARLY.with(|slot| *slot.borrow_mut() = Some(TakesOnDrop(Arc::clone(&dropped))));
+                drop(PdfiumLock::take());
+                LATE.with(|slot| *slot.borrow_mut() = Some(TakesOnDrop(dropped)));
+            })
+        };
+        worker.join().expect("the thread ended without a panic");
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        // And the lock is free after it.
+        drop(PdfiumLock::take());
     }
 
     #[test]

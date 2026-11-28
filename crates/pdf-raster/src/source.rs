@@ -17,6 +17,13 @@ use std::sync::Arc;
 /// `Arc<[u8]>`) and [`Parts`] are sources already; a file read by position,
 /// or a host's own segmented buffer, implements the trait.
 ///
+/// An engine reads a source from inside its own work, so a
+/// [`read_at`](Self::read_at) doesn't call back into the engine. One that
+/// fails fails the open or the page that asked for the bytes, as each
+/// engine's docs say; one that panics unwinds to the caller from the
+/// pure-Rust engine, and under `PdfiumBackend`, where a panic can't unwind
+/// through PDFium, is caught and counted as a read that failed.
+///
 /// ```
 /// use std::sync::Arc;
 /// use pdf_raster::{Parts, RenderSource};

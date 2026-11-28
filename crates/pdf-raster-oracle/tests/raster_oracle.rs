@@ -1266,6 +1266,25 @@ fn pdfium_opens_a_source_in_parts_names_its_refusals_and_holds_one_lock() {
         bytes.len()
     );
     drop(p_doc);
+    // With passwords to try too, in both engines: none of them copies the source.
+    for backend in [&pdfium as &dyn RenderBackend, &rust] {
+        let counted = Arc::new(CountedSource {
+            parts: split(&[bytes.len() / 2]),
+            read: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let counted_dyn: Arc<dyn RenderSource> = counted.clone();
+        let doc = backend
+            .open_source_with_passwords(counted_dyn, &["one", "two"])
+            .unwrap();
+        let _ = doc.render_page(0, &opts).unwrap();
+        let read = counted.read.load(Ordering::SeqCst);
+        assert!(
+            read < bytes.len() / 2,
+            "{}: {read} of {} bytes read",
+            backend.name(),
+            bytes.len()
+        );
+    }
 
     // A source's passwords, as bytes'.
     let mut locked = Document::new();
@@ -1293,21 +1312,32 @@ fn pdfium_opens_a_source_in_parts_names_its_refusals_and_holds_one_lock() {
     assert_eq!(opened.page_count(), 1);
     drop(opened);
 
-    // What isn't a PDF is refused for its format by both engines, PDFium's code its source.
+    // What isn't a PDF is refused for its format by both engines, PDFium's code kept
+    // and each engine's own words in the message.
     let garbage: Arc<[u8]> = Arc::from(&b"%PDF-1.7\nnot a valid pdf"[..]);
     let refused = pdfium.open_bytes(garbage.clone(), None).err().unwrap();
     assert_eq!(refused.refusal(), Some(Refusal::Format));
-    let BackendError::Refused { source, .. } = &refused else {
+    let BackendError::Refused { error, .. } = &refused else {
         unreachable!()
     };
     assert_eq!(
-        source.downcast_ref::<PdfiumError>(),
+        error.downcast_ref::<PdfiumError>(),
         Some(&PdfiumError::DocumentLoad {
             reason: LoadFailure::Format
         })
     );
+    assert_eq!(
+        refused.to_string(),
+        "the document was refused: it isn't a PDF the engine can read: \
+         PDFium refused the document: a format error (FPDF_ERR_FORMAT)"
+    );
     let refused = rust.open_bytes(garbage, None).err().unwrap();
     assert_eq!(refused.refusal(), Some(Refusal::Format));
+    assert_eq!(
+        refused.to_string(),
+        "the document was refused: it isn't a PDF the engine can read: \
+         the trailer's /Root names no catalog"
+    );
 
     // Another security handler's file: refused for its security by both, with or
     // without a password, never asked for one.
@@ -1414,4 +1444,210 @@ fn pdfium_opens_a_source_in_parts_names_its_refusals_and_holds_one_lock() {
     for th in threads {
         th.join().unwrap();
     }
+}
+
+/// A source that reads until it's told to fail, and then fails every read or
+/// panics in it.
+struct FlakySource {
+    bytes: Vec<u8>,
+    gone: std::sync::atomic::AtomicBool,
+    panics: bool,
+}
+
+impl FlakySource {
+    fn over(bytes: &[u8], gone: bool, panics: bool) -> Arc<Self> {
+        Arc::new(Self {
+            bytes: bytes.to_vec(),
+            gone: std::sync::atomic::AtomicBool::new(gone),
+            panics,
+        })
+    }
+
+    fn go(&self, gone: bool) {
+        self.gone.store(gone, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl RenderSource for FlakySource {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn read_at(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        if self.gone.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(!self.panics, "the source panicked in a read");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the disk went away",
+            ));
+        }
+        self.bytes.read_at(range)
+    }
+}
+
+/// Pages of one color each, a stream no page draws between them, so that a
+/// page's objects are read when the page is, not with the file's ends.
+fn padded_pages(count: usize) -> Vec<u8> {
+    let mut doc = Document::new();
+    let mut seed = 0x9E37_79B9_u32;
+    for _ in 0..count {
+        let page = doc.add_page(Rect::new(0.0, 0.0, 72.0, 72.0));
+        page.fill_color(Color::rgb8([20, 120, 220]));
+        page.rect(0.0, 0.0, 72.0, 72.0);
+        page.paint(Paint::Fill);
+        let noise: Vec<u8> = (0..1 << 16)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        doc.structure_mut().add(Object::from(Stream::new(
+            dict! { "Type" => Object::name("Unused") },
+            noise,
+        )));
+    }
+    doc.to_bytes().unwrap()
+}
+
+#[test]
+#[ignore = "requires libpdfium (run via `just test-pdfium`)"]
+fn pdfium_and_rust_backends_say_a_source_that_fails_is_the_sources_trouble() {
+    let rust = RustBackend::new();
+    let pdfium = require_pdfium_backend();
+    let bytes = padded_pages(40);
+    let opts = RenderOpts::dpi(72.0);
+    let blue = Some([20, 120, 220, 255]);
+
+    // A source that gives nothing: refused for its source by both engines, the
+    // source's own words in the message, where PDFium itself says a format error.
+    for backend in [&pdfium as &dyn RenderBackend, &rust] {
+        let err = backend
+            .open_source(FlakySource::over(&bytes, true, false), None)
+            .err()
+            .unwrap();
+        assert_eq!(err.refusal(), Some(Refusal::Source), "{}", backend.name());
+        assert!(err.to_string().contains("the disk went away"), "{err}");
+    }
+    let err = pdfium
+        .open_source(FlakySource::over(&bytes, true, false), None)
+        .err()
+        .unwrap();
+    let BackendError::Refused { error, .. } = &err else {
+        unreachable!()
+    };
+    assert_eq!(
+        error.downcast_ref::<PdfiumError>(),
+        Some(&PdfiumError::Source {
+            kind: std::io::ErrorKind::TimedOut,
+            detail: "the disk went away".to_owned(),
+        })
+    );
+
+    // A source that reads for the open and fails after: a page not yet read is an
+    // error from both engines, never a blank page returned as drawn.
+    let source = FlakySource::over(&bytes, false, false);
+    let p_doc = pdfium.open_source(source.clone(), None).unwrap();
+    assert_eq!(
+        p_doc.render_page(3, &opts).unwrap().0.pixel_rgba8(36, 36),
+        blue
+    );
+    let known = p_doc.page_geom(3).unwrap();
+    source.go(true);
+    let unread = |err: BackendError| {
+        let BackendError::Backend(boxed) = &err else {
+            panic!("{err}");
+        };
+        assert!(
+            matches!(
+                boxed.downcast_ref::<PdfiumError>(),
+                Some(PdfiumError::Source { .. })
+            ),
+            "{err}"
+        );
+        err.to_string()
+    };
+    assert_eq!(
+        unread(p_doc.render_page(20, &opts).err().unwrap()),
+        "the document's source didn't read: the disk went away"
+    );
+    // The document isn't trusted after it, though the source reads again: what
+    // PDFium kept of the read that failed isn't known. A geometry read before stays.
+    source.go(false);
+    unread(p_doc.render_page(21, &opts).err().unwrap());
+    unread(p_doc.page_geom(22).err().unwrap());
+    assert_eq!(p_doc.page_geom(3).unwrap(), known);
+    drop(p_doc);
+
+    let source = FlakySource::over(&bytes, false, false);
+    let r_doc = rust.open_source(source.clone(), None).unwrap();
+    source.go(true);
+    let err = r_doc.render_page(20, &opts).err().unwrap();
+    assert!(
+        matches!(
+            &err,
+            BackendError::Raster(pdf_raster::Error::Unreadable(u))
+                if u.why == pdf_raster::pdf_objects::Why::Source
+        ),
+        "{err}"
+    );
+    // The pure-Rust engine reads the page again once the source does.
+    source.go(false);
+    assert_eq!(
+        r_doc.render_page(20, &opts).unwrap().0.pixel_rgba8(36, 36),
+        blue
+    );
+
+    // A source that panics in a read under PDFium is a read that failed, not an
+    // unwind through PDFium's callback (which aborts the process).
+    let source = FlakySource::over(&bytes, false, true);
+    let p_doc = pdfium.open_source(source.clone(), None).unwrap();
+    source.go(true);
+    assert_eq!(
+        unread(p_doc.render_page(20, &opts).err().unwrap()),
+        "the document's source didn't read: the source's read panicked"
+    );
+    source.go(false);
+    drop(p_doc);
+    // And the lock was given up by each failure: PDFium still opens and draws.
+    let whole = pdfium.open_bytes(Arc::from(bytes), None).unwrap();
+    assert_eq!(
+        whole.render_page(20, &opts).unwrap().0.pixel_rgba8(36, 36),
+        blue
+    );
+}
+
+#[test]
+#[ignore = "requires libpdfium (run via `just test-pdfium`)"]
+fn pdfium_document_kept_in_a_thread_local_closes_as_its_thread_ends() {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CACHE: RefCell<Vec<Box<dyn pdf_raster::RenderedDoc>>> =
+            const { RefCell::new(Vec::new()) };
+    }
+    let pdfium = require_pdfium_backend();
+    let bytes: Arc<[u8]> = Arc::from(padded_pages(2));
+    let worker = {
+        let bytes = bytes.clone();
+        thread::spawn(move || {
+            // The cache is the thread's first local, there before the thread's
+            // first call into the adapter, so it's destroyed after any of the
+            // adapter's or the lock's own: its documents close then.
+            CACHE.with(|cache| assert!(cache.borrow().is_empty()));
+            let doc = pdfium.open_bytes(bytes, None).unwrap();
+            assert_eq!(doc.page_count(), 2);
+            let source: Arc<dyn RenderSource> =
+                Arc::new(Parts::new(vec![Arc::from(padded_pages(1))]));
+            let from_source = pdfium.open_source(source, None).unwrap();
+            CACHE.with(|cache| cache.borrow_mut().extend([doc, from_source]));
+        })
+    };
+    worker.join().expect("the thread ended without a panic");
+    // The lock is free after it, and PDFium still draws.
+    let doc = pdfium.open_bytes(bytes, None).unwrap();
+    let drawn = doc.render_page(0, &RenderOpts::dpi(72.0)).unwrap().0;
+    assert_eq!(drawn.pixel_rgba8(36, 36), Some([20, 120, 220, 255]));
 }
