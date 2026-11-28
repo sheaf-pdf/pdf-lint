@@ -32,6 +32,14 @@
 //!   cleanly via `FlateDecode` + PNG `Sub` prediction (preserving `/Mask`,
 //!   `/SMask`, and `/OC`) or pure-Rust baseline `DCTDecode` (`jpeg-encoder`)
 //!   with no EXIF, XMP, IPTC, comment, or JBIG2 dictionary leakage.
+//! - **A JPEG file passed through unchanged ([`wrap_jpeg`], [`wrap_jpeg_with`]):**
+//!   A baseline or progressive JPEG's bytes become a `/DCTDecode` Image
+//!   XObject as they are, nothing decoded and nothing encoded again, with
+//!   `/Width`, `/Height`, `/ColorSpace` and `/BitsPerComponent` read from the
+//!   frame header; a CMYK file's polarity is guessed from its Adobe segment
+//!   or said by the caller ([`JpegCmyk`]). A JPEG a PDF reader won't decode
+//!   (lossless, hierarchical, arithmetic-coded, 12-bit, two components) is
+//!   refused with a typed [`JpegRefused`].
 //! - **Bounded resources & third-party codec isolation ([`Limits`], [`Fault`]):**
 //!   Dimensions, pixel counts, and byte budgets are checked before allocating
 //!   buffers, and internal panics in third-party decoders (`zune-jpeg`,
@@ -128,7 +136,7 @@ pub use rgba::{
     decode_xobject_with,
 };
 pub use samples::{RawImage, SampleData};
-pub use wrap::wrap_jpeg;
+pub use wrap::{JpegCmyk, wrap_jpeg, wrap_jpeg_with};
 
 #[cfg(test)]
 mod doc_tests {
@@ -154,6 +162,8 @@ mod doc_tests {
         check::<DecodeOptions<'static>>();
         check::<EncodedImage>();
         check::<JpegColorSpace>();
+        check::<JpegRefused>();
+        check::<JpegCmyk>();
     }
 
     #[test]

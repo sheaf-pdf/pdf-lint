@@ -12,9 +12,9 @@ use pdf_objects::{
 
 use crate::inline_chain::decode_inline_standard;
 use crate::{
-    DecodeOptions, Fault, JpegColorSpace, Limits, decode_inline_with, decode_stream_with,
+    DecodeOptions, Fault, JpegCmyk, JpegColorSpace, Limits, decode_inline_with, decode_stream_with,
     decode_xobject_raw, decode_xobject_raw_with, decode_xobject_with, encode_jpeg,
-    encode_raw_flate, encode_rgba_flate, wrap_jpeg,
+    encode_raw_flate, encode_rgba_flate, wrap_jpeg, wrap_jpeg_with,
 };
 
 struct FuzzStore {
@@ -374,11 +374,21 @@ pub fn images(data: &[u8]) {
         assert_eq!(decoded.width(), jw);
         assert_eq!(decoded.height(), jh);
 
-        // What the encoder wrote wraps unchanged, and decodes to the same
-        // size as its own dictionary's does.
+        // What the encoder wrote wraps unchanged. Told the samples are as a
+        // PDF holds them, as the encoder's are in each space, the wrapped
+        // stream is the encoder's own, so decodes to its pixels; left to
+        // guess, it differs by the `/Decode` it gives CMYK alone, and
+        // decodes to the same size.
         let bytes = stream.data.bytes().unwrap().to_vec();
+        let as_stored = wrap_jpeg_with(bytes.clone(), JpegCmyk::AsStored).unwrap();
+        assert_eq!(as_stored, stream);
         let wrapped = wrap_jpeg(bytes.clone()).unwrap();
         assert_eq!(wrapped.data.bytes(), Some(&bytes[..]));
+        assert_eq!(
+            wrapped.dict.get("Decode").is_some(),
+            jspace == JpegColorSpace::Cmyk
+        );
+        assert_eq!(wrapped == stream, jspace != JpegColorSpace::Cmyk);
         let rewrapped = decode_stream_with(
             &empty,
             &wrapped,

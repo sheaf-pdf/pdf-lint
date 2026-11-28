@@ -94,7 +94,9 @@ fn frame(bytes: &[u8]) -> Result<Frame, JpegRefused> {
             0xC3 | 0xC5..=0xC7 | 0xC8..=0xCB | 0xCD..=0xCF | 0xDE => {
                 return Err(JpegRefused::Process(marker));
             }
-            0xE0 if payload.starts_with(b"JFIF\0") => jfif = true,
+            // A JFIF segment as libjpeg counts one: its identifier at the
+            // start of at least the 14 bytes its fixed fields come to.
+            0xE0 if payload.len() >= 14 && payload.starts_with(b"JFIF\0") => jfif = true,
             0xEE if payload.len() >= 12 && payload.starts_with(b"Adobe") => {
                 adobe = Some(payload[11]);
             }
@@ -108,6 +110,26 @@ fn frame(bytes: &[u8]) -> Result<Frame, JpegRefused> {
         adobe,
         ..frame
     })
+}
+
+/// How a four-component JPEG holds its CMYK samples, which the file itself
+/// doesn't say: what [`wrap_jpeg_with`] is told, so that the dictionary it
+/// writes reads them the right way up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum JpegCmyk {
+    /// Guessed from the file, as [`wrap_jpeg`] does: inverted where it has
+    /// an Adobe `APP14` segment, as Adobe's applications write CMYK, and as
+    /// stored where it has none.
+    #[default]
+    ByAdobeSegment,
+    /// Inverted, 0 for full ink, whatever segments the file has: the
+    /// dictionary gets `/Decode [1 0 1 0 1 0 1 0]`.
+    Inverted,
+    /// As a PDF holds them, 0 for no ink, whatever segments the file has:
+    /// no `/Decode`. What [`encode_jpeg_bytes`](crate::encode_jpeg_bytes)
+    /// writes, Adobe segment and all.
+    AsStored,
 }
 
 /// Wraps a JPEG file's bytes as a PDF Image XObject [`Stream`] with no change
@@ -131,10 +153,12 @@ fn frame(bytes: &[u8]) -> Result<Frame, JpegRefused> {
 /// - **Four** are `/DeviceCMYK`. A file with an Adobe `APP14` segment is
 ///   taken to hold them as Adobe's applications write them, inverted (0 for
 ///   full ink), and is given `/Decode [1 0 1 0 1 0 1 0]`; one without is taken
-///   as stored. The file doesn't say which, so a caller that knows its
-///   samples aren't inverted (they came from
+///   as stored. The file doesn't say which, and a reader inverts nothing of
+///   its own accord, so a caller that knows how its samples are held says so
+///   with [`wrap_jpeg_with`]: a file from
 ///   [`encode_jpeg_bytes`](crate::encode_jpeg_bytes), which writes a PDF's
-///   own polarity) removes `/Decode` from the stream's dictionary.
+///   own polarity under an Adobe segment, is [`JpegCmyk::AsStored`], and
+///   wrapped by this function it would draw inverted.
 ///
 /// The dictionary is the caller's to add to (`/SMask`, `/Interpolate`, an
 /// `/ICCBased` `/ColorSpace` made from the file's profile).
@@ -161,6 +185,28 @@ fn frame(bytes: &[u8]) -> Result<Frame, JpegRefused> {
 /// gives a width or a height of zero (a height written after the scan, in a
 /// `DNL` segment, among them).
 pub fn wrap_jpeg(jpeg: Vec<u8>) -> Result<Stream, EncodeError> {
+    wrap_jpeg_with(jpeg, JpegCmyk::ByAdobeSegment)
+}
+
+/// Wraps a JPEG file's bytes as [`wrap_jpeg`] does, a four-component file's
+/// CMYK samples held as `cmyk` says rather than as its segments suggest.
+/// `cmyk` changes nothing for a file of one or three components.
+///
+/// ```
+/// use pdf_images::{JpegCmyk, JpegColorSpace, encode_jpeg, encode_jpeg_bytes, wrap_jpeg_with};
+///
+/// // The crate's own encoder writes CMYK as a PDF holds it.
+/// let ink = [25, 51, 76, 102].repeat(8 * 8);
+/// let file = encode_jpeg_bytes(&ink, 8, 8, JpegColorSpace::Cmyk, 90).unwrap();
+/// let image = wrap_jpeg_with(file, JpegCmyk::AsStored).unwrap();
+/// assert!(image.dict.get("Decode").is_none());
+/// assert_eq!(image, encode_jpeg(&ink, 8, 8, JpegColorSpace::Cmyk, 90).unwrap());
+/// ```
+///
+/// # Errors
+///
+/// As [`wrap_jpeg`] fails.
+pub fn wrap_jpeg_with(jpeg: Vec<u8>, cmyk: JpegCmyk) -> Result<Stream, EncodeError> {
     let frame = frame(&jpeg)?;
     let (width, height) = (u32::from(frame.width), u32::from(frame.height));
     if width == 0 || height == 0 {
@@ -178,7 +224,12 @@ pub fn wrap_jpeg(jpeg: Vec<u8>) -> Result<Stream, EncodeError> {
     };
     d.set("ColorSpace", Object::name(space));
     d.set("BitsPerComponent", 8_i64);
-    if frame.components == 4 && frame.adobe.is_some() {
+    let inverted = match cmyk {
+        JpegCmyk::ByAdobeSegment => frame.adobe.is_some(),
+        JpegCmyk::Inverted => true,
+        JpegCmyk::AsStored => false,
+    };
+    if frame.components == 4 && inverted {
         let inverted: Vec<Object> = [1, 0, 1, 0, 1, 0, 1, 0].map(Object::from).into();
         d.set("Decode", inverted);
     }
@@ -247,7 +298,7 @@ mod tests {
         // it, inverted: the one entry more than the encoder's own.
         let pixels = vec![40_u8; 9 * 5 * 4];
         let file = encode_jpeg_bytes(&pixels, 9, 5, JpegColorSpace::Cmyk, 85).unwrap();
-        let mut wrapped = wrap_jpeg(file).unwrap();
+        let mut wrapped = wrap_jpeg(file.clone()).unwrap();
         let decode = wrapped.dict.remove("Decode").unwrap();
         let numbers: Vec<i64> = decode
             .as_array()
@@ -256,10 +307,49 @@ mod tests {
             .map(|n| n.as_integer().unwrap())
             .collect();
         assert_eq!(numbers, [1, 0, 1, 0, 1, 0, 1, 0]);
-        assert_eq!(
-            wrapped,
-            encode_jpeg(&pixels, 9, 5, JpegColorSpace::Cmyk, 85).unwrap()
-        );
+        let own = encode_jpeg(&pixels, 9, 5, JpegColorSpace::Cmyk, 85).unwrap();
+        assert_eq!(wrapped, own);
+        // Told that the samples are as a PDF holds them, as the encoder's
+        // are, it wraps them as the encoder does.
+        assert_eq!(wrap_jpeg_with(file, JpegCmyk::AsStored).unwrap(), own);
+    }
+
+    #[test]
+    fn the_encoders_cmyk_wrapped_as_stored_decodes_to_the_ink_it_was_given() {
+        use std::collections::HashMap;
+
+        use pdf_objects::{ObjectId, WithStreams};
+
+        use crate::{DecodeOptions, Limits, decode_stream_with};
+
+        // 30/200/60/10 of 255 ink: a strong magenta.
+        let ink = [30_u8, 200, 60, 10].repeat(16 * 16);
+        let file = encode_jpeg_bytes(&ink, 16, 16, JpegColorSpace::Cmyk, 95).unwrap();
+        let none = HashMap::<ObjectId, Object>::new();
+        let store = WithStreams::new(&none, |id: ObjectId, _: usize| {
+            Err(pdf_objects::Unreadable::new(
+                id,
+                pdf_objects::Why::Damaged,
+                "no stream",
+            ))
+        });
+        let pixel = |stream: &Stream| {
+            let lim = Limits::DEFAULT;
+            let opts = DecodeOptions::PDFIUM;
+            let image = decode_stream_with(store, stream, None, &opts, &lim, &mut ()).unwrap();
+            image.pixel(8, 8).unwrap()
+        };
+        let own = pixel(&encode_jpeg(&ink, 16, 16, JpegColorSpace::Cmyk, 95).unwrap());
+        // A magenta: much red and blue, little green.
+        assert!(own[0] > 150 && own[1] < 120 && own[2] > 90, "{own:?}");
+        let as_stored = wrap_jpeg_with(file.clone(), JpegCmyk::AsStored).unwrap();
+        assert_eq!(pixel(&as_stored), own);
+        // Guessed from its Adobe segment, or said to be inverted, the same
+        // bytes draw as the ink's inverse: near black.
+        for cmyk in [JpegCmyk::ByAdobeSegment, JpegCmyk::Inverted] {
+            let inverted = pixel(&wrap_jpeg_with(file.clone(), cmyk).unwrap());
+            assert!(inverted.iter().take(3).all(|&c| c < 40), "{inverted:?}");
+        }
     }
 
     #[test]
@@ -300,6 +390,26 @@ mod tests {
         let bare = wrap_jpeg(headers(&[(0xC0, &sof(8, &[1, 2, 3, 4]))])).unwrap();
         assert_eq!(name(&bare, "ColorSpace").as_deref(), Some("DeviceCMYK"));
         assert!(entry(&bare, "Decode").is_none());
+
+        // A caller that knows says which, whatever segments the file has;
+        // and it changes nothing for one component or three.
+        let with_adobe = headers(&[(0xEE, &adobe(2)), (0xC0, &sof(8, &[1, 2, 3, 4]))]);
+        let without = headers(&[(0xC0, &sof(8, &[1, 2, 3, 4]))]);
+        for file in [with_adobe, without] {
+            let inverted = wrap_jpeg_with(file.clone(), JpegCmyk::Inverted).unwrap();
+            assert!(entry(&inverted, "Decode").is_some());
+            let as_stored = wrap_jpeg_with(file, JpegCmyk::AsStored).unwrap();
+            assert!(entry(&as_stored, "Decode").is_none());
+        }
+        assert_eq!(JpegCmyk::default(), JpegCmyk::ByAdobeSegment);
+        for ids in [&[1][..], &[1, 2, 3]] {
+            let file = headers(&[(0xEE, &adobe(1)), (0xC0, &sof(8, ids))]);
+            for cmyk in [JpegCmyk::Inverted, JpegCmyk::AsStored] {
+                let wrapped = wrap_jpeg_with(file.clone(), cmyk).unwrap();
+                assert_eq!(wrapped, wrap_jpeg(file.clone()).unwrap());
+                assert!(entry(&wrapped, "Decode").is_none());
+            }
+        }
     }
 
     #[test]
@@ -318,8 +428,13 @@ mod tests {
         assert_eq!(transform(&[(0xEE, &adobe(1)), (0xC0, &rgb)]), None);
         assert_eq!(transform(&[(0xC0, &sof(8, &[1, 2, 3]))]), None);
         assert_eq!(transform(&[(0xC0, &sof(8, b"BGR"))]), None);
-        // An APP0 that isn't JFIF's (JFXX, say) doesn't say YCbCr.
+        // An APP0 that isn't JFIF's (JFXX, say) doesn't say YCbCr, nor does
+        // one that starts as JFIF's and is shorter than its fixed fields,
+        // which libjpeg doesn't count as one.
         assert_eq!(transform(&[(0xE0, b"JFXX\0\x10"), (0xC0, &rgb)]), Some(0));
+        assert_eq!(transform(&[(0xE0, b"JFIF\0"), (0xC0, &rgb)]), Some(0));
+        assert_eq!(transform(&[(0xE0, &JFIF[..13]), (0xC0, &rgb)]), Some(0));
+        assert_eq!(JFIF.len(), 14);
     }
 
     #[test]

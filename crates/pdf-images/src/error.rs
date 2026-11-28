@@ -83,9 +83,17 @@ pub enum EncodeError {
     #[error(transparent)]
     Flate(#[from] pdf_filters::Unencodable),
     /// A JPEG file's bytes can't be an Image XObject as they are
-    /// ([`wrap_jpeg`](crate::wrap_jpeg)).
+    /// ([`wrap_jpeg`](crate::wrap_jpeg),
+    /// [`wrap_jpeg_with`](crate::wrap_jpeg_with)).
     #[error("the JPEG can't be an image XObject as it is: {0}")]
-    Jpeg(#[from] JpegRefused),
+    Jpeg(JpegRefused),
+}
+
+/// The message says why, so the reason isn't the error's `source()` too.
+impl From<JpegRefused> for EncodeError {
+    fn from(why: JpegRefused) -> Self {
+        Self::Jpeg(why)
+    }
 }
 
 /// Why [`wrap_jpeg`](crate::wrap_jpeg) refused a file's bytes: they aren't a
